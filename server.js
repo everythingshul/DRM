@@ -21,6 +21,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 
+// Trust Render's proxy so req.secure works and cookies set correctly
+app.set('trust proxy', 1);
+
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '10mb' }));

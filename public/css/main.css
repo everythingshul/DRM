@@ -54,8 +54,23 @@ body.sb-collapsed #main-content{margin-left:var(--sb-cw)}
 .sb-head{display:flex;align-items:center;justify-content:space-between;
   padding:12px 10px;border-bottom:1px solid rgba(255,255,255,.1);min-height:56px;flex-shrink:0}
 .sb-logo{display:flex;align-items:center;gap:9px;overflow:hidden;flex:1;min-width:0}
-#sb-logo-img{width:34px;height:34px;object-fit:contain;flex-shrink:0;
-  filter:brightness(0) invert(1) drop-shadow(0 0 2px rgba(255,255,255,.2))}
+/* Logo — JPEG with white/light bg */
+.auth-logo {
+  height: 72px;
+  object-fit: contain;
+  margin-bottom: 18px;
+  /* Show as-is on white auth card — looks natural */
+}
+#sb-logo-img {
+  width: 36px;
+  height: 36px;
+  object-fit: contain;
+  flex-shrink: 0;
+  border-radius: 4px;
+  /* On dark sidebar: blend the white background into the sidebar color */
+  mix-blend-mode: luminosity;
+  opacity: 0.92;
+}
 .sb-title{color:#fff;font-size:15px;font-weight:700;white-space:nowrap;
   transition:opacity var(--tr)}
 #sidebar.collapsed .sb-title{opacity:0;width:0;overflow:hidden}

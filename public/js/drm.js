@@ -1,2816 +1,1249 @@
+'use strict';
+// DRM — Donor Relationship Manager
+// Single-file JS bundle
 
-// ===== api.js =====
-// public/js/api.js
-// Pages registry — declared first so page files can register before app.js loads
-const Pages = {};
+// ── Global ────────────────────────────────────────────────────────────────────
+window.DRM = { user: null, org: null, orgs: [] };
+let _currentPage = 'dashboard';
+let _allOrgs = [];
+let _redirecting = false; // prevent reload loops
 
-// Global state accessible to all page files
-window.DRM = {
-  user: null,
-  org: null,
-  orgs: []
-};
-
+// ── API ───────────────────────────────────────────────────────────────────────
 const API = {
   orgId: null,
 
   async req(method, path, data) {
-    const url = path.startsWith('/api') ? path : `/api${path}`;
+    const url = path.startsWith('/api') ? path : '/api' + path;
+    const token = localStorage.getItem('drm_token');
     const opts = {
       method,
-      headers: { 'Content-Type': 'application/json', 'x-org-id': API.orgId || '' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-org-id': API.orgId || '',
+        // Send token in header as fallback if cookie doesn't work
+        ...(token ? { 'Authorization': 'Bearer ' + token } : {})
+      },
       credentials: 'include'
     };
     if (data && method !== 'GET') opts.body = JSON.stringify(data);
-    const res = await fetch(url, opts);
-    if (res.status === 401) { window.location.href = '/'; throw new Error('Session expired'); }
+    let res;
+    try { res = await fetch(url, opts); } catch(e) { throw new Error('Network error: ' + e.message); }
+    if (res.status === 401) {
+      // Don't redirect if already on login, to prevent loops
+      if (!_redirecting) {
+        _redirecting = true;
+        showLogin();
+        _redirecting = false;
+      }
+      throw new Error('Session expired');
+    }
     const ct = res.headers.get('content-type') || '';
-    if (!ct.includes('application/json')) throw new Error('Unexpected response');
+    if (!ct.includes('json')) {
+      const txt = await res.text();
+      throw new Error('Server error (non-JSON): ' + txt.slice(0, 80));
+    }
     const json = await res.json();
     if (!res.ok) throw new Error(json.error || 'Request failed');
     return json;
   },
 
-  get:  (path)       => API.req('GET',    path),
-  post: (path, data) => API.req('POST',   path, data),
-  put:  (path, data) => API.req('PUT',    path, data),
-  del:  (path)       => API.req('DELETE', path),
+  get:  (p)    => API.req('GET',    p),
+  post: (p, d) => API.req('POST',   p, d),
+  put:  (p, d) => API.req('PUT',    p, d),
+  del:  (p)    => API.req('DELETE', p),
 
-  async downloadPost(path, filename) {
-    const res = await fetch(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-org-id': API.orgId || '' },
-      credentials: 'include', body: JSON.stringify({})
-    });
-    if (!res.ok) { const j = await res.json().catch(()=>{}); throw new Error(j?.error || 'Download failed'); }
-    const blob = await res.blob();
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = filename; a.click();
-    URL.revokeObjectURL(a.href);
-  },
-
-  async downloadGet(path, filename) {
-    const res = await fetch(path, {
-      headers: { 'x-org-id': API.orgId || '' }, credentials: 'include'
-    });
+  async dl(path, filename, method, body) {
+    const opts = {
+      method: method || 'GET',
+      headers: { 'x-org-id': API.orgId || '' },
+      credentials: 'include'
+    };
+    if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+    const res = await fetch(path, opts);
     if (!res.ok) throw new Error('Download failed');
     const blob = await res.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = filename; a.click();
-    URL.revokeObjectURL(a.href);
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   },
 
-  org: {
-    donors:           ()   => `/api/orgs/${API.orgId}/donors`,
-    donor:            (id) => `/api/orgs/${API.orgId}/donors/${id}`,
-    stats:            ()   => `/api/orgs/${API.orgId}/stats`,
-    emailSettings:    ()   => `/api/orgs/${API.orgId}/email-settings`,
-    kvitelSettings:   ()   => `/api/orgs/${API.orgId}/kvitel-settings`,
-    neighborhoods:    ()   => `/api/orgs/${API.orgId}/donors/meta/neighborhoods`,
-    labels:           ()   => `/api/orgs/${API.orgId}/donors/meta/labels`,
-    chargeFailures:   ()   => `/api/orgs/${API.orgId}/charge-failures`,
-    bankTx:           ()   => `/api/orgs/${API.orgId}/bank/transactions`,
-    scheduledEmails:  ()   => `/api/orgs/${API.orgId}/scheduled-emails`,
-    daf:              ()   => `/api/orgs/${API.orgId}/daf`,
-    verification:     ()   => `/api/orgs/${API.orgId}/donors/needs-verification`,
-    users:            ()   => `/api/orgs/${API.orgId}/users`,
-    loginLog:         ()   => `/api/orgs/${API.orgId}/login-log`,
+  o: {
+    donors:      ()   => `/api/orgs/${API.orgId}/donors`,
+    donor:       (id) => `/api/orgs/${API.orgId}/donors/${id}`,
+    stats:       ()   => `/api/orgs/${API.orgId}/stats`,
+    email:       ()   => `/api/orgs/${API.orgId}/email-settings`,
+    kvitel:      ()   => `/api/orgs/${API.orgId}/kvitel-settings`,
+    hoods:       ()   => `/api/orgs/${API.orgId}/donors/meta/neighborhoods`,
+    labels:      ()   => `/api/orgs/${API.orgId}/donors/meta/labels`,
+    failures:    ()   => `/api/orgs/${API.orgId}/charge-failures`,
+    verify:      ()   => `/api/orgs/${API.orgId}/donors/needs-verification`,
+    users:       ()   => `/api/orgs/${API.orgId}/users`,
+    log:         ()   => `/api/orgs/${API.orgId}/login-log`,
+    schedEmails: ()   => `/api/orgs/${API.orgId}/scheduled-emails`,
+    daf:         ()   => `/api/orgs/${API.orgId}/daf`,
   }
 };
 
-// ===== utils.js =====
-// public/js/utils.js
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const val = (id) => $(id)?.value || '';
 
-// ── Icons (SVG, no emojis) ──────────────────────────────────────────────
-const Icon = {
-  _s: (path, vb='0 0 24 24') => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vb}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;display:inline-block;vertical-align:-2px">${path}</svg>`,
-  dashboard:  () => Icon._s('<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>'),
-  donors:     () => Icon._s('<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'),
-  donations:  () => Icon._s('<line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>'),
-  check:      () => Icon._s('<polyline points="20 6 9 17 4 12"/>'),
-  x:          () => Icon._s('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
-  bank:       () => Icon._s('<line x1="3" y1="22" x2="21" y2="22"/><line x1="6" y1="18" x2="6" y2="11"/><line x1="10" y1="18" x2="10" y2="11"/><line x1="14" y1="18" x2="14" y2="11"/><line x1="18" y1="18" x2="18" y2="11"/><polygon points="12 2 20 7 4 7"/>'),
-  email:      () => Icon._s('<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>'),
-  scroll:     () => Icon._s('<path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/>'),
-  chart:      () => Icon._s('<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>'),
-  settings:   () => Icon._s('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>'),
-  alert:      () => Icon._s('<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>'),
-  search:     () => Icon._s('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>'),
-  plus:       () => Icon._s('<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>'),
-  edit:       () => Icon._s('<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>'),
-  trash:      () => Icon._s('<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>'),
-  eye:        () => Icon._s('<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>'),
-  card:       () => Icon._s('<rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/>'),
-  repeat:     () => Icon._s('<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>'),
-  refund:     () => Icon._s('<polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.67"/>'),
-  down:       () => Icon._s('<polyline points="6 9 12 15 18 9"/>'),
-  up:         () => Icon._s('<polyline points="18 15 12 9 6 15"/>'),
-  menu:       () => Icon._s('<line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/>'),
-  note:       () => Icon._s('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>'),
-  user:       () => Icon._s('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
-  signout:    () => Icon._s('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>'),
-  calendar:   () => Icon._s('<rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>'),
-  download:   () => Icon._s('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>'),
-  upload:     () => Icon._s('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>'),
-};
-
-// ── Toast ───────────────────────────────────────────────────────────────
-function toast(msg, type = 'success') {
-  const c = document.getElementById('toast-container');
+function toast(msg, type='ok') {
+  const c = $('toast-wrap');
+  if (!c) return;
   const t = document.createElement('div');
-  t.className = `toast ${type}`;
-  t.innerHTML = `<span>${msg}</span>`;
+  t.className = 'toast ' + type;
+  t.textContent = msg;
   c.appendChild(t);
-  setTimeout(() => { t.style.opacity='0'; t.style.transition='opacity 0.3s'; setTimeout(()=>t.remove(),350); }, 3500);
+  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 350); }, 3200);
 }
 
-// ── Modal ───────────────────────────────────────────────────────────────
 const Modal = {
-  open(title, bodyHtml, opts={}) {
-    document.getElementById('modal-title').textContent = title;
-    document.getElementById('modal-body').innerHTML = bodyHtml;
-    const box = document.getElementById('modal-box');
-    box.className = 'modal-box' + (opts.large?' modal-lg':'') + (opts.small?' modal-sm':'');
-    document.getElementById('modal-overlay').style.display = 'flex';
-    if (opts.onOpen) setTimeout(opts.onOpen, 0);
+  open(title, html, opts={}) {
+    $('modal-title').textContent = title;
+    $('modal-body').innerHTML = html;
+    const box = $('modal-box');
+    box.className = 'modal-box' + (opts.lg ? ' lg' : '') + (opts.sm ? ' sm' : '');
+    $('modal-overlay').style.display = 'flex';
+    if (opts.cb) setTimeout(opts.cb, 0);
   },
-  close() {
-    document.getElementById('modal-overlay').style.display = 'none';
-    document.getElementById('modal-body').innerHTML = '';
-  },
-  setBody(html)  { document.getElementById('modal-body').innerHTML = html; },
-  setTitle(t)    { document.getElementById('modal-title').textContent = t; }
+  close() { $('modal-overlay').style.display = 'none'; $('modal-body').innerHTML = ''; },
+  body(h) { $('modal-body').innerHTML = h; },
+  title(t) { $('modal-title').textContent = t; }
 };
-document.getElementById('modal-close')?.addEventListener('click', Modal.close);
-document.getElementById('modal-overlay')?.addEventListener('click', e => {
-  if (e.target === document.getElementById('modal-overlay')) Modal.close();
-});
 
-// ── Formatters ──────────────────────────────────────────────────────────
-function fmt$(n) {
-  return '$' + parseFloat(n||0).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
-}
-function fmtDate(d) {
-  if (!d) return '—';
-  try { return new Date(d).toLocaleDateString('en-US', {year:'numeric',month:'short',day:'numeric'}); }
-  catch { return d; }
-}
-function fmtDateTime(d) {
-  if (!d) return '—';
-  try { return new Date(d).toLocaleString('en-US', {month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}); }
-  catch { return d; }
-}
-function accountAge(months) {
-  if (!months && months!==0) return '—';
-  const m = parseInt(months);
-  if (m < 12) return m+'mo';
-  const y = Math.floor(m/12), r = m%12;
-  return r>0 ? `${y}y ${r}mo` : `${y}y`;
-}
-function fmtMethod(method) {
-  const map = { credit_card:'Credit Card', daf:'DAF', check:'Check', cash:'Cash', wire:'Wire', other:'Other' };
-  return map[method] || method;
-}
-function fmtFrequency(f) {
-  const map = { weekly:'Weekly', biweekly:'Bi-Weekly', monthly:'Monthly', quarterly:'Quarterly', yearly:'Yearly', once:'One-Time' };
-  return map[f] || f;
-}
-function toLocalInput(d) {
-  if (!d) return '';
-  try {
-    const dt = new Date(d), pad = n => String(n).padStart(2,'0');
-    return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
-  } catch { return ''; }
+function confirmDlg(msg, yes) {
+  Modal.open('Confirm', `<p style="margin-bottom:14px;color:var(--gray-7)">${msg}</p>
+    <div class="bg">
+      <button class="btn btn-red btn-sm" id="_conf_yes">Confirm</button>
+      <button class="btn btn-ghost btn-sm" onclick="Modal.close()">Cancel</button>
+    </div>`, { sm: true });
+  $('_conf_yes').onclick = () => { Modal.close(); yes(); };
 }
 
-// ── Avatar ──────────────────────────────────────────────────────────────
-function initials(f,l){ return ((f||'')[0]||'')+((l||'')[0]||''); }
-function avatarHtml(donor, size=32) {
-  return `<div class="donor-avatar" style="width:${size}px;height:${size}px;font-size:${Math.round(size/2.7)}px">${initials(donor.first_name,donor.last_name)}</div>`;
-}
+function fmt$(n) { return '$' + parseFloat(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function fmtD(d) { if (!d) return '—'; try { return new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }); } catch { return d; } }
+function fmtDT(d) { if (!d) return '—'; try { return new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch { return d; } }
+function age(m) { if (!m && m !== 0) return '—'; const mo = parseInt(m); if (mo < 12) return mo + 'mo'; const y = Math.floor(mo / 12), r = mo % 12; return r ? `${y}y ${r}mo` : `${y}y`; }
+function fmtMethod(m) { return { credit_card: 'Credit Card', daf: 'DAF', check: 'Check', cash: 'Cash', wire: 'Wire', other: 'Other' }[m] || m; }
+function fmtFreq(f) { return { weekly: 'Weekly', biweekly: 'Bi-Weekly', monthly: 'Monthly', quarterly: 'Quarterly', yearly: 'Yearly', once: 'One-Time' }[f] || f; }
+function toLocalDT(d) { if (!d) return ''; try { const dt = new Date(d), p = n => String(n).padStart(2, '0'); return `${dt.getFullYear()}-${p(dt.getMonth()+1)}-${p(dt.getDate())}T${p(dt.getHours())}:${p(dt.getMinutes())}`; } catch { return ''; } }
+function inits(f, l) { return ((f || '')[0] || '').toUpperCase() + ((l || '')[0] || '').toUpperCase(); }
+function avatar(d, sz=30) { return `<div class="av" style="width:${sz}px;height:${sz}px;font-size:${Math.round(sz/2.8)}px">${inits(d.first_name, d.last_name)}</div>`; }
+function sbadge(s) { const m = { completed:'Completed', pending:'Pending', failed:'Failed', scheduled:'Scheduled', cancelled:'Cancelled', active:'Active', paused:'Paused', refunded:'Refunded', partial_refund:'Partial Refund' }; return `<span class="sbadge s-${s}">${m[s] || s}</span>`; }
+function cbrand(brand, last4) { const cls = (brand || '').toLowerCase().replace(/\s/g, ''); return `<span class="cb cb-${cls}">${brand || 'Card'}</span>${last4 ? ` ••${last4}` : ''}`; }
+function jsonParse(s, def) { try { return JSON.parse(s || '[]'); } catch { return def !== undefined ? def : []; } }
 
-// ── Status badge ────────────────────────────────────────────────────────
-function statusBadge(status) {
-  const map = {
-    completed:'Completed', pending:'Pending', failed:'Failed',
-    scheduled:'Scheduled', cancelled:'Cancelled',
-    refunded:'Refunded', partial_refund:'Partial Refund', active:'Active', paused:'Paused'
-  };
-  return `<span class="status-badge status-${status}">${map[status]||status}</span>`;
-}
-
-// ── Confirm dialog ──────────────────────────────────────────────────────
-function confirm(msg, onYes) {
-  Modal.open('Confirm', `
-    <p style="margin-bottom:18px;color:var(--gray-700)">${msg}</p>
-    <div class="btn-group">
-      <button class="btn btn-danger btn-sm" id="confirm-yes">Confirm</button>
-      <button class="btn btn-ghost btn-sm" id="confirm-no">Cancel</button>
-    </div>
-  `, {small:true});
-  document.getElementById('confirm-yes').onclick = ()=>{ Modal.close(); onYes(); };
-  document.getElementById('confirm-no').onclick = Modal.close;
-}
-
-// ── Pagination ──────────────────────────────────────────────────────────
-function paginationHtml(page, pages, onPageFn) {
+function pagHtml(page, pages, fn) {
   if (pages <= 1) return '';
-  let html = '<div class="pagination">';
-  if (page > 1) html += `<button class="btn btn-ghost btn-sm" onclick="${onPageFn}(${page-1})">&#8249;</button>`;
-  const start = Math.max(1, page-2), end = Math.min(pages, page+2);
-  if (start > 1) html += `<button class="btn btn-ghost btn-sm" onclick="${onPageFn}(1)">1</button>${start>2?'<span style="padding:0 4px">…</span>':''}`;
-  for (let i=start; i<=end; i++) {
-    html += `<button class="btn btn-sm ${i===page?'btn-primary':'btn-ghost'}" onclick="${onPageFn}(${i})">${i}</button>`;
-  }
-  if (end < pages) html += `${end<pages-1?'<span style="padding:0 4px">…</span>':''}<button class="btn btn-ghost btn-sm" onclick="${onPageFn}(${pages})">${pages}</button>`;
-  if (page < pages) html += `<button class="btn btn-ghost btn-sm" onclick="${onPageFn}(${page+1})">&#8250;</button>`;
-  html += '</div>';
-  return html;
+  let h = '<div class="pagination">';
+  if (page > 1) h += `<button class="btn btn-ghost btn-sm" onclick="${fn}(${page-1})">&#8249;</button>`;
+  const s = Math.max(1, page-2), e = Math.min(pages, page+2);
+  if (s > 1) { h += `<button class="btn btn-ghost btn-sm" onclick="${fn}(1)">1</button>`; if (s > 2) h += '<span style="padding:0 4px">…</span>'; }
+  for (let i = s; i <= e; i++) h += `<button class="btn btn-sm ${i===page?'btn-primary':'btn-ghost'}" onclick="${fn}(${i})">${i}</button>`;
+  if (e < pages) { if (e < pages-1) h += '<span style="padding:0 4px">…</span>'; h += `<button class="btn btn-ghost btn-sm" onclick="${fn}(${pages})">${pages}</button>`; }
+  if (page < pages) h += `<button class="btn btn-ghost btn-sm" onclick="${fn}(${page+1})">&#8250;</button>`;
+  return h + '</div>';
 }
 
-// ── Labels input widget ─────────────────────────────────────────────────
-function labelsInput(containerId, initial=[]) {
-  const c = document.getElementById(containerId);
-  let labels = [...initial];
-  function render() {
+function tabsInit(scope) {
+  document.querySelectorAll(scope + ' .tab').forEach(t => {
+    t.onclick = function() {
+      document.querySelectorAll(scope + ' .tab').forEach(x => x.classList.remove('on'));
+      document.querySelectorAll(scope + ' .tc').forEach(x => x.classList.remove('on'));
+      this.classList.add('on');
+      $(this.dataset.tc)?.classList.add('on');
+    };
+  });
+}
+
+function lwInit(id, init=[]) {
+  const c = $(id); let arr = [...init];
+  const render = () => {
     c.innerHTML = `
-      <div class="labels-wrap" id="${containerId}-tags">
-        ${labels.map((l,i)=>`<span class="pill pill-blue">${l} <span style="cursor:pointer;margin-left:2px" onclick="window.__removeLabel_${containerId}(${i})">×</span></span>`).join('')}
+      <div class="bg" style="flex-wrap:wrap;gap:4px;margin-bottom:6px">
+        ${arr.map((l, i) => `<span class="pill pill-blue">${l} <span style="cursor:pointer" onclick="window['_lw_rm_${id}'](${i})">×</span></span>`).join('')}
       </div>
-      <div style="display:flex;gap:6px;margin-top:6px">
-        <input type="text" id="${containerId}-input" placeholder="Add label…" style="flex:1" autocomplete="off">
-        <button type="button" class="btn btn-ghost btn-sm" onclick="window.__addLabel_${containerId}()">Add</button>
+      <div class="bg">
+        <input id="${id}-in" type="text" placeholder="Add label…" style="flex:1" autocomplete="off">
+        <button type="button" class="btn btn-ghost btn-sm" onclick="window['_lw_add_${id}']()">Add</button>
       </div>`;
-    document.getElementById(`${containerId}-input`)?.addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); window[`__addLabel_${containerId}`](); }
-    });
-  }
-  window[`__addLabel_${containerId}`] = () => {
-    const v = document.getElementById(`${containerId}-input`)?.value.trim();
-    if (v && !labels.includes(v)) { labels.push(v); render(); }
-    else if (document.getElementById(`${containerId}-input`)) document.getElementById(`${containerId}-input`).value = '';
+    $(`${id}-in`)?.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); window[`_lw_add_${id}`](); } });
   };
-  window[`__removeLabel_${containerId}`] = i => { labels.splice(i,1); render(); };
+  window[`_lw_add_${id}`] = () => { const v = $(`${id}-in`)?.value.trim(); if (v && !arr.includes(v)) { arr.push(v); render(); } };
+  window[`_lw_rm_${id}`] = i => { arr.splice(i, 1); render(); };
   render();
-  return { getLabels: ()=>labels, setLabels: l=>{ labels=[...l]; render(); } };
+  return { get: () => arr, set: a => { arr = [...a]; render(); } };
 }
 
-// ── Simple SVG charts ───────────────────────────────────────────────────
-function renderPie(container, data, colors) {
-  if (!data?.length) { container.innerHTML='<div class="empty-state" style="padding:20px">No data</div>'; return; }
-  const total = data.reduce((s,d)=>s+(d.value||d.total||0),0);
-  if (!total) { container.innerHTML='<div class="empty-state" style="padding:20px">No data</div>'; return; }
-  const cols = colors || ['#1a3a6b','#2d8dc4','#22a06b','#f0a500','#d63031','#9333ea','#0891b2','#16a34a','#dc7834'];
-  let paths='', angle=-90;
-  data.forEach((d,i) => {
-    const val=d.value||d.total||0, pct=val/total, sweep=pct*360;
-    if (!sweep) return;
-    const r=80,cx=100,cy=100,a1=(angle*Math.PI)/180,a2=((angle+sweep)*Math.PI)/180;
-    paths+=`<path d="M${cx},${cy} L${cx+r*Math.cos(a1)},${cy+r*Math.sin(a1)} A${r},${r} 0 ${sweep>180?1:0},1 ${cx+r*Math.cos(a2)},${cy+r*Math.sin(a2)} Z" fill="${cols[i%cols.length]}" stroke="white" stroke-width="2" opacity="0.9"><title>${d.label||d.method||'—'}: ${fmt$(val)}</title></path>`;
-    angle+=sweep;
+function renderPie(el, data) {
+  if (!data?.length) { el.innerHTML = '<div class="empty">No data</div>'; return; }
+  const total = data.reduce((s, d) => s + (d.v || 0), 0);
+  if (!total) { el.innerHTML = '<div class="empty">No data</div>'; return; }
+  const cols = ['#1a3a6b','#2d8dc4','#22a06b','#f0a500','#d63031','#9333ea','#0891b2','#16a34a'];
+  let paths = '', angle = -90;
+  data.forEach((d, i) => {
+    const v = d.v || 0, sweep = (v/total)*360; if (!sweep) return;
+    const r=78,cx=90,cy=90,a1=(angle*Math.PI)/180,a2=((angle+sweep)*Math.PI)/180;
+    paths += `<path d="M${cx},${cy} L${cx+r*Math.cos(a1)},${cy+r*Math.sin(a1)} A${r},${r} 0 ${sweep>180?1:0},1 ${cx+r*Math.cos(a2)},${cy+r*Math.sin(a2)} Z" fill="${cols[i%cols.length]}" stroke="#fff" stroke-width="2"><title>${d.label}: ${fmt$(v)}</title></path>`;
+    angle += sweep;
   });
-  const legend = data.map((d,i)=>`<div class="pie-legend-item"><div class="pie-dot" style="background:${cols[i%cols.length]}"></div><span>${d.label||d.method||'—'}</span><span style="color:var(--gray-500);margin-left:4px">${fmt$(d.value||d.total||0)}</span></div>`).join('');
-  container.innerHTML=`<div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap"><svg viewBox="0 0 200 200" width="150" height="150" style="flex-shrink:0">${paths}</svg><div class="pie-legend">${legend}</div></div>`;
+  const legend = data.map((d, i) => `<div class="pie-legend-item"><div class="pdot" style="background:${cols[i%cols.length]}"></div><span>${d.label}</span><span style="color:var(--gray-5);margin-left:4px">${fmt$(d.v||0)}</span></div>`).join('');
+  el.innerHTML = `<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap"><svg viewBox="0 0 180 180" width="130" height="130" style="flex-shrink:0">${paths}</svg><div class="pie-legend">${legend}</div></div>`;
 }
 
-function renderBar(container, data, labelKey, valueKey, color='#2d8dc4') {
-  if (!data?.length) { container.innerHTML='<div class="empty-state" style="padding:20px">No data</div>'; return; }
-  const max = Math.max(...data.map(d=>d[valueKey]||0));
-  if (!max) { container.innerHTML='<div class="empty-state" style="padding:20px">No data</div>'; return; }
-  const items = data.slice(-16);
-  const w=520,h=200,pad=36,bw=Math.max(14,(w-pad*2)/items.length-5);
-  let bars='',labels='';
-  items.forEach((d,i)=>{
-    const val=d[valueKey]||0, bh=Math.max(2,(val/max)*(h-pad*1.5));
-    const x=pad+i*((w-pad*2)/items.length)+3, y=h-pad-bh;
-    bars+=`<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="${color}" rx="2" opacity="0.85"><title>${d[labelKey]}: ${fmt$(val)}</title></rect>`;
-    if (i%Math.ceil(items.length/8)===0) labels+=`<text x="${x+bw/2}" y="${h-4}" text-anchor="middle" font-size="9" fill="#6b7280">${(d[labelKey]||'').toString().slice(-7)}</text>`;
+function renderBar(el, data, lk, vk) {
+  if (!data?.length) { el.innerHTML = '<div class="empty">No data</div>'; return; }
+  const max = Math.max(...data.map(d => d[vk] || 0)); if (!max) { el.innerHTML = '<div class="empty">No data</div>'; return; }
+  const items = data.slice(-14), w=480, h=180, pad=30, bw=Math.max(12,(w-pad*2)/items.length-4);
+  let bars='', lbls='';
+  items.forEach((d, i) => {
+    const v=d[vk]||0, bh=Math.max(2,(v/max)*(h-pad*1.4)), x=pad+i*((w-pad*2)/items.length)+2, y=h-pad-bh;
+    bars += `<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="#2d8dc4" rx="2" opacity=".85"><title>${d[lk]}: ${fmt$(v)}</title></rect>`;
+    if (i % Math.ceil(items.length/7) === 0) lbls += `<text x="${x+bw/2}" y="${h-3}" text-anchor="middle" font-size="9" fill="#6b7280">${String(d[lk]||'').slice(-7)}</text>`;
   });
-  container.innerHTML=`<svg viewBox="0 0 ${w} ${h}" style="width:100%;max-height:220px">${bars}${labels}</svg>`;
+  el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" style="width:100%;max-height:200px">${bars}${lbls}</svg>`;
 }
 
-// ===== dashboard.js =====
-// public/js/pages/dashboard.js
-Pages.Dashboard = {
-  async render(el) {
-    el.innerHTML = `<div class="spinner"></div>`;
-    try {
-      const stats = await API.get(API.org.stats());
-      el.innerHTML = this.html(stats);
-      this.renderCharts(stats);
-    } catch (e) {
-      el.innerHTML = `<div class="alert alert-danger">Error loading dashboard: ${e.message}</div>`;
-    }
-  },
-
-  html(s) {
-    const autopayActive = s.autopayStats?.active || 0;
-    const autopayPaused = s.autopayStats?.paused || 0;
-
-    return `
-    <div class="page-header">
-      <div>
-        <div class="page-title">Dashboard</div>
-        <div class="page-subtitle">Overview of your donor relationships</div>
-      </div>
-      <div class="btn-group">
-        ${s.failedCharges > 0 ? `<a class="btn btn-danger btn-sm" onclick="navigateTo('failures')">⚠ ${s.failedCharges} Failed Charge${s.failedCharges>1?'s':''}</a>` : ''}
-        ${s.needsVerification > 0 ? `<a class="btn btn-outline btn-sm" onclick="navigateTo('verification')">✅ ${s.needsVerification} Need Verification</a>` : ''}
-      </div>
-    </div>
-
-    <div class="stats-grid">
-      <div class="stat-card">
-        <div class="stat-label">Total Donors</div>
-        <div class="stat-value">${(s.totalDonors||0).toLocaleString()}</div>
-        <div class="stat-sub">${s.activeDonors||0} active this period</div>
-      </div>
-      <div class="stat-card green">
-        <div class="stat-label">Total Raised</div>
-        <div class="stat-value">${fmt$(s.totalAmount)}</div>
-        <div class="stat-sub">${s.totalDonations||0} donations</div>
-      </div>
-      <div class="stat-card orange">
-        <div class="stat-label">Avg Donation</div>
-        <div class="stat-value">${fmt$(s.avgDonation)}</div>
-        <div class="stat-sub">per transaction</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Auto Pay</div>
-        <div class="stat-value">${autopayActive}</div>
-        <div class="stat-sub">${autopayPaused} paused</div>
-      </div>
-    </div>
-
-    <div class="two-panel" style="margin-bottom:20px">
-      <div class="card">
-        <div class="card-title">Monthly Donations</div>
-        <div id="chart-monthly"></div>
-      </div>
-      <div class="card">
-        <div class="card-title">By Payment Method</div>
-        <div id="chart-method"></div>
-      </div>
-    </div>
-
-    <div class="two-panel">
-      <div class="card">
-        <div class="card-title">By Neighborhood</div>
-        <div id="chart-neighborhood"></div>
-      </div>
-      <div class="card">
-        <div class="card-title">Top Donors</div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Donor</th><th>Gifts</th><th>Total</th></tr></thead>
-            <tbody>
-              ${(s.topDonors||[]).map(d => `
-                <tr>
-                  <td><strong>${d.first_name} ${d.last_name}</strong>${d.hebrew_full_name ? `<br><span class="he" style="font-size:11px">${d.hebrew_full_name}</span>` : ''}</td>
-                  <td>${d.count}</td>
-                  <td class="amount">${fmt$(d.total)}</td>
-                </tr>`).join('') || '<tr><td colspan="3" class="empty-state" style="padding:20px">No donations yet</td></tr>'}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>`;
-  },
-
-  renderCharts(s) {
-    const monthEl = document.getElementById('chart-monthly');
-    if (monthEl && s.byMonth?.length) {
-      renderBar(monthEl, [...s.byMonth].reverse(), 'month', 'total');
-    } else if (monthEl) monthEl.innerHTML = '<div class="empty-state" style="padding:20px">No data</div>';
-
-    const methodEl = document.getElementById('chart-method');
-    if (methodEl) {
-      renderPie(methodEl, (s.byMethod||[]).map(m => ({ label: m.method, value: m.total })));
-    }
-
-    const nhEl = document.getElementById('chart-neighborhood');
-    if (nhEl) {
-      renderPie(nhEl, (s.byNeighborhood||[]).slice(0,8).map(n => ({ label: n.name_he || 'Other', value: n.total })));
-    }
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+function toggleSidebar() {
+  const sb = $('sidebar'), mc = $('main-content'), mobile = window.innerWidth <= 768;
+  if (mobile) {
+    sb.classList.toggle('mob-open');
+    $('sidebar-overlay').classList.toggle('show');
+  } else {
+    const c = sb.classList.toggle('collapsed');
+    mc.style.marginLeft = c ? 'var(--sb-cw)' : 'var(--sb-w)';
+    localStorage.setItem('sb-c', c ? '1' : '0');
   }
-};
-
-// ===== donors.js =====
-// public/js/pages/donors.js
-Pages.Donors = {
-  donors: [], total: 0, page: 1, perPage: 25,
-  search: '', neighborhood: '', label: '', autopay: '',
-  sortBy: 'last_name', sortDir: 'asc',
-  selected: new Set(),
-  neighborhoods: [], labels: [],
-
-  async render(el) {
-    el.innerHTML = this.shell();
-    await this.loadMeta();
-    await this.load();
-    this.bindEvents(el);
-  },
-
-  shell() {
-    return `
-    <div class="page-header">
-      <div>
-        <div class="page-title">Donors</div>
-        <div class="page-subtitle" id="donors-count"></div>
-      </div>
-      <div class="btn-group">
-        <button class="btn btn-ghost btn-sm" onclick="Pages.Donors.importXlsx()">${Icon.upload()} Import</button>
-        <button class="btn btn-ghost btn-sm" onclick="Pages.Donors.exportXlsx()">${Icon.download()} Export</button>
-        <button class="btn btn-primary btn-sm" onclick="Pages.Donors.openAdd()">${Icon.plus()} Add Donor</button>
-      </div>
-    </div>
-
-    <div class="card" style="margin-bottom:14px;padding:14px 16px">
-      <div class="search-bar">
-        <div class="search-wrap" style="flex:2">
-          <span class="search-icon-svg">${Icon.search()}</span>
-          <input type="text" id="donor-search" placeholder="Search name, email, phone, Hebrew name…" autocomplete="off" autocorrect="off" spellcheck="false">
-        </div>
-        <select id="donor-neighborhood">
-          <option value="">All Neighborhoods</option>
-        </select>
-        <select id="donor-label-filter">
-          <option value="">All Labels</option>
-        </select>
-        <select id="donor-autopay-filter">
-          <option value="">All AutoPay</option>
-          <option value="1">AutoPay On</option>
-          <option value="0">AutoPay Off</option>
-        </select>
-      </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
-        <div class="btn-group">
-          <button class="btn btn-ghost btn-sm" onclick="Pages.Donors.pauseAll()">Pause All AutoPay</button>
-          <button class="btn btn-ghost btn-sm" onclick="Pages.Donors.resumeAll()">Resume All AutoPay</button>
-        </div>
-        <div class="per-page-wrap">
-          Show <select id="donor-per-page">
-            <option value="25" selected>25</option>
-            <option value="50">50</option>
-            <option value="100">100</option>
-          </select> per page
-        </div>
-      </div>
-    </div>
-
-    <div class="card" style="padding:0;overflow:hidden">
-      <div id="bulk-bar" class="bulk-bar">
-        <span id="bulk-count">0 selected</span>
-        <button class="btn btn-ghost btn-sm" onclick="Pages.Donors.bulkEmail()">Send Email</button>
-        <button class="btn btn-ghost btn-sm" onclick="Pages.Donors.bulkExport()">Export Selected</button>
-        <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="Pages.Donors.bulkDelete()">Delete</button>
-        <button class="btn btn-ghost btn-sm" onclick="Pages.Donors.clearSelection()">Clear</button>
-      </div>
-      <div class="table-wrap">
-        <table class="compact">
-          <thead>
-            <tr>
-              <th style="width:32px"><input type="checkbox" class="row-check" id="select-all" onchange="Pages.Donors.toggleAll(this.checked)"></th>
-              <th class="sortable" onclick="Pages.Donors.sort('last_name')">Name</th>
-              <th>Hebrew</th>
-              <th>Contact</th>
-              <th class="sortable" onclick="Pages.Donors.sort('neighborhood_name')">Neighborhood</th>
-              <th class="sortable" onclick="Pages.Donors.sort('months_old')">Age</th>
-              <th class="sortable" onclick="Pages.Donors.sort('total_amount')">Total</th>
-              <th>AutoPay</th>
-              <th style="width:100px"></th>
-            </tr>
-          </thead>
-          <tbody id="donors-tbody">
-            <tr><td colspan="9"><div class="spinner"></div></td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div style="padding:12px 16px;display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--gray-100)">
-        <div id="donors-pagination"></div>
-        <div id="donors-page-info" style="font-size:12px;color:var(--gray-500)"></div>
-      </div>
-    </div>`;
-  },
-
-  async loadMeta() {
-    try {
-      [this.neighborhoods, this.labels] = await Promise.all([
-        API.get(API.org.neighborhoods()),
-        API.get(API.org.labels())
-      ]);
-      const nhSel = document.getElementById('donor-neighborhood');
-      if (nhSel) nhSel.innerHTML = '<option value="">All Neighborhoods</option>' +
-        this.neighborhoods.map(n=>`<option value="${n.id}">${n.name_he}</option>`).join('');
-      const lSel = document.getElementById('donor-label-filter');
-      if (lSel) lSel.innerHTML = '<option value="">All Labels</option>' +
-        this.labels.map(l=>`<option value="${l}">${l}</option>`).join('');
-    } catch {}
-  },
-
-  async load() {
-    const params = new URLSearchParams({
-      page: this.page, limit: this.perPage,
-      ...(this.search && {search: this.search}),
-      ...(this.neighborhood && {neighborhood: this.neighborhood}),
-      ...(this.label && {label: this.label}),
-      ...(this.autopay !== '' && {autopay: this.autopay})
-    });
-    try {
-      const res = await API.get(API.org.donors() + '?' + params);
-      this.donors = res.donors || [];
-      this.total = res.total || 0;
-      this.renderTable();
-      const c = document.getElementById('donors-count');
-      if (c) c.textContent = `${this.total.toLocaleString()} donor${this.total!==1?'s':''}`;
-      const info = document.getElementById('donors-page-info');
-      const start = (this.page-1)*this.perPage+1;
-      const end = Math.min(this.page*this.perPage, this.total);
-      if (info && this.total > 0) info.textContent = `Showing ${start}–${end} of ${this.total}`;
-    } catch (e) {
-      const tb = document.getElementById('donors-tbody');
-      if (tb) tb.innerHTML = `<tr><td colspan="9"><div class="alert alert-danger" style="margin:12px">${e.message}</div></td></tr>`;
-    }
-  },
-
-  renderTable() {
-    const tbody = document.getElementById('donors-tbody');
-    if (!tbody) return;
-    if (!this.donors.length) {
-      tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state" style="padding:40px">${Icon.donors()}<h3 style="margin-top:10px">No donors found</h3></div></td></tr>`;
-      return;
-    }
-
-    // Sort client-side
-    const sorted = [...this.donors].sort((a,b) => {
-      const av = a[this.sortBy] ?? '', bv = b[this.sortBy] ?? '';
-      const r = typeof av === 'number' ? av - bv : String(av).localeCompare(String(bv));
-      return this.sortDir === 'asc' ? r : -r;
-    });
-
-    tbody.innerHTML = sorted.map(d => {
-      const labels = (() => { try { return JSON.parse(d.labels||'[]'); } catch { return []; } })();
-      const apBadge = d.autopay_enabled
-        ? (d.autopay_paused
-          ? '<span class="status-badge status-paused" style="font-size:11px">Paused</span>'
-          : '<span class="status-badge status-active" style="font-size:11px">On</span>')
-        : '<span style="color:var(--gray-300);font-size:11px">Off</span>';
-
-      return `<tr>
-        <td><input type="checkbox" class="row-check donor-check" value="${d.id}" onchange="Pages.Donors.toggleOne('${d.id}',this.checked)" ${this.selected.has(d.id)?'checked':''}></td>
-        <td>
-          <div style="display:flex;align-items:center;gap:8px">
-            ${avatarHtml(d, 28)}
-            <div>
-              <div style="font-weight:600;font-size:13px">${d.title?d.title+' ':''}${d.first_name} ${d.last_name}</div>
-              ${labels.length ? `<div style="display:flex;gap:3px;flex-wrap:wrap;margin-top:2px">${labels.map(l=>`<span class="pill pill-blue" style="font-size:10px;padding:1px 6px">${l}</span>`).join('')}</div>` : ''}
-              ${d.needs_verification ? '<span style="font-size:10px;color:var(--warning);font-weight:600">⚠ Verify</span>' : ''}
-            </div>
-          </div>
-        </td>
-        <td><span style="font-family:var(--font-he);direction:rtl;font-size:12px">${d.hebrew_full_name||'—'}</span></td>
-        <td style="font-size:12px">
-          ${d.cell?`<div>${d.cell}</div>`:''}
-          ${d.email?`<div style="color:var(--gray-500)">${d.email}</div>`:''}
-        </td>
-        <td><span style="font-family:var(--font-he);font-size:12px">${d.neighborhood_name||'—'}</span></td>
-        <td style="font-size:12px;white-space:nowrap">${accountAge(d.months_old)}</td>
-        <td style="font-weight:600;font-size:13px">${fmt$(d.total_amount)}</td>
-        <td>${apBadge}</td>
-        <td>
-          <div style="display:flex;gap:4px">
-            <button class="btn btn-blue btn-sm" onclick="Pages.DonorDetail.open('${d.id}')" title="View">${Icon.eye()}</button>
-            <button class="btn btn-ghost btn-sm" onclick="Pages.Donors.openEdit('${d.id}')" title="Edit">${Icon.edit()}</button>
-            <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="Pages.Donors.deleteDonor('${d.id}','${d.first_name} ${d.last_name}')" title="Delete">${Icon.trash()}</button>
-          </div>
-        </td>
-      </tr>`;
-    }).join('');
-
-    // Pagination
-    const pages = Math.ceil(this.total / this.perPage);
-    const pagEl = document.getElementById('donors-pagination');
-    if (pagEl) pagEl.innerHTML = paginationHtml(this.page, pages, 'Pages.Donors.goPage');
-
-    // Update sort indicators
-    document.querySelectorAll('#page-donors th.sortable').forEach(th => {
-      th.classList.remove('sort-asc','sort-desc');
-      if (th.onclick?.toString().includes(`'${this.sortBy}'`)) {
-        th.classList.add(this.sortDir==='asc'?'sort-asc':'sort-desc');
-      }
-    });
-
-    this.updateBulkBar();
-  },
-
-  sort(col) {
-    if (this.sortBy === col) this.sortDir = this.sortDir==='asc'?'desc':'asc';
-    else { this.sortBy = col; this.sortDir = 'asc'; }
-    this.renderTable();
-  },
-
-  bindEvents(el) {
-    let timer;
-    const searchEl = document.getElementById('donor-search');
-    if (searchEl) {
-      searchEl.oninput = () => {
-        clearTimeout(timer);
-        timer = setTimeout(()=>{ this.search=searchEl.value; this.page=1; this.load(); }, 320);
-      };
-    }
-    document.getElementById('donor-neighborhood')?.addEventListener('change', e => { this.neighborhood=e.target.value; this.page=1; this.load(); });
-    document.getElementById('donor-label-filter')?.addEventListener('change', e => { this.label=e.target.value; this.page=1; this.load(); });
-    document.getElementById('donor-autopay-filter')?.addEventListener('change', e => { this.autopay=e.target.value; this.page=1; this.load(); });
-    document.getElementById('donor-per-page')?.addEventListener('change', e => { this.perPage=parseInt(e.target.value); this.page=1; this.load(); });
-  },
-
-  goPage(p) { Pages.Donors.page=p; Pages.Donors.load(); },
-
-  toggleAll(checked) {
-    document.querySelectorAll('.donor-check').forEach(cb => {
-      cb.checked = checked;
-      if (checked) this.selected.add(cb.value);
-      else this.selected.delete(cb.value);
-    });
-    this.updateBulkBar();
-  },
-  toggleOne(id, checked) {
-    if (checked) this.selected.add(id); else this.selected.delete(id);
-    this.updateBulkBar();
-  },
-  clearSelection() { this.selected.clear(); document.getElementById('select-all').checked=false; document.querySelectorAll('.donor-check').forEach(c=>c.checked=false); this.updateBulkBar(); },
-  updateBulkBar() {
-    const bar = document.getElementById('bulk-bar');
-    const cnt = document.getElementById('bulk-count');
-    if (bar) bar.className = 'bulk-bar' + (this.selected.size>0?' visible':'');
-    if (cnt) cnt.textContent = `${this.selected.size} selected`;
-  },
-
-  bulkDelete() {
-    if (!this.selected.size) return;
-    confirm(`Delete ${this.selected.size} donor(s)? This cannot be undone.`, async () => {
-      for (const id of this.selected) await API.del(API.org.donor(id)).catch(()=>{});
-      this.selected.clear(); toast(`Deleted ${this.selected.size} donors`); this.load();
-    });
-  },
-  bulkExport() { toast('Exporting selected…'); this.exportXlsx(); },
-  bulkEmail() { toast('Coming soon — use scheduled emails for bulk sends', 'warning'); },
-
-  openAdd() { this.openForm(null); },
-  async openEdit(id) { const d = await API.get(API.org.donor(id)); this.openForm(d.donor); },
-
-  openForm(donor) {
-    const isEdit = !!donor;
-    Modal.open(isEdit?'Edit Donor':'Add Donor', '<div class="spinner"></div>', { large: true, onOpen: async () => {
-      const hoods = await API.get(API.org.neighborhoods()).catch(()=>[]);
-      const labels = (() => { try { return JSON.parse(donor?.labels||'[]'); } catch { return []; } })();
-
-      Modal.setBody(`
-        <div class="tabs">
-          <div class="tab active" onclick="dTab(this,'dt-basic')">Basic</div>
-          <div class="tab" onclick="dTab(this,'dt-contact')">Contact</div>
-          <div class="tab" onclick="dTab(this,'dt-extra')">Labels & Kvitel</div>
-        </div>
-        <div id="dt-basic" class="tab-content active">
-          <div class="input-row input-row-4">
-            <div><label>Title</label><input id="d-title" value="${donor?.title||''}" placeholder="Mr./Mrs./Rabbi" autocomplete="honorific-prefix"></div>
-            <div style="grid-column:span 2"><label>First Name *</label><input id="d-first" value="${donor?.first_name||''}" autocomplete="given-name"></div>
-            <div><label>Last Name *</label><input id="d-last" value="${donor?.last_name||''}" autocomplete="family-name"></div>
-          </div>
-          <div class="input-row input-row-2">
-            <div><label>Hebrew Title</label><input id="d-htitle" dir="rtl" style="font-family:var(--font-he)" value="${donor?.hebrew_title||''}" placeholder="הרב / מר" autocomplete="off"></div>
-            <div><label>Hebrew Full Name</label><input id="d-hname" dir="rtl" style="font-family:var(--font-he)" value="${donor?.hebrew_full_name||''}" placeholder="ישראל בן אברהם" autocomplete="off"></div>
-          </div>
-          <div class="input-row input-row-2">
-            <div>
-              <label>Neighborhood</label>
-              <div style="display:flex;gap:6px">
-                <select id="d-nh" style="flex:1">
-                  <option value="">— None —</option>
-                  ${hoods.map(h=>`<option value="${h.id}" ${h.id===donor?.neighborhood_id?'selected':''}>${h.name_he}</option>`).join('')}
-                </select>
-                <button type="button" class="btn btn-ghost btn-sm" onclick="Pages.Donors.addNeighborhood()">+</button>
-              </div>
-            </div>
-            <div><label>Account Age (created)</label><input type="date" id="d-created" value="${donor?.created_at?donor.created_at.slice(0,10):new Date().toISOString().slice(0,10)}" ${isEdit?'readonly':''}></div>
-          </div>
-        </div>
-        <div id="dt-contact" class="tab-content">
-          <div class="input-row input-row-2">
-            <div><label>Cell</label><input id="d-cell" type="tel" value="${donor?.cell||''}" autocomplete="tel"></div>
-            <div><label>Home Phone</label><input id="d-home" type="tel" value="${donor?.home_phone||''}" autocomplete="tel-home"></div>
-          </div>
-          <label>Email</label><input id="d-email" type="email" value="${donor?.email||''}" autocomplete="email">
-          <hr class="section-divider">
-          <label>Street</label><input id="d-street" value="${donor?.street||''}" autocomplete="street-address">
-          <div class="input-row input-row-4">
-            <div><label>Apt</label><input id="d-apt" value="${donor?.apt||''}"></div>
-            <div style="grid-column:span 2"><label>City</label><input id="d-city" value="${donor?.city||''}" autocomplete="address-level2"></div>
-            <div><label>State</label><input id="d-state" value="${donor?.state||''}" maxlength="2" autocomplete="address-level1"></div>
-          </div>
-          <div style="max-width:140px"><label>ZIP</label><input id="d-zip" value="${donor?.zip||''}" autocomplete="postal-code"></div>
-        </div>
-        <div id="dt-extra" class="tab-content">
-          <label>Labels</label>
-          <div id="labels-widget"></div>
-          <hr class="section-divider">
-          <label>Kvitel <span style="font-size:12px;color:var(--gray-500)">(Hebrew, RTL)</span></label>
-          <textarea id="d-kvitel" dir="rtl" style="font-family:var(--font-he);min-height:120px;font-size:15px;line-height:1.8">${donor?.kvitel||''}</textarea>
-          <div class="toggle-row" style="margin-top:10px">
-            <div class="toggle-label">Include in Kvitel generation</div>
-            <label class="toggle"><input type="checkbox" id="d-kvon" ${donor?.kvitel_enabled!==0?'checked':''}><span class="toggle-slider"></span></label>
-          </div>
-        </div>
-        <hr class="section-divider" style="margin-top:16px">
-        <div class="btn-group">
-          <button class="btn btn-primary" onclick="Pages.Donors.save('${donor?.id||''}')">${isEdit?'Save Changes':'Add Donor'}</button>
-          <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-        </div>
-      `);
-
-      window.__labelsWidget = labelsInput('labels-widget', labels);
-      window.dTab = (el, id) => {
-        document.querySelectorAll('#modal-body .tab').forEach(t=>t.classList.remove('active'));
-        document.querySelectorAll('#modal-body .tab-content').forEach(t=>t.classList.remove('active'));
-        el.classList.add('active'); document.getElementById(id)?.classList.add('active');
-      };
-    }});
-  },
-
-  async addNeighborhood() {
-    const name = prompt('Hebrew neighborhood name:');
-    if (!name) return;
-    try {
-      const r = await API.post(API.org.neighborhoods(), { name_he: name });
-      toast('Neighborhood added');
-      const sel = document.getElementById('d-nh');
-      if (sel) sel.innerHTML += `<option value="${r.neighborhood.id}" selected>${r.neighborhood.name_he}</option>`;
-      this.neighborhoods.push(r.neighborhood);
-    } catch(e) { toast(e.message,'error'); }
-  },
-
-  async save(id) {
-    const data = {
-      title: document.getElementById('d-title')?.value,
-      first_name: document.getElementById('d-first')?.value,
-      last_name: document.getElementById('d-last')?.value,
-      hebrew_title: document.getElementById('d-htitle')?.value,
-      hebrew_full_name: document.getElementById('d-hname')?.value,
-      neighborhood_id: document.getElementById('d-nh')?.value || null,
-      cell: document.getElementById('d-cell')?.value,
-      home_phone: document.getElementById('d-home')?.value,
-      email: document.getElementById('d-email')?.value,
-      street: document.getElementById('d-street')?.value,
-      apt: document.getElementById('d-apt')?.value,
-      city: document.getElementById('d-city')?.value,
-      state: document.getElementById('d-state')?.value,
-      zip: document.getElementById('d-zip')?.value,
-      kvitel: document.getElementById('d-kvitel')?.value,
-      kvitel_enabled: document.getElementById('d-kvon')?.checked ? 1 : 0,
-      labels: window.__labelsWidget?.getLabels() || []
-    };
-    if (!data.first_name || !data.last_name) { toast('First and last name required','error'); return; }
-    try {
-      if (id) await API.put(API.org.donor(id), data);
-      else await API.post(API.org.donors(), data);
-      toast(id?'Donor saved':'Donor added');
-      Modal.close();
-      this.load(); this.loadMeta();
-    } catch(e) { toast(e.message,'error'); }
-  },
-
-  deleteDonor(id, name) {
-    confirm(`Delete "${name}"? All donations and history will be removed.`, async () => {
-      await API.del(API.org.donor(id)); toast('Deleted'); this.load();
-    });
-  },
-
-  async pauseAll() {
-    confirm('Pause AutoPay for all donors?', async () => {
-      await API.post(`/api/orgs/${API.orgId}/donors/autopay/pause-all`, {});
-      toast('All AutoPay paused'); this.load();
-    });
-  },
-
-  async resumeAll() {
-    await API.post(`/api/orgs/${API.orgId}/donors/autopay/resume-all`, {});
-    toast('All AutoPay resumed'); this.load();
-  },
-
-  importXlsx() {
-    Modal.open('Import Donors', `
-      <p style="color:var(--gray-500);margin-bottom:12px">Excel file with columns: First Name, Last Name, Hebrew Name, Email, Cell, Street, City, State, Zip</p>
-      <input type="file" id="import-file" accept=".xlsx,.xls">
-      <div style="margin-top:14px">
-        <button class="btn btn-primary" onclick="Pages.Donors.doImport()">Import</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-  },
-
-  async doImport() {
-    const file = document.getElementById('import-file')?.files[0];
-    if (!file) { toast('Select a file','error'); return; }
-    const fd = new FormData(); fd.append('file', file);
-    try {
-      const r = await fetch(`/api/orgs/${API.orgId}/import/donors`, {
-        method:'POST', body:fd, credentials:'include', headers:{'x-org-id':API.orgId}
-      }).then(r=>r.json());
-      toast(`Imported ${r.imported} donors${r.errors?.length?` (${r.errors.length} errors)`:''}`);
-      Modal.close(); this.load();
-    } catch(e) { toast(e.message,'error'); }
-  },
-
-  exportXlsx() {
-    API.downloadGet(`/api/orgs/${API.orgId}/reports/donors?format=xlsx`, 'donors.xlsx').catch(e=>toast(e.message,'error'));
-  }
-};
-
-// ===== donor-detail.js =====
-// public/js/pages/donor-detail.js
-Pages.DonorDetail = {
-  data: null,
-  donorId: null,
-
-  async open(id) {
-    this.donorId = id;
-    Modal.open('Loading…', '<div class="spinner"></div>', { large: true });
-    try {
-      this.data = await API.get(API.org.donor(id));
-      const recurring = await API.get(`/api/orgs/${API.orgId}/donors/${id}/recurring`).catch(()=>[]);
-      this.data.recurring = recurring;
-      this.render();
-    } catch (e) {
-      Modal.setBody(`<div class="alert alert-danger">${e.message}</div>`);
-    }
-  },
-
-  render() {
-    const { donor, paymentMethods, donations, recurring } = this.data;
-    const labels = (() => { try { return JSON.parse(donor.labels||'[]'); } catch { return []; } })();
-
-    Modal.setTitle('');
-    Modal.setBody(`
-      <div class="donor-detail-header">
-        <div class="donor-detail-avatar">${initials(donor.first_name, donor.last_name)}</div>
-        <div class="donor-detail-name" style="flex:1">
-          <h2>${donor.title?donor.title+' ':''}${donor.first_name} ${donor.last_name}</h2>
-          ${donor.hebrew_full_name?`<div style="font-family:var(--font-he);direction:rtl">${donor.hebrew_title||''} ${donor.hebrew_full_name}</div>`:''}
-          <div class="meta">${accountAge(donor.months_old)} member &nbsp;·&nbsp; ${donor.email||''} ${donor.cell?'· '+donor.cell:''} ${donor.neighborhood_name?'· '+donor.neighborhood_name:''}</div>
-          <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">
-            ${labels.map(l=>`<span class="pill pill-blue" style="font-size:10px">${l}</span>`).join('')}
-            ${donor.needs_verification?'<span class="pill pill-orange" style="font-size:10px">⚠ Needs Verification</span>':''}
-          </div>
-        </div>
-        <div style="text-align:right">
-          <div style="font-size:24px;font-weight:700">${fmt$(donor.total_amount)}</div>
-          <div style="opacity:0.75;font-size:12px">${donor.total_donations||0} donations</div>
-          <div class="btn-group" style="margin-top:8px;justify-content:flex-end">
-            <button class="btn btn-blue btn-sm" onclick="Pages.Donors.openEdit('${donor.id}')">${Icon.edit()} Edit</button>
-            ${donor.needs_verification?`<button class="btn btn-success btn-sm" onclick="Pages.DonorDetail.verify('${donor.id}')">${Icon.check()} Verify</button>`:''}
-          </div>
-        </div>
-      </div>
-
-      <div class="tabs" style="margin-top:0;border-radius:0">
-        <div class="tab active" onclick="ddTab(this,'dd-overview')">Overview</div>
-        <div class="tab" onclick="ddTab(this,'dd-payment')">Cards</div>
-        <div class="tab" onclick="ddTab(this,'dd-donations')">Donations</div>
-        <div class="tab" onclick="ddTab(this,'dd-recurring')">Recurring</div>
-        <div class="tab" onclick="ddTab(this,'dd-kvitel')">Kvitel</div>
-        <div class="tab" onclick="ddTab(this,'dd-notes')">Notes</div>
-      </div>
-
-      <!-- OVERVIEW -->
-      <div id="dd-overview" class="tab-content active" style="padding:18px">
-        <div class="two-panel">
-          <div>
-            <div class="card-title">Contact</div>
-            ${donor.cell?`<p style="font-size:13px">Cell: ${donor.cell}</p>`:''}
-            ${donor.home_phone?`<p style="font-size:13px">Home: ${donor.home_phone}</p>`:''}
-            ${donor.email?`<p style="font-size:13px">Email: ${donor.email}</p>`:''}
-            <hr class="section-divider">
-            <div class="card-title">Address</div>
-            <p style="font-size:13px">${[donor.street,donor.apt,donor.city,donor.state,donor.zip].filter(Boolean).join(', ')||'—'}</p>
-          </div>
-          <div>
-            <div class="card-title">Stats</div>
-            <p style="font-size:13px">Last donation: ${fmtDate(donor.last_donation_date)}</p>
-            <p style="font-size:13px">Member since: ${fmtDate(donor.created_at)}</p>
-            <hr class="section-divider">
-            <div class="card-title">Email Preferences</div>
-            <div class="toggle-row">
-              <div class="toggle-label" style="font-size:13px">Donation receipts</div>
-              <label class="toggle"><input type="checkbox" ${!donor.donation_emails_paused?'checked':''} onchange="Pages.DonorDetail.pref('${donor.id}','donation_emails_paused',!this.checked)"><span class="toggle-slider"></span></label>
-            </div>
-            <div class="toggle-row">
-              <div class="toggle-label" style="font-size:13px">Marketing emails</div>
-              <label class="toggle"><input type="checkbox" ${!donor.marketing_emails_paused?'checked':''} onchange="Pages.DonorDetail.pref('${donor.id}','marketing_emails_paused',!this.checked)"><span class="toggle-slider"></span></label>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- PAYMENT METHODS (CARDS) -->
-      <div id="dd-payment" class="tab-content" style="padding:18px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <strong>Payment Methods</strong>
-          <button class="btn btn-blue btn-sm" onclick="Pages.DonorDetail.addCard('${donor.id}')">${Icon.plus()} Add Card</button>
-        </div>
-        <div id="pm-list">
-          ${paymentMethods.length ? paymentMethods.map(pm => this.pmCard(pm, donor.id)).join('') :
-            '<p style="color:var(--gray-500);padding:20px 0">No payment methods yet</p>'}
-        </div>
-      </div>
-
-      <!-- DONATIONS -->
-      <div id="dd-donations" class="tab-content" style="padding:18px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <strong>Donation History</strong>
-          <div class="btn-group">
-            <button class="btn btn-ghost btn-sm" onclick="Pages.DonorDetail.manualDonation('${donor.id}')">${Icon.plus()} Manual</button>
-            <button class="btn btn-blue btn-sm" onclick="Pages.DonorDetail.chargeNow('${donor.id}')">${Icon.card()} Charge Card</button>
-          </div>
-        </div>
-        <div class="scroll-list">
-          <table>
-            <thead><tr><th>Date</th><th>Amount</th><th>Method</th><th>Trans ID</th><th>Status</th><th>Notes</th><th></th></tr></thead>
-            <tbody>
-              ${donations.map(d => this.donationRow(d, donor.id)).join('') ||
-                '<tr><td colspan="7"><div class="empty-state" style="padding:20px">No donations yet</div></td></tr>'}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- RECURRING -->
-      <div id="dd-recurring" class="tab-content" style="padding:18px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <strong>Recurring Charge Schedules</strong>
-          <button class="btn btn-primary btn-sm" onclick="Pages.DonorDetail.addRecurring('${donor.id}')">${Icon.plus()} Add Schedule</button>
-        </div>
-        <div id="recurring-list">
-          ${recurring.length ? recurring.map(s => this.recurringCard(s, donor.id)).join('') :
-            '<div class="alert alert-info">No recurring schedules set up. Use "Add Schedule" to set up automatic weekly, biweekly, or monthly charges.</div>'}
-        </div>
-      </div>
-
-      <!-- KVITEL -->
-      <div id="dd-kvitel" class="tab-content" style="padding:18px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-          <strong>Kvitel</strong>
-          <label class="toggle" title="Include in Kvitel generation">
-            <input type="checkbox" id="kv-on" ${donor.kvitel_enabled!==0?'checked':''} onchange="Pages.DonorDetail.pref('${donor.id}','kvitel_enabled',this.checked?1:0)">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        <textarea id="kv-text" dir="rtl" style="font-family:var(--font-he);min-height:180px;font-size:15px;line-height:1.8;width:100%">${donor.kvitel||''}</textarea>
-        <button class="btn btn-primary btn-sm" style="margin-top:10px" onclick="Pages.DonorDetail.saveKvitel('${donor.id}')">Save Kvitel</button>
-      </div>
-
-      <!-- NOTES -->
-      <div id="dd-notes" class="tab-content" style="padding:18px">
-        <div style="margin-bottom:14px">
-          <textarea id="new-note" placeholder="Add a note…" style="min-height:70px;width:100%"></textarea>
-          <button class="btn btn-primary btn-sm" style="margin-top:6px" onclick="Pages.DonorDetail.addNote('${donor.id}')">Add Note</button>
-        </div>
-        <div id="notes-list">
-          ${this.notesList(donor)}
-        </div>
-      </div>
-    `);
-
-    window.ddTab = (el, id) => {
-      document.querySelectorAll('#modal-body .tab').forEach(t=>t.classList.remove('active'));
-      document.querySelectorAll('#modal-body .tab-content').forEach(t=>t.classList.remove('active'));
-      el.classList.add('active'); document.getElementById(id)?.classList.add('active');
-    };
-  },
-
-  pmCard(pm, donorId) {
-    const brandClass = (pm.card_brand||'').toLowerCase().replace(/\s/g,'');
-    const brandLabel = pm.card_brand || (pm.type==='credit_card'?'Card':'');
-    return `<div class="sched-item">
-      <div>
-        <div class="sched-main" style="display:flex;align-items:center;gap:8px">
-          ${pm.type==='credit_card' ? `
-            <span class="card-brand ${brandClass}">${brandLabel}</span>
-            ${pm.last_four?`<span style="font-size:13px">•••• ${pm.last_four}</span>`:''}
-          ` : `<span>${fmtMethod(pm.type)}</span>${pm.daf_name?`<span style="color:var(--gray-500);font-size:12px">${pm.daf_name}</span>`:''}${pm.other_description?`<span style="color:var(--gray-500);font-size:12px">${pm.other_description}</span>`:''}` }
-          ${pm.label?`<span style="font-size:12px;color:var(--gray-500)">${pm.label}</span>`:''}
-          ${pm.is_default?'<span class="pill pill-green" style="font-size:10px">Default</span>':''}
-          ${pm.sola_token?'<span class="pill pill-blue" style="font-size:10px">Tokenized</span>':''}
-        </div>
-      </div>
-      <div class="btn-group">
-        ${pm.type==='credit_card'&&pm.sola_token?`<button class="btn btn-ghost btn-sm" onclick="Pages.DonorDetail.chargeCard('${donorId}','${pm.id}')">${Icon.card()} Charge</button>`:''}
-        <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="Pages.DonorDetail.deletePM('${donorId}','${pm.id}')">${Icon.trash()}</button>
-      </div>
-    </div>`;
-  },
-
-  donationRow(d, donorId) {
-    const donNotes = (() => { try { return JSON.parse(d.donation_notes||'[]'); } catch { return []; } })();
-    return `<tr>
-      <td style="white-space:nowrap;font-size:12px">${fmtDate(d.donation_date)}</td>
-      <td style="font-weight:600">${fmt$(d.amount)}${d.refund_amount>0?`<br><span style="font-size:11px;color:var(--danger)">-${fmt$(d.refund_amount)} refunded</span>`:''}</td>
-      <td style="font-size:12px">${fmtMethod(d.method)}${d.last_four?` ••${d.last_four}`:''}</td>
-      <td style="font-size:11px;color:var(--gray-500);max-width:120px;word-break:break-all">${d.transaction_id||'—'}</td>
-      <td>${statusBadge(d.status)}</td>
-      <td style="font-size:12px;max-width:140px">
-        ${d.notes||''}
-        ${donNotes.map(n=>`<div class="don-note">${fmtDate(n.at)}: ${n.text}</div>`).join('')}
-      </td>
-      <td>
-        <div class="btn-group">
-          <button class="btn btn-ghost btn-sm" title="Add note" onclick="Pages.DonorDetail.addDonationNote('${donorId}','${d.id}')">${Icon.note()}</button>
-          ${d.status==='completed'||d.status==='partial_refund'?`<button class="btn btn-ghost btn-sm" title="Refund" onclick="Pages.DonorDetail.refundDonation('${donorId}','${d.id}','${d.amount}','${d.transaction_id||''}')">${Icon.refund()}</button>`:''}
-        </div>
-      </td>
-    </tr>`;
-  },
-
-  recurringCard(s, donorId) {
-    const pmLabel = s.pm_label || (s.pm_type==='credit_card' ? `${s.card_brand||'Card'} ••${s.last_four||''}` : fmtMethod(s.pm_type));
-    const limitText = s.occurrences_limit ? `${s.occurrences_count||0}/${s.occurrences_limit} charges` : 'Unlimited';
-    return `<div class="sched-item">
-      <div>
-        <div class="sched-main">${fmt$(s.amount)} / ${fmtFrequency(s.frequency)}</div>
-        <div class="sched-sub">${pmLabel} &nbsp;·&nbsp; Next: ${fmtDate(s.next_run)} &nbsp;·&nbsp; ${limitText}</div>
-        ${s.last_failure?`<div style="font-size:11px;color:var(--danger);margin-top:3px">Last error: ${s.last_failure}</div>`:''}
-      </div>
-      <div class="btn-group">
-        ${s.status==='active'?`<button class="btn btn-ghost btn-sm" onclick="Pages.DonorDetail.toggleRecurring('${donorId}','${s.id}','paused')">Pause</button>`:
-          `<button class="btn btn-ghost btn-sm" onclick="Pages.DonorDetail.toggleRecurring('${donorId}','${s.id}','active')">Resume</button>`}
-        <button class="btn btn-ghost btn-sm" onclick="Pages.DonorDetail.editRecurring('${donorId}','${s.id}','${s.amount}','${s.frequency}','${s.next_run||''}')">${Icon.edit()}</button>
-        <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="Pages.DonorDetail.deleteRecurring('${donorId}','${s.id}')">${Icon.trash()}</button>
-      </div>
-    </div>`;
-  },
-
-  notesList(donor) {
-    const notes = (() => { try { return JSON.parse(donor.notes||'[]'); } catch { return []; } })();
-    if (!notes.length) return '<p style="color:var(--gray-500)">No notes yet</p>';
-    return notes.slice().reverse().map(n=>`
-      <div class="note-item">
-        <div class="note-meta">${fmtDateTime(n.at)}${n.by?' · '+n.by:''}</div>
-        <div class="note-text">${n.text}</div>
-      </div>`).join('');
-  },
-
-  async verify(id) {
-    await API.post(`/api/orgs/${API.orgId}/donors/${id}/verify`, {});
-    toast('Verified ✓'); this.open(id); loadBadges();
-  },
-  async pref(id, field, value) {
-    await API.put(API.org.donor(id), { [field]: value });
-  },
-  async saveKvitel(id) {
-    const kvitel = document.getElementById('kv-text')?.value||'';
-    const enabled = document.getElementById('kv-on')?.checked?1:0;
-    await API.put(API.org.donor(id), { kvitel, kvitel_enabled: enabled });
-    toast('Kvitel saved');
-  },
-  async addNote(id) {
-    const text = document.getElementById('new-note')?.value?.trim();
-    if (!text) return;
-    const notes = (() => { try { return JSON.parse(this.data.donor.notes||'[]'); } catch { return []; } })();
-    notes.push({ text, at: new Date().toISOString(), by: window.DRM.user?.full_name||'' });
-    await API.put(API.org.donor(id), { notes });
-    toast('Note added'); this.open(id);
-  },
-
-  addCard(donorId) {
-    Modal.open('Add Payment Method', `
-      <label>Type</label>
-      <select id="pm-type" onchange="Pages.DonorDetail.pmTypeChange()">
-        <option value="credit_card">Credit Card (Sola)</option>
-        <option value="daf">DAF</option>
-        <option value="check">Check</option>
-        <option value="other">Other</option>
-      </select>
-      <div id="cc-fields">
-        <div class="alert alert-info" style="margin-top:10px;font-size:12px">Card is tokenized via Sola — raw card number is never stored.</div>
-        <div class="input-row input-row-2">
-          <div><label>Card Number</label><input id="pm-num" placeholder="Card number" maxlength="19" autocomplete="cc-number"></div>
-          <div><label>Expiry (MMYY)</label><input id="pm-exp" placeholder="0128" maxlength="4" autocomplete="cc-exp"></div>
-        </div>
-        <div class="input-row input-row-2">
-          <div><label>CVV</label><input id="pm-cvv" placeholder="123" maxlength="4" type="password" autocomplete="cc-csc"></div>
-          <div><label>ZIP</label><input id="pm-zip" placeholder="11201" maxlength="5"></div>
-        </div>
-        <div><label>Card Brand</label>
-          <select id="pm-brand">
-            <option value="">— Select —</option>
-            <option>Visa</option><option>Mastercard</option><option>Amex</option><option>Discover</option>
-          </select>
-        </div>
-      </div>
-      <div id="daf-fields" style="display:none">
-        <label>DAF Name</label><input id="pm-dafname" placeholder="Fidelity Charitable, Schwab…">
-      </div>
-      <div id="other-fields" style="display:none">
-        <label>Description</label><input id="pm-other" placeholder="Check, Cash, Wire…">
-      </div>
-      <label>Nickname (optional)</label>
-      <input id="pm-label" placeholder="e.g. My Chase Visa" autocomplete="off">
-      <div class="toggle-row" style="margin-top:10px">
-        <div class="toggle-label">Set as default</div>
-        <label class="toggle"><input type="checkbox" id="pm-default" checked><span class="toggle-slider"></span></label>
-      </div>
-      <div style="margin-top:14px">
-        <button class="btn btn-primary" id="pm-save-btn" onclick="Pages.DonorDetail.saveCard('${donorId}')">Save & Tokenize</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-
-    window.Pages.DonorDetail.pmTypeChange = () => {
-      const t = document.getElementById('pm-type')?.value;
-      document.getElementById('cc-fields').style.display = t==='credit_card'?'':'none';
-      document.getElementById('daf-fields').style.display = t==='daf'?'':'none';
-      document.getElementById('other-fields').style.display = (t==='check'||t==='other')?'':'none';
-      const btn = document.getElementById('pm-save-btn');
-      if (btn) btn.textContent = t==='credit_card'?'Save & Tokenize':'Add Method';
-    };
-  },
-
-  async saveCard(donorId) {
-    const type = document.getElementById('pm-type')?.value;
-    const label = document.getElementById('pm-label')?.value;
-    const isDefault = document.getElementById('pm-default')?.checked ? 1 : 0;
-    const btn = document.getElementById('pm-save-btn');
-    try {
-      if (type === 'credit_card') {
-        const num = document.getElementById('pm-num')?.value.replace(/\s/g,'');
-        const exp = document.getElementById('pm-exp')?.value.replace(/\D/g,'');
-        const cvv = document.getElementById('pm-cvv')?.value;
-        const brand = document.getElementById('pm-brand')?.value;
-        if (!num||!exp) { toast('Card number and expiry required','error'); return; }
-        if (btn) { btn.textContent='Tokenizing…'; btn.disabled=true; }
-        // First save card with card_brand manually set so last_four shows up
-        const r = await API.post(`/api/orgs/${API.orgId}/payments/save-card`, {
-          donor_id: donorId, card_num: num, exp, cvv: cvv||'', label: label||''
-        });
-        // Update brand if selected
-        if (brand && r.paymentMethod?.id) {
-          await API.put(`/api/orgs/${API.orgId}/donors/${donorId}/payment-methods/${r.paymentMethod.id}`, { card_brand: brand }).catch(()=>{});
-        }
-        toast(`Card ••${r.paymentMethod?.last_four||'??'} saved and tokenized`);
-      } else {
-        await API.post(`/api/orgs/${API.orgId}/donors/${donorId}/payment-methods`, {
-          type, label: label||null,
-          daf_name: document.getElementById('pm-dafname')?.value||null,
-          other_description: document.getElementById('pm-other')?.value||null,
-          is_default: isDefault
-        });
-        toast('Payment method added');
-      }
-      Modal.close(); this.open(donorId);
-    } catch(e) {
-      if (btn) { btn.textContent='Save & Tokenize'; btn.disabled=false; }
-      toast(e.message,'error');
-    }
-  },
-
-  async deletePM(donorId, pmId) {
-    confirm('Remove this payment method?', async () => {
-      await API.del(`/api/orgs/${API.orgId}/donors/${donorId}/payment-methods/${pmId}`);
-      toast('Removed'); this.open(donorId);
-    });
-  },
-
-  chargeNow(donorId) {
-    const pms = this.data.paymentMethods.filter(p=>p.type==='credit_card'&&p.sola_token);
-    if (!pms.length) { toast('No tokenized credit cards on file. Add a card first.','error'); return; }
-    Modal.open('Charge Card', `
-      <label>Payment Method</label>
-      <select id="cn-pm">
-        ${pms.map(p=>`<option value="${p.id}">${p.card_brand||'Card'} ••${p.last_four||'??'} ${p.label?'('+p.label+')':''}</option>`).join('')}
-      </select>
-      <label>Amount ($)</label>
-      <input type="number" id="cn-amount" step="0.01" placeholder="0.00">
-      <label>Notes (optional)</label>
-      <input id="cn-notes" placeholder="Optional" autocomplete="off">
-      <div style="margin-top:14px">
-        <button class="btn btn-primary" onclick="Pages.DonorDetail.doCharge('${donorId}')">Charge Now</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-  },
-
-  chargeCard(donorId, pmId) {
-    Modal.open('Charge Card', `
-      <label>Amount ($)</label>
-      <input type="number" id="cc-amount" step="0.01" placeholder="0.00">
-      <label>Notes (optional)</label>
-      <input id="cc-notes" placeholder="Optional" autocomplete="off">
-      <div style="margin-top:14px">
-        <button class="btn btn-primary" onclick="Pages.DonorDetail.doChargeSpecific('${donorId}','${pmId}')">Charge Now</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-  },
-
-  async doCharge(donorId) {
-    const pmId = document.getElementById('cn-pm')?.value;
-    const amount = parseFloat(document.getElementById('cn-amount')?.value);
-    if (!amount||amount<=0) { toast('Enter a valid amount','error'); return; }
-    try {
-      const r = await API.post(`/api/orgs/${API.orgId}/payments/charge`, {
-        donor_id: donorId, payment_method_id: pmId, amount,
-        notes: document.getElementById('cn-notes')?.value
-      });
-      toast(`Charged ${fmt$(amount)} — Trans ID: ${r.transaction_id}`);
-      Modal.close(); this.open(donorId);
-    } catch(e) { toast(e.message,'error'); }
-  },
-
-  async doChargeSpecific(donorId, pmId) {
-    const amount = parseFloat(document.getElementById('cc-amount')?.value);
-    if (!amount||amount<=0) { toast('Enter a valid amount','error'); return; }
-    try {
-      const r = await API.post(`/api/orgs/${API.orgId}/payments/charge`, {
-        donor_id: donorId, payment_method_id: pmId, amount,
-        notes: document.getElementById('cc-notes')?.value
-      });
-      toast(`Charged ${fmt$(amount)} — Trans ID: ${r.transaction_id}`);
-      Modal.close(); this.open(donorId);
-    } catch(e) { toast(e.message,'error'); }
-  },
-
-  manualDonation(donorId) {
-    const now = new Date().toISOString().slice(0,16);
-    const allPms = this.data.paymentMethods || [];
-    Modal.open('Add Manual Donation', `
-      <div class="input-row input-row-2">
-        <div><label>Amount ($) *</label><input type="number" id="md-amount" step="0.01" placeholder="0.00"></div>
-        <div><label>Method *</label>
-          <select id="md-method">
-            <option value="check">Check</option>
-            <option value="cash">Cash</option>
-            <option value="daf">DAF</option>
-            <option value="wire">Wire</option>
-            <option value="other">Other</option>
-          </select>
-        </div>
-      </div>
-      <div class="input-row input-row-2">
-        <div><label>Date *</label><input type="datetime-local" id="md-date" value="${now}"></div>
-        <div><label>Transaction ID</label><input id="md-txid" placeholder="Check #, ref, etc." autocomplete="off"></div>
-      </div>
-      <label>Notes</label><input id="md-notes" placeholder="Optional" autocomplete="off">
-      <div style="margin-top:14px">
-        <button class="btn btn-primary" onclick="Pages.DonorDetail.saveManual('${donorId}')">Record Donation</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-  },
-
-  async saveManual(donorId) {
-    const amount = parseFloat(document.getElementById('md-amount')?.value);
-    if (!amount||amount<=0) { toast('Amount required','error'); return; }
-    try {
-      await API.post(`/api/orgs/${API.orgId}/donors/${donorId}/donations`, {
-        amount, method: document.getElementById('md-method')?.value,
-        donation_date: document.getElementById('md-date')?.value || new Date().toISOString(),
-        transaction_id: document.getElementById('md-txid')?.value||null,
-        notes: document.getElementById('md-notes')?.value||null,
-        status: 'completed'
-      });
-      toast('Donation recorded'); Modal.close(); this.open(donorId);
-    } catch(e) { toast(e.message,'error'); }
-  },
-
-  addDonationNote(donorId, donId) {
-    Modal.open('Add Note to Donation', `
-      <textarea id="dn-text" placeholder="Enter note…" style="min-height:80px;width:100%"></textarea>
-      <div style="margin-top:12px">
-        <button class="btn btn-primary" onclick="Pages.DonorDetail.saveDonationNote('${donorId}','${donId}')">Add Note</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-  },
-
-  async saveDonationNote(donorId, donId) {
-    const text = document.getElementById('dn-text')?.value?.trim();
-    if (!text) return;
-    try {
-      await API.post(`/api/orgs/${API.orgId}/donors/${donorId}/donations/${donId}/notes`, { text });
-      toast('Note added'); Modal.close(); this.open(donorId);
-    } catch(e) { toast(e.message,'error'); }
-  },
-
-  refundDonation(donorId, donId, amount, txId) {
-    Modal.open('Refund Donation', `
-      <p style="color:var(--gray-500);font-size:13px;margin-bottom:12px">Original amount: ${fmt$(amount)}</p>
-      <label>Refund Amount ($)</label>
-      <input type="number" id="rf-amount" step="0.01" max="${amount}" value="${amount}" placeholder="0.00">
-      <label>Reason</label>
-      <input id="rf-reason" placeholder="Reason for refund" autocomplete="off">
-      ${txId?`<div class="alert alert-info" style="margin-top:10px;font-size:12px">Sola Ref: ${txId} — CC refunds go through Sola automatically.</div>`:''}
-      <div style="margin-top:14px">
-        <button class="btn btn-danger" onclick="Pages.DonorDetail.doRefund('${donorId}','${donId}','${txId}')">Process Refund</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-  },
-
-  async doRefund(donorId, donId, txId) {
-    const amount = parseFloat(document.getElementById('rf-amount')?.value);
-    const notes = document.getElementById('rf-reason')?.value;
-    if (!amount||amount<=0) { toast('Enter refund amount','error'); return; }
-    try {
-      const r = await API.post(`/api/orgs/${API.orgId}/donors/${donorId}/donations/${donId}/refund`, {
-        amount, notes, ref_num: txId||undefined
-      });
-      toast(`Refund of ${fmt$(amount)} processed`);
-      Modal.close(); this.open(donorId);
-    } catch(e) { toast(e.message,'error'); }
-  },
-
-  addRecurring(donorId) {
-    const pms = this.data.paymentMethods || [];
-    if (!pms.length) { toast('Add a payment method first','error'); return; }
-    Modal.open('Add Recurring Schedule', `
-      <label>Payment Method</label>
-      <select id="rec-pm">
-        ${pms.map(p=>`<option value="${p.id}">${fmtMethod(p.type)} ${p.last_four?'••'+p.last_four:''} ${p.label?'('+p.label+')':''}</option>`).join('')}
-      </select>
-      <div class="input-row input-row-2">
-        <div><label>Amount ($)</label><input type="number" id="rec-amount" step="0.01" placeholder="0.00"></div>
-        <div><label>Frequency</label>
-          <select id="rec-freq">
-            <option value="weekly">Weekly</option>
-            <option value="biweekly">Bi-Weekly</option>
-            <option value="monthly" selected>Monthly</option>
-            <option value="quarterly">Quarterly</option>
-            <option value="yearly">Yearly</option>
-            <option value="once">One-Time (scheduled)</option>
-          </select>
-        </div>
-      </div>
-      <div class="input-row input-row-2">
-        <div><label>Start Date</label><input type="date" id="rec-start" value="${new Date().toISOString().slice(0,10)}"></div>
-        <div><label>End Date (optional)</label><input type="date" id="rec-end" placeholder="Leave blank for unlimited"></div>
-      </div>
-      <label>Number of Charges (blank = unlimited)</label>
-      <input type="number" id="rec-limit" placeholder="e.g. 12 for one year of monthly" min="1">
-      <label>Notes (optional)</label>
-      <input id="rec-notes" placeholder="e.g. Pledge 2025" autocomplete="off">
-      <div style="margin-top:14px">
-        <button class="btn btn-primary" onclick="Pages.DonorDetail.saveRecurring('${donorId}')">Save Schedule</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-  },
-
-  async saveRecurring(donorId) {
-    const amount = parseFloat(document.getElementById('rec-amount')?.value);
-    if (!amount||amount<=0) { toast('Amount required','error'); return; }
-    try {
-      await API.post(`/api/orgs/${API.orgId}/donors/${donorId}/recurring`, {
-        payment_method_id: document.getElementById('rec-pm')?.value,
-        amount, frequency: document.getElementById('rec-freq')?.value,
-        start_date: document.getElementById('rec-start')?.value,
-        end_date: document.getElementById('rec-end')?.value||null,
-        occurrences_limit: document.getElementById('rec-limit')?.value ? parseInt(document.getElementById('rec-limit').value) : null,
-        notes: document.getElementById('rec-notes')?.value||null
-      });
-      toast('Schedule created'); Modal.close(); this.open(donorId);
-    } catch(e) { toast(e.message,'error'); }
-  },
-
-  async toggleRecurring(donorId, schedId, status) {
-    await API.put(`/api/orgs/${API.orgId}/donors/${donorId}/recurring/${schedId}`, { status });
-    toast(status==='paused'?'Paused':'Resumed'); this.open(donorId);
-  },
-
-  editRecurring(donorId, schedId, amount, freq, nextRun) {
-    Modal.open('Edit Schedule', `
-      <label>Amount ($)</label>
-      <input type="number" id="er-amount" value="${amount}" step="0.01">
-      <label>Frequency</label>
-      <select id="er-freq">
-        ${['weekly','biweekly','monthly','quarterly','yearly','once'].map(f=>`<option value="${f}" ${f===freq?'selected':''}>${fmtFrequency(f)}</option>`).join('')}
-      </select>
-      <label>Next Run Date</label>
-      <input type="date" id="er-next" value="${nextRun?nextRun.slice(0,10):''}">
-      <div style="margin-top:14px">
-        <button class="btn btn-primary" onclick="Pages.DonorDetail.saveEditRecurring('${donorId}','${schedId}')">Save</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-  },
-
-  async saveEditRecurring(donorId, schedId) {
-    await API.put(`/api/orgs/${API.orgId}/donors/${donorId}/recurring/${schedId}`, {
-      amount: parseFloat(document.getElementById('er-amount')?.value),
-      frequency: document.getElementById('er-freq')?.value,
-      next_run: document.getElementById('er-next')?.value
-    });
-    toast('Schedule updated'); Modal.close(); this.open(donorId);
-  },
-
-  async deleteRecurring(donorId, schedId) {
-    confirm('Cancel this recurring schedule?', async () => {
-      await API.del(`/api/orgs/${API.orgId}/donors/${donorId}/recurring/${schedId}`);
-      toast('Schedule cancelled'); this.open(donorId);
-    });
-  }
-};
-
-// ===== all-pages.js =====
-// public/js/pages/donations.js
-Pages.Donations = {
-  async render(el) {
-    el.innerHTML = `<div class="page-header"><div class="page-title">All Donations</div></div><div class="spinner"></div>`;
-    try {
-      const donations = await API.get(`/api/orgs/${API.orgId}/reports/donations`);
-      el.innerHTML = `
-        <div class="page-header">
-          <div><div class="page-title">All Donations</div><div class="page-subtitle">${donations.length} records</div></div>
-          <button class="btn btn-ghost btn-sm" onclick="API.downloadGet('/api/orgs/${API.orgId}/reports/donations?format=xlsx','donations-report.xlsx').catch(e=>toast(e.message,'error'))">⬇ Export XLSX</button>
-        </div>
-        <div class="card">
-          <div class="search-bar">
-            <div class="search-input-wrap" style="flex:1">
-              <span class="search-icon">🔍</span>
-              <input type="text" id="don-search" placeholder="Search donor or transaction ID...">
-            </div>
-            <select id="don-method-filter">
-              <option value="">All Methods</option>
-              ${[...new Set(donations.map(d=>d.method))].map(m=>`<option>${m}</option>`).join('')}
-            </select>
-            <select id="don-status-filter">
-              <option value="">All Status</option>
-              <option value="completed">Completed</option>
-              <option value="pending">Pending</option>
-              <option value="failed">Failed</option>
-              <option value="scheduled">Scheduled</option>
-            </select>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>Date</th><th>Donor</th><th>Amount</th><th>Method</th><th>Status</th><th>Transaction ID</th><th>Notes</th></tr></thead>
-              <tbody id="don-tbody">
-                ${this.rows(donations)}
-              </tbody>
-            </table>
-          </div>
-        </div>`;
-
-      let filtered = donations;
-      const filter = () => {
-        const s = document.getElementById('don-search')?.value?.toLowerCase() || '';
-        const m = document.getElementById('don-method-filter')?.value || '';
-        const st = document.getElementById('don-status-filter')?.value || '';
-        filtered = donations.filter(d =>
-          (!s || `${d.first_name} ${d.last_name} ${d.transaction_id}`.toLowerCase().includes(s)) &&
-          (!m || d.method === m) && (!st || d.status === st));
-        document.getElementById('don-tbody').innerHTML = this.rows(filtered);
-      };
-      document.getElementById('don-search')?.addEventListener('input', filter);
-      document.getElementById('don-method-filter')?.addEventListener('change', filter);
-      document.getElementById('don-status-filter')?.addEventListener('change', filter);
-    } catch (e) { el.innerHTML = `<div class="alert alert-danger">${e.message}</div>`; }
-  },
-
-  rows(donations) {
-    if (!donations.length) return '<tr><td colspan="7"><div class="empty-state" style="padding:30px"><div class="empty-icon">💳</div><h3>No donations found</h3></div></td></tr>';
-    return donations.map(d => `<tr>
-      <td>${fmtDate(d.donation_date)}</td>
-      <td><strong>${d.first_name} ${d.last_name}</strong><br><span style="font-size:11px;color:var(--gray-500)">${d.neighborhood||''}</span></td>
-      <td class="amount">${fmt$(d.amount)}</td>
-      <td>${d.method}${d.last_four ? ` ••${d.last_four}` : ''}</td>
-      <td>${statusBadge(d.status)}</td>
-      <td style="font-size:11px;color:var(--gray-500)">${d.transaction_id||'—'}</td>
-      <td style="font-size:12px">${d.notes||''}</td>
-    </tr>`).join('');
-  }
-};
-
-// public/js/pages/verification.js
-Pages.Verification = {
-  donors: [],
-
-  async render(el) {
-    el.innerHTML = `<div class="spinner"></div>`;
-    try {
-      this.donors = await API.get(API.org.verification());
-      this.renderPage(el);
-    } catch (e) { el.innerHTML = `<div class="alert alert-danger">${e.message}</div>`; }
-  },
-
-  renderPage(el) {
-    const count = this.donors.length;
-    el.innerHTML = `
-      <div class="page-header">
-        <div>
-          <div class="page-title">Info Verification</div>
-          <div class="page-subtitle">${count} donor${count !== 1 ? 's' : ''} need${count === 1 ? 's' : ''} info check</div>
-        </div>
-        ${count > 0 ? `<button class="btn btn-success" onclick="Pages.Verification.verifyAll()">✓ Verify All</button>` : ''}
-      </div>
-
-      ${count === 0 ? `
-        <div class="card">
-          <div class="empty-state" style="padding:60px">
-            <div class="empty-icon">✅</div>
-            <h3>All donors are up to date!</h3>
-            <p>No info checks needed right now. Donors are flagged after 6 months without verification.</p>
-          </div>
-        </div>` : `
-        <div class="alert alert-warning">
-          <strong>Info Check Required</strong> — These donors haven't had their information verified in over 6 months.
-          Review their details and click "Verify" to confirm their info is current.
-        </div>
-        <div class="card">
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Donor</th>
-                  <th>Neighborhood</th>
-                  <th>Contact</th>
-                  <th>Account Age</th>
-                  <th>Last Verified</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${this.donors.map(d => `
-                  <tr id="vrow-${d.id}">
-                    <td>
-                      <div class="donor-name-cell">
-                        ${avatarHtml(d)}
-                        <div>
-                          <div class="donor-name-main">${d.title ? d.title + ' ' : ''}${d.first_name} ${d.last_name}</div>
-                          ${d.hebrew_full_name ? `<div class="he" style="font-size:11px">${d.hebrew_full_name}</div>` : ''}
-                        </div>
-                      </div>
-                    </td>
-                    <td><span class="he">${d.neighborhood_name || '—'}</span></td>
-                    <td>
-                      ${d.cell ? `📱 ${d.cell}<br>` : ''}
-                      ${d.email ? `<span style="font-size:12px;color:var(--gray-500)">${d.email}</span>` : '—'}
-                    </td>
-                    <td>${accountAge(d.months_old)}</td>
-                    <td style="color:var(--danger)">${d.info_verified_at ? fmtDate(d.info_verified_at) : 'Never'}</td>
-                    <td>
-                      <div class="btn-group">
-                        <button class="btn btn-blue btn-sm" onclick="Pages.DonorDetail.open('${d.id}')">View</button>
-                        <button class="btn btn-success btn-sm" onclick="Pages.Verification.verify('${d.id}')">✓ Verify</button>
-                      </div>
-                    </td>
-                  </tr>`).join('')}
-              </tbody>
-            </table>
-          </div>
-        </div>`}`;
-  },
-
-  async verify(id) {
-    try {
-      await API.post(`/api/orgs/${API.orgId}/donors/${id}/verify`, {});
-      const row = document.getElementById(`vrow-${id}`);
-      if (row) { row.style.opacity = '0'; row.style.transition = 'opacity 0.3s'; setTimeout(() => row.remove(), 300); }
-      this.donors = this.donors.filter(d => d.id !== id);
-      const subtitle = document.querySelector('.page-subtitle');
-      if (subtitle) subtitle.textContent = `${this.donors.length} donor${this.donors.length !== 1 ? 's' : ''} need${this.donors.length === 1 ? 's' : ''} info check`;
-      toast('Marked as verified ✓');
-      loadBadges();
-    } catch (e) { toast(e.message, 'error'); }
-  },
-
-  async verifyAll() {
-    confirm(`Mark all ${this.donors.length} donors as verified?`, async () => {
-      for (const d of this.donors) {
-        await API.post(`/api/orgs/${API.orgId}/donors/${d.id}/verify`, {});
-      }
-      toast('All donors verified ✓');
-      this.donors = [];
-      await this.render(document.getElementById('page-verification'));
-      loadBadges();
-    });
-  }
-};
-
-// public/js/pages/failures.js
-Pages.Failures = {
-  async render(el) {
-    el.innerHTML = `<div class="spinner"></div>`;
-    try {
-      const failures = await API.get(API.org.chargeFailures());
-      const unacked = failures.filter(f => !f.acknowledged);
-      el.innerHTML = `
-        <div class="page-header">
-          <div>
-            <div class="page-title">Failed Charges</div>
-            <div class="page-subtitle">${failures.length} total • ${unacked.length} unacknowledged</div>
-          </div>
-          <div class="btn-group">
-            ${unacked.length > 0 ? `<button class="btn btn-outline btn-sm" onclick="Pages.Failures.acknowledgeAll()">✓ Acknowledge All</button>` : ''}
-            <button class="btn btn-ghost btn-sm" onclick="Pages.Failures.render(document.getElementById('page-failures'))">↻ Refresh</button>
-          </div>
-        </div>
-
-        ${unacked.length > 0 ? `<div class="alert alert-danger"><strong>${unacked.length} charge${unacked.length>1?'s':''} failed</strong> — Review and retry these charges. Account admins have been notified by email.</div>` : ''}
-
-        ${failures.length === 0 ? `
-          <div class="card"><div class="empty-state" style="padding:60px">
-            <div class="empty-icon">✅</div><h3>No failed charges</h3><p>All charges have been processed successfully.</p>
-          </div></div>` : `
-          <div class="card">
-            <div class="table-wrap"><table>
-              <thead><tr><th>Date</th><th>Donor</th><th>Amount</th><th>Method</th><th>Reason</th><th>Status</th><th>Action</th></tr></thead>
-              <tbody>
-                ${failures.map(f => `
-                  <tr style="${f.acknowledged ? 'opacity:0.6' : ''}">
-                    <td>${fmtDateTime(f.occurred_at)}</td>
-                    <td>
-                      <strong>${f.first_name} ${f.last_name}</strong><br>
-                      ${f.email ? `<span style="font-size:11px;color:var(--gray-500)">${f.email}</span>` : ''}
-                    </td>
-                    <td class="amount">${fmt$(f.amount)}</td>
-                    <td>${f.method_label || f.method_type || '—'}${f.last_four ? ` ••${f.last_four}` : ''}</td>
-                    <td style="color:var(--danger);font-size:13px">${f.failure_reason || 'Unknown'}</td>
-                    <td>${f.acknowledged ? `<span class="pill pill-green">Acknowledged</span>` : `<span class="pill pill-red">New</span>`}</td>
-                    <td>
-                      <div class="btn-group">
-                        <button class="btn btn-blue btn-sm" onclick="Pages.DonorDetail.open('${f.donor_id}')">View Donor</button>
-                        ${!f.acknowledged ? `<button class="btn btn-ghost btn-sm" onclick="Pages.Failures.acknowledge('${f.id}', this)">✓ Ack</button>` : ''}
-                      </div>
-                    </td>
-                  </tr>`).join('')}
-              </tbody>
-            </table></div>
-          </div>`}`;
-    } catch (e) { el.innerHTML = `<div class="alert alert-danger">${e.message}</div>`; }
-  },
-
-  async acknowledge(id, btn) {
-    await API.post(`/api/orgs/${API.orgId}/charge-failures/${id}/acknowledge`, {});
-    toast('Acknowledged');
-    btn.closest('tr').style.opacity = '0.6';
-    btn.remove();
-    loadBadges();
-  },
-
-  async acknowledgeAll() {
-    confirm('Acknowledge all failed charges?', async () => {
-      await API.post(`/api/orgs/${API.orgId}/charge-failures/acknowledge-all`, {});
-      toast('All acknowledged');
-      await this.render(document.getElementById('page-failures'));
-      loadBadges();
-    });
-  }
-};
-
-// public/js/pages/bank.js
-Pages.Bank = {
-  async render(el) {
-    el.innerHTML = `<div class="spinner"></div>`;
-    try {
-      const txs = await API.get(`/api/orgs/${API.orgId}/bank/transactions`);
-      el.innerHTML = `
-        <div class="page-header">
-          <div><div class="page-title">Bank Transactions</div><div class="page-subtitle">Chase Bank</div></div>
-          <div class="btn-group">
-            <button class="btn btn-ghost btn-sm" onclick="Pages.Bank.sync()">↻ Sync</button>
-            <button class="btn btn-primary btn-sm" onclick="Pages.Bank.addConnection()">+ Connect Bank</button>
-          </div>
-        </div>
-        <div class="card">
-          <div class="search-bar">
-            <div class="search-input-wrap" style="flex:1"><span class="search-icon">🔍</span>
-              <input type="text" id="bank-search" placeholder="Search description or merchant...">
-            </div>
-            <select id="bank-dir">
-              <option value="">All</option><option value="credit">Credits (In)</option><option value="debit">Debits (Out)</option>
-            </select>
-            <select id="bank-labeled">
-              <option value="">All</option><option value="false">Unlabeled</option>
-            </select>
-          </div>
-          <div class="table-wrap"><table>
-            <thead><tr><th>Date</th><th>Description</th><th>Amount</th><th>Type</th><th>Label</th><th>Linked Donor</th><th>Actions</th></tr></thead>
-            <tbody id="bank-tbody">
-              ${txs.length ? txs.map(t => `<tr>
-                <td>${fmtDate(t.transaction_date)}</td>
-                <td>${t.description || t.merchant || '—'}</td>
-                <td class="amount ${t.direction==='credit'?'positive':'negative'}">${t.direction==='debit'?'-':''}${fmt$(t.amount)}</td>
-                <td>${t.direction==='credit'?'<span class="pill pill-green">Credit</span>':'<span class="pill pill-red">Debit</span>'}</td>
-                <td>${t.label ? `<span class="pill pill-blue">${t.label}</span>` : '<span style="color:var(--gray-300)">—</span>'}</td>
-                <td>${t.linked_donor_id ? `<a href="#" onclick="Pages.DonorDetail.open('${t.linked_donor_id}')">${t.linked_donor_id.slice(0,8)}...</a>` : '—'}</td>
-                <td><button class="btn btn-ghost btn-sm" onclick="Pages.Bank.labelTx('${t.id}')">Label</button></td>
-              </tr>`).join('') : '<tr><td colspan="7"><div class="empty-state" style="padding:40px"><div class="empty-icon">🏦</div><h3>No transactions</h3><p>Connect your Chase account and sync to see transactions.</p></div></td></tr>'}
-            </tbody>
-          </table></div>
-        </div>`;
-    } catch (e) { el.innerHTML = `<div class="alert alert-danger">${e.message}</div>`; }
-  },
-
-  async sync() {
-    try { await API.post(`/api/orgs/${API.orgId}/bank/sync`, {}); toast('Sync initiated'); }
-    catch (e) { toast(e.message, 'error'); }
-  },
-
-  addConnection() {
-    Modal.open('Connect Bank Account', `
-      <div class="alert alert-info">Chase bank integration requires OAuth setup. Enter your Chase API credentials below.</div>
-      <label>API Key</label><input id="bank-key" type="password" placeholder="Chase API Key">
-      <label>API Secret</label><input id="bank-secret" type="password" placeholder="Chase API Secret">
-      <div style="margin-top:16px">
-        <button class="btn btn-primary" onclick="Pages.Bank.saveConnection()">Connect</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-  },
-
-  async saveConnection() {
-    try {
-      await API.post(`/api/orgs/${API.orgId}/bank`, {
-        api_key: document.getElementById('bank-key')?.value,
-        api_secret: document.getElementById('bank-secret')?.value,
-        bank_name: 'Chase'
-      });
-      toast('Bank connected'); Modal.close();
-    } catch (e) { toast(e.message, 'error'); }
-  },
-
-  labelTx(id) {
-    Modal.open('Label Transaction', `
-      <label>Label</label>
-      <input id="tx-label" placeholder="e.g. Donation, Office Expense...">
-      <div style="margin-top:16px">
-        <button class="btn btn-primary" onclick="Pages.Bank.saveTxLabel('${id}')">Save</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-  },
-
-  async saveTxLabel(id) {
-    try {
-      await API.post(`/api/orgs/${API.orgId}/bank/transactions/${id}/label`, { label: document.getElementById('tx-label')?.value });
-      toast('Label saved'); Modal.close();
-      this.render(document.getElementById('page-bank'));
-    } catch (e) { toast(e.message, 'error'); }
-  }
-};
-
-// public/js/pages/emails.js
-Pages.Emails = {
-  async render(el) {
-    el.innerHTML = `<div class="spinner"></div>`;
-    try {
-      const [settings, scheduled] = await Promise.all([
-        API.get(API.org.emailSettings()),
-        API.get(API.org.scheduledEmails())
-      ]);
-      el.innerHTML = `
-        <div class="page-header"><div class="page-title">Email Settings</div></div>
-        <div class="tabs">
-          <div class="tab active" onclick="emailTab(this,'em-smtp')">SMTP Settings</div>
-          <div class="tab" onclick="emailTab(this,'em-receipt')">Receipt Template</div>
-          <div class="tab" onclick="emailTab(this,'em-schedule')">Scheduled Emails</div>
-        </div>
-
-        <div id="em-smtp" class="tab-content active">
-          <div class="card">
-            <div class="toggle-row">
-              <div><div class="toggle-label">Pause all donation receipt emails</div></div>
-              <label class="toggle"><input type="checkbox" id="em-pause-all" ${settings?.donation_emails_paused ? 'checked':''}><span class="toggle-slider"></span></label>
-            </div>
-            <hr class="section-divider">
-            <div class="input-row input-row-2">
-              <div><label>SMTP Email</label><input id="em-email" value="${settings?.smtp_email||''}" placeholder="you@gmail.com"></div>
-              <div><label>From Name</label><input id="em-name" value="${settings?.from_name||''}" placeholder="My Synagogue"></div>
-            </div>
-            <div class="input-row input-row-2">
-              <div><label>SMTP Host</label><input id="em-host" value="${settings?.smtp_host||'smtp.gmail.com'}"></div>
-              <div><label>SMTP Port</label><input id="em-port" type="number" value="${settings?.smtp_port||587}"></div>
-            </div>
-            <div><label>App Password</label>
-              <input id="em-pass" type="password" placeholder="Leave blank to keep current password">
-              <small style="color:var(--gray-500)">For Gmail: use an App Password (Google Account → Security → App Passwords). Password is stored securely and never shown.</small>
-            </div>
-            <div class="btn-group" style="margin-top:16px">
-              <button class="btn btn-primary" onclick="Pages.Emails.saveSmtp()">Save Settings</button>
-              <button class="btn btn-ghost btn-sm" onclick="Pages.Emails.testEmail()">Send Test Email</button>
-            </div>
-          </div>
-        </div>
-
-        <div id="em-receipt" class="tab-content">
-          <div class="card">
-            <p style="color:var(--gray-500);margin-bottom:12px">Available variables: {first_name} {last_name} {title} {hebrew_name} {amount} {date} {transaction_id} {method} {last_four} {org_name}</p>
-            <label>Donation Receipt Template (HTML)</label>
-            <textarea id="em-receipt-tmpl" style="min-height:280px;font-family:monospace;font-size:13px">${settings?.receipt_template||''}</textarea>
-            <label style="margin-top:12px">Marketing Email Template (HTML)</label>
-            <textarea id="em-mkt-tmpl" style="min-height:200px;font-family:monospace;font-size:13px">${settings?.marketing_template||''}</textarea>
-            <div style="margin-top:16px">
-              <button class="btn btn-primary" onclick="Pages.Emails.saveTemplates()">Save Templates</button>
-            </div>
-          </div>
-        </div>
-
-        <div id="em-schedule" class="tab-content">
-          <div class="card">
-            <div style="display:flex;justify-content:space-between;margin-bottom:16px">
-              <strong>Scheduled Emails</strong>
-              <button class="btn btn-primary btn-sm" onclick="Pages.Emails.scheduleNew()">+ Schedule Email</button>
-            </div>
-            <div class="table-wrap"><table>
-              <thead><tr><th>Subject</th><th>To</th><th>Scheduled</th><th>Status</th><th>Action</th></tr></thead>
-              <tbody>
-                ${scheduled.map(e => `<tr>
-                  <td>${e.subject}</td>
-                  <td>${e.donor_id ? 'Donor' : 'All'}</td>
-                  <td>${fmtDateTime(e.scheduled_for)}</td>
-                  <td>${statusBadge(e.status)}</td>
-                  <td>${e.status==='pending' ? `<button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="Pages.Emails.cancelScheduled('${e.id}')">Cancel</button>` : ''}</td>
-                </tr>`).join('') || '<tr><td colspan="5"><div class="empty-state" style="padding:20px">No scheduled emails</div></td></tr>'}
-              </tbody>
-            </table></div>
-          </div>
-        </div>`;
-
-      window.emailTab = (el, id) => {
-        document.querySelectorAll('#page-emails .tab').forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('#page-emails .tab-content').forEach(t => t.classList.remove('active'));
-        el.classList.add('active'); document.getElementById(id)?.classList.add('active');
-      };
-    } catch (e) { el.innerHTML = `<div class="alert alert-danger">${e.message}</div>`; }
-  },
-
-  async saveSmtp() {
-    try {
-      await API.put(API.org.emailSettings(), {
-        smtp_email: document.getElementById('em-email')?.value,
-        smtp_password: document.getElementById('em-pass')?.value || undefined,
-        smtp_host: document.getElementById('em-host')?.value,
-        smtp_port: parseInt(document.getElementById('em-port')?.value),
-        from_name: document.getElementById('em-name')?.value,
-        donation_emails_paused: document.getElementById('em-pause-all')?.checked ? 1 : 0
-      });
-      toast('Email settings saved');
-    } catch (e) { toast(e.message, 'error'); }
-  },
-
-  async saveTemplates() {
-    try {
-      await API.put(API.org.emailSettings(), {
-        receipt_template: document.getElementById('em-receipt-tmpl')?.value,
-        marketing_template: document.getElementById('em-mkt-tmpl')?.value
-      });
-      toast('Templates saved');
-    } catch (e) { toast(e.message, 'error'); }
-  },
-
-  testEmail() {
-    Modal.open('Send Test Email', `
-      <label>Send to</label>
-      <input id="test-to" type="email" placeholder="your@email.com">
-      <div style="margin-top:16px">
-        <button class="btn btn-primary" onclick="Pages.Emails.doTest()">Send</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-  },
-
-  async doTest() {
-    try {
-      await API.post(`/api/orgs/${API.orgId}/email-settings/test`, { to: document.getElementById('test-to')?.value });
-      toast('Test email sent ✓'); Modal.close();
-    } catch (e) { toast(e.message, 'error'); }
-  },
-
-  scheduleNew() {
-    const now = new Date(); now.setHours(now.getHours() + 1);
-    Modal.open('Schedule Email', `
-      <label>Subject</label>
-      <input id="se-subject" placeholder="Email subject...">
-      <label>Body (HTML)</label>
-      <textarea id="se-body" style="min-height:160px;font-size:13px" placeholder="<p>Hello {first_name}...</p>"></textarea>
-      <label>Schedule For</label>
-      <input type="datetime-local" id="se-date" value="${toLocalInput(now.toISOString())}">
-      <div style="margin-top:16px">
-        <button class="btn btn-primary" onclick="Pages.Emails.doSchedule()">Schedule</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-  },
-
-  async doSchedule() {
-    try {
-      await API.post(API.org.scheduledEmails(), {
-        subject: document.getElementById('se-subject')?.value,
-        html_body: document.getElementById('se-body')?.value,
-        scheduled_for: document.getElementById('se-date')?.value
-      });
-      toast('Email scheduled'); Modal.close();
-      this.render(document.getElementById('page-emails'));
-    } catch (e) { toast(e.message, 'error'); }
-  },
-
-  async cancelScheduled(id) {
-    await API.del(`${API.org.scheduledEmails()}/${id}`);
-    toast('Cancelled');
-    this.render(document.getElementById('page-emails'));
-  }
-};
-
-// public/js/pages/kvitel-page.js
-Pages.KvitelPage = {
-  async render(el) {
-    el.innerHTML = `<div class="spinner"></div>`;
-    try {
-      const [settings, donors] = await Promise.all([
-        API.get(API.org.kvitelSettings()),
-        API.get(API.org.donors() + '?kvitel_enabled=1&limit=200')
-      ]);
-      const s = settings || {};
-
-      el.innerHTML = `
-        <div class="page-header">
-          <div><div class="page-title">Kvitel Generator</div></div>
-          <div class="btn-group">
-            <button class="btn btn-outline" onclick="Pages.KvitelPage.generate('pdf')">⬇ Download PDF</button>
-            <button class="btn btn-primary" onclick="Pages.KvitelPage.generate('docx')">⬇ Download DOCX</button>
-          </div>
-        </div>
-        <div class="two-panel">
-          <div class="card">
-            <div class="card-title">Print Settings</div>
-            <div class="input-row input-row-2">
-              <div><label>Page Size</label>
-                <select id="kv-pagesize">
-                  <option value="letter" ${s.page_size==='letter'?'selected':''}>Letter (8.5×11)</option>
-                  <option value="legal" ${s.page_size==='legal'?'selected':''}>Legal (8.5×14)</option>
-                  <option value="a4" ${s.page_size==='a4'?'selected':''}>A4</option>
-                </select>
-              </div>
-              <div><label>Columns</label>
-                <select id="kv-cols">
-                  ${[1,2,3,4].map(n=>`<option value="${n}" ${s.columns==n?'selected':''}>${n}</option>`).join('')}
-                </select>
-              </div>
-            </div>
-            <div class="input-row input-row-2">
-              <div><label>Body Font</label>
-                <select id="kv-font" onchange="Pages.KvitelPage.updatePreviewFont()">
-                  <option value="Noto Sans Hebrew" ${s.font_family==='Noto Sans Hebrew'?'selected':''}>Noto Sans Hebrew</option>
-                  <option value="Frank Ruhl Libre" ${s.font_family==='Frank Ruhl Libre'?'selected':''}>Frank Ruhl Libre</option>
-                  <option value="Heebo" ${s.font_family==='Heebo'?'selected':''}>Heebo</option>
-                  <option value="Narkisim" ${s.font_family==='Narkisim'?'selected':''}>Narkisim</option>
-                  <option value="Times New Roman" ${s.font_family==='Times New Roman'?'selected':''}>Times New Roman</option>
-                  <option value="Livvorn" ${s.font_family==='Livvorn'?'selected':''}>Livvorn (Livorna)</option>
-                </select>
-              </div>
-              <div><label>Body Font Size (pt)</label>
-                <input type="number" id="kv-fontsize" value="${s.font_size||12}" step="0.5" min="8" max="24">
-              </div>
-            </div>
-            <div class="input-row input-row-2">
-              <div><label>Column Gap (in)</label><input type="number" id="kv-gap" value="${s.column_gap||0.5}" step="0.1" min="0" max="2"></div>
-              <div><label>Line Height</label><input type="number" id="kv-lh" value="${s.line_height||1.6}" step="0.1" min="1" max="3"></div>
-            </div>
-            <div class="input-row input-row-4" style="margin-top:4px">
-              ${['top','bottom','left','right'].map(m=>`<div><label>Margin ${m} (in)</label><input type="number" id="kv-m${m}" value="${s['margin_'+m]||1}" step="0.25" min="0" max="3"></div>`).join('')}
-            </div>
-            <div class="toggle-row" style="margin-top:8px">
-              <div class="toggle-label">Group by Neighborhood</div>
-              <label class="toggle"><input type="checkbox" id="kv-bynh" ${s.group_by_neighborhood!==0?'checked':''}><span class="toggle-slider"></span></label>
-            </div>
-
-            <hr class="section-divider">
-            <div class="card-title" style="margin-bottom:10px">Header</div>
-            <div class="input-row input-row-2">
-              <div><label>Header Text</label>
-                <input id="kv-header-text" value="${(s.header_html||'').replace(/<[^>]+>/g,'')}" placeholder="Organization Name — Kvitel">
-              </div>
-              <div><label>Header Font</label>
-                <select id="kv-hfont">
-                  ${['Noto Sans Hebrew','Frank Ruhl Libre','Heebo','Narkisim','Times New Roman','Livvorn'].map(f=>`<option ${(s.header_font||'Frank Ruhl Libre')===f?'selected':''}>${f}</option>`).join('')}
-                </select>
-              </div>
-            </div>
-            <div class="input-row input-row-4" style="margin-top:4px">
-              <div><label>Size (pt)</label><input type="number" id="kv-hsize" value="${s.header_size||18}" min="10" max="48"></div>
-              <div><label>Bold</label><br>
-                <label class="toggle" style="margin-top:6px"><input type="checkbox" id="kv-hbold" ${s.header_bold!==0?'checked':''}><span class="toggle-slider"></span></label>
-              </div>
-              <div><label>Alignment</label>
-                <select id="kv-halign">
-                  <option value="center" ${(s.header_align||'center')==='center'?'selected':''}>Center</option>
-                  <option value="right" ${s.header_align==='right'?'selected':''}>Right</option>
-                  <option value="left" ${s.header_align==='left'?'selected':''}>Left</option>
-                </select>
-              </div>
-              <div><label>Direction</label>
-                <select id="kv-hdir">
-                  <option value="rtl" ${(s.header_dir||'rtl')==='rtl'?'selected':''}>RTL (Hebrew)</option>
-                  <option value="ltr" ${s.header_dir==='ltr'?'selected':''}>LTR</option>
-                </select>
-              </div>
-            </div>
-
-            <div style="margin-top:14px">
-              <button class="btn btn-primary" onclick="Pages.KvitelPage.saveSettings()">Save Settings</button>
-            </div>
-          </div>
-
-          <div class="card">
-            <div class="card-title">Preview <span style="font-size:12px;color:var(--gray-500)">(RTL, always)</span></div>
-            <div class="kvitel-preview" id="kv-preview" style="font-family:${s.font_family||'Noto Sans Hebrew'}">
-              ${this.buildPreview(donors.donors || [])}
-            </div>
-            <p style="font-size:12px;color:var(--gray-500);margin-top:8px">
-              ${(donors.donors||[]).filter(d=>d.kvitel).length} donors with kvitel content
-            </p>
-          </div>
-        </div>`;
-    } catch (e) { el.innerHTML = `<div class="alert alert-danger">${e.message}</div>`; }
-  },
-
-  buildPreview(donors) {
-    if (!donors.length) return '<p style="color:var(--gray-500)">No donors with kvitel content</p>';
-    return donors.filter(d => d.kvitel).slice(0, 20).map(d =>
-      `<div style="margin-bottom:16px">
-        <strong>${d.hebrew_full_name || d.first_name + ' ' + d.last_name}</strong>
-        ${d.neighborhood_name ? `<span style="font-size:11px;color:var(--gray-500)"> — ${d.neighborhood_name}</span>` : ''}
-        <div style="font-size:13px;white-space:pre-line;margin-top:4px">${d.kvitel}</div>
-      </div>`
-    ).join('<hr style="border:none;border-top:1px solid #eee;margin:8px 0">');
-  },
-
-  updatePreviewFont() {
-    const font = document.getElementById('kv-font')?.value;
-    const prev = document.getElementById('kv-preview');
-    if (prev && font) prev.style.fontFamily = font;
-  },
-
-  async saveSettings() {
-    try {
-      const headerText = document.getElementById('kv-header-text')?.value || '';
-      const hfont = document.getElementById('kv-hfont')?.value || 'Frank Ruhl Libre';
-      const hsize = parseFloat(document.getElementById('kv-hsize')?.value || 18);
-      const hbold = document.getElementById('kv-hbold')?.checked !== false;
-      const halign = document.getElementById('kv-halign')?.value || 'center';
-      const hdir = document.getElementById('kv-hdir')?.value || 'rtl';
-      // Build header_html from settings
-      const headerHtml = `<p style="font-family:${hfont};font-size:${hsize}pt;font-weight:${hbold?'bold':'normal'};text-align:${halign};direction:${hdir}">${headerText}</p>`;
-
-      await API.put(API.org.kvitelSettings(), {
-        header_html: headerHtml,
-        header_font: hfont, header_size: hsize,
-        header_bold: hbold ? 1 : 0, header_align: halign, header_dir: hdir,
-        page_size: document.getElementById('kv-pagesize')?.value,
-        columns: parseInt(document.getElementById('kv-cols')?.value),
-        column_gap: parseFloat(document.getElementById('kv-gap')?.value),
-        font_family: document.getElementById('kv-font')?.value,
-        font_size: parseFloat(document.getElementById('kv-fontsize')?.value),
-        line_height: parseFloat(document.getElementById('kv-lh')?.value),
-        margin_top: parseFloat(document.getElementById('kv-mtop')?.value),
-        margin_bottom: parseFloat(document.getElementById('kv-mbottom')?.value),
-        margin_left: parseFloat(document.getElementById('kv-mleft')?.value),
-        margin_right: parseFloat(document.getElementById('kv-mright')?.value),
-        group_by_neighborhood: document.getElementById('kv-bynh')?.checked ? 1 : 0
-      });
-      toast('Settings saved');
-    } catch (e) { toast(e.message, 'error'); }
-  },
-
-  async generate(type) {
-    try {
-      toast(`Generating ${type.toUpperCase()}...`);
-      await API.download(`/api/orgs/${API.orgId}/kvitel/generate-${type}`, `kvitel.${type}`);
-    } catch (e) { toast(e.message, 'error'); }
-  }
-};
-
-// public/js/pages/reports.js
-Pages.Reports = {
-  async render(el) {
-    const today = new Date().toISOString().slice(0, 10);
-    const monthStart = today.slice(0, 7) + '-01';
-
-    el.innerHTML = `
-      <div class="page-header"><div class="page-title">Reports</div></div>
-      <div class="card" style="margin-bottom:20px">
-        <div class="card-title">Donation Report</div>
-        <div class="input-row input-row-4">
-          <div><label>From</label><input type="date" id="rep-from" value="${monthStart}"></div>
-          <div><label>To</label><input type="date" id="rep-to" value="${today}"></div>
-          <div><label>Method</label>
-            <select id="rep-method">
-              <option value="">All Methods</option>
-              ${['credit_card','daf','check','cash','wire','other'].map(m=>`<option>${m}</option>`).join('')}
-            </select>
-          </div>
-          <div><label>Status</label>
-            <select id="rep-status">
-              <option value="">All</option>
-              <option value="completed">Completed</option>
-              <option value="pending">Pending</option>
-              <option value="failed">Failed</option>
-            </select>
-          </div>
-        </div>
-        <div class="btn-group" style="margin-top:16px">
-          <button class="btn btn-primary" onclick="Pages.Reports.load()">Generate Report</button>
-          <button class="btn btn-ghost btn-sm" onclick="Pages.Reports.downloadXlsx()">⬇ Export XLSX</button>
-          <button class="btn btn-ghost btn-sm" onclick="Pages.Reports.exportDonors()">⬇ Export Donors XLSX</button>
-        </div>
-      </div>
-      <div id="rep-results"></div>`;
-  },
-
-  getParams() {
-    return new URLSearchParams({
-      from: document.getElementById('rep-from')?.value || '',
-      to: document.getElementById('rep-to')?.value || '',
-      method: document.getElementById('rep-method')?.value || '',
-      status: document.getElementById('rep-status')?.value || ''
-    });
-  },
-
-  async load() {
-    const res = document.getElementById('rep-results');
-    res.innerHTML = '<div class="spinner"></div>';
-    try {
-      const rows = await API.get(`/api/orgs/${API.orgId}/reports/donations?${this.getParams()}`);
-      const total = rows.reduce((s, r) => s + (r.amount || 0), 0);
-
-      res.innerHTML = `
-        <div class="card">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-            <strong>${rows.length} donations • Total: ${fmt$(total)}</strong>
-          </div>
-          <div class="table-wrap"><table>
-            <thead><tr><th>Date</th><th>Donor</th><th>Amount</th><th>Method</th><th>Status</th><th>Trans ID</th><th>Notes</th></tr></thead>
-            <tbody>
-              ${rows.map(d => `<tr>
-                <td>${fmtDate(d.donation_date)}</td>
-                <td><strong>${d.first_name} ${d.last_name}</strong></td>
-                <td class="amount">${fmt$(d.amount)}</td>
-                <td>${d.method}${d.last_four ? ` ••${d.last_four}` : ''}</td>
-                <td>${statusBadge(d.status)}</td>
-                <td style="font-size:11px">${d.transaction_id||'—'}</td>
-                <td style="font-size:12px">${d.notes||''}</td>
-              </tr>`).join('') || '<tr><td colspan="7"><div class="empty-state" style="padding:20px">No results</div></td></tr>'}
-            </tbody>
-          </table></div>
-        </div>`;
-    } catch (e) { res.innerHTML = `<div class="alert alert-danger">${e.message}</div>`; }
-  },
-
-  downloadXlsx() {
-    const params = this.getParams();
-    params.set('format', 'xlsx');
-    API.downloadGet(`/api/orgs/${API.orgId}/reports/donations?${params}`, 'donations-report.xlsx')
-      .catch(e => toast(e.message, 'error'));
-  },
-
-  exportDonors() {
-    API.downloadGet(`/api/orgs/${API.orgId}/reports/donors?format=xlsx`, 'donors-export.xlsx')
-      .catch(e => toast(e.message, 'error'));
-  }
-};
-
-// public/js/pages/settings.js
-Pages.Settings = {
-  async render(el) {
-    el.innerHTML = `<div class="spinner"></div>`;
-    try {
-      const [users, loginLog, daf, sola, neighborhoods] = await Promise.all([
-        API.get(API.org.users()),
-        API.get(API.org.loginLog()),
-        API.get(API.org.daf()),
-        API.get(`/api/orgs/${API.orgId}/sola`).catch(() => null),
-        API.get(API.org.neighborhoods())
-      ]);
-
-      el.innerHTML = `
-        <div class="page-header"><div class="page-title">Settings</div></div>
-        <div class="tabs">
-          <div class="tab active" onclick="stTab(this,'st-users')">Users</div>
-          <div class="tab" onclick="stTab(this,'st-nh')">Neighborhoods</div>
-          <div class="tab" onclick="stTab(this,'st-daf')">DAF Accounts</div>
-          <div class="tab" onclick="stTab(this,'st-sola')">Sola Payments</div>
-          <div class="tab" onclick="stTab(this,'st-log')">Login Log</div>
-        </div>
-
-        <!-- USERS -->
-        <div id="st-users" class="tab-content active">
-          <div class="card">
-            <div style="display:flex;justify-content:space-between;margin-bottom:16px;align-items:center">
-              <strong>Organization Users</strong>
-              <div class="btn-group">
-                ${window.DRM?.user?.is_super_admin ? `<button class="btn btn-outline btn-sm" onclick="Pages.Settings.inviteAccount()">+ Invite New Account</button>` : ''}
-                <button class="btn btn-primary btn-sm" onclick="Pages.Settings.addUser()">+ Invite User</button>
-              </div>
-            </div>
-            <table>
-              <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Last Login</th><th>Actions</th></tr></thead>
-              <tbody>
-                ${users.map(u => `<tr>
-                  <td><strong>${u.full_name}</strong></td>
-                  <td>${u.email}</td>
-                  <td><span class="pill ${u.role==='admin'?'pill-blue':'pill-gray'}">${u.role}</span></td>
-                  <td>${fmtDateTime(u.last_login)}</td>
-                  <td>
-                    <div class="btn-group">
-                      <button class="btn btn-ghost btn-sm" onclick="Pages.Settings.resetPassword('${u.id}','${u.full_name}')">Reset Password</button>
-                      <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="Pages.Settings.removeUser('${u.id}','${u.full_name}')">Remove</button>
-                    </div>
-                  </td>
-                </tr>`).join('')}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <!-- NEIGHBORHOODS -->
-        <div id="st-nh" class="tab-content">
-          <div class="card">
-            <div style="display:flex;justify-content:space-between;margin-bottom:16px">
-              <strong>Neighborhoods</strong>
-              <button class="btn btn-primary btn-sm" onclick="Pages.Settings.addNeighborhood()">+ Add</button>
-            </div>
-            <div id="nh-list">
-              ${neighborhoods.map(n => `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--gray-100)">
-                <span class="he" style="font-size:16px">${n.name_he}</span>
-                <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="Pages.Settings.deleteNeighborhood('${n.id}')">Remove</button>
-              </div>`).join('')}
-            </div>
-          </div>
-        </div>
-
-        <!-- DAF -->
-        <div id="st-daf" class="tab-content">
-          <div class="card">
-            <div style="display:flex;justify-content:space-between;margin-bottom:16px">
-              <strong>DAF Accounts</strong>
-              <button class="btn btn-primary btn-sm" onclick="Pages.Settings.addDaf()">+ Add DAF</button>
-            </div>
-            <div id="daf-list">
-              ${daf.map(d => `<div class="card" style="margin-bottom:10px;padding:14px">
-                <div style="display:flex;justify-content:space-between">
-                  <div>
-                    <strong>${d.name}</strong>${d.account_number ? ` — ${d.account_number}` : ''}<br>
-                    ${d.contact_name ? `<span style="font-size:12px;color:var(--gray-500)">${d.contact_name} ${d.contact_email || ''}</span>` : ''}
-                  </div>
-                  <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="Pages.Settings.deleteDaf('${d.id}')">Remove</button>
-                </div>
-              </div>`).join('') || '<p style="color:var(--gray-500)">No DAF accounts added</p>'}
-            </div>
-          </div>
-        </div>
-
-        <!-- SOLA -->
-        <div id="st-sola" class="tab-content">
-          <div class="card">
-            <div class="card-title">Sola Payment Processing</div>
-            <label>API Key</label>
-            <input id="sola-key" type="password" placeholder="Sola API Key">
-            <label>Merchant ID</label>
-            <input id="sola-mid" value="${sola?.merchant_id||''}" placeholder="Merchant ID">
-            <div style="margin-top:16px">
-              <button class="btn btn-primary" onclick="Pages.Settings.saveSola()">Save Sola Settings</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- LOGIN LOG -->
-        <div id="st-log" class="tab-content">
-          <div class="card">
-            <div class="card-title">Login Audit Log</div>
-            <div class="scroll-list">
-              <table><thead><tr><th>Time</th><th>User</th><th>Action</th><th>IP</th></tr></thead>
-              <tbody>
-                ${loginLog.slice(0, 100).map(l => `<tr>
-                  <td>${fmtDateTime(l.created_at)}</td>
-                  <td>${l.full_name}</td>
-                  <td><span class="pill ${l.action==='login'?'pill-green':'pill-gray'}">${l.action}</span></td>
-                  <td style="font-size:11px;color:var(--gray-500)">${l.ip||'—'}</td>
-                </tr>`).join('')}
-              </tbody></table>
-            </div>
-          </div>
-        </div>`;
-
-      window.stTab = (el, id) => {
-        document.querySelectorAll('#page-settings .tab').forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('#page-settings .tab-content').forEach(t => t.classList.remove('active'));
-        el.classList.add('active'); document.getElementById(id)?.classList.add('active');
-      };
-    } catch (e) { el.innerHTML = `<div class="alert alert-danger">${e.message}</div>`; }
-  },
-
-  inviteAccount() {
-    Modal.open('Invite New Account', `
-      <p style="color:var(--gray-500);margin-bottom:16px">
-        Enter the email address of the person who will run the new organization.
-        They'll receive a setup link to create their org name, admin account, and password themselves.
-      </p>
-      <label>Email Address *</label>
-      <input id="ia-email" type="email" placeholder="rabbi@newshul.org" autocomplete="off">
-      <div id="ia-result" style="display:none;margin-top:14px"></div>
-      <div style="margin-top:16px">
-        <button class="btn btn-primary" onclick="Pages.Settings.doInviteAccount()">Send Invite</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-  },
-
-  async doInviteAccount() {
-    const email = document.getElementById('ia-email')?.value?.trim();
-    if (!email) { toast('Email required', 'error'); return; }
-    try {
-      const res = await API.post('/auth/invite-account', { email });
-      const resultEl = document.getElementById('ia-result');
-      if (res.emailSent) {
-        resultEl.innerHTML = `<div class="alert alert-success">✓ Invite sent to <strong>${email}</strong>. They'll get an email with a setup link valid for 7 days.</div>`;
-      } else {
-        resultEl.innerHTML = `<div class="alert alert-warning">
-          <strong>Email not sent</strong> — add SIGNUP_SMTP_EMAIL and SIGNUP_SMTP_PASSWORD to your Render env vars to enable invite emails.<br><br>
-          In the meantime, share this link manually:<br>
-          <a href="${res.setupUrl}" target="_blank" style="word-break:break-all;font-size:12px;color:var(--blue)">${res.setupUrl}</a>
-        </div>`;
-      }
-      resultEl.style.display = 'block';
-    } catch (e) { toast(e.message, 'error'); }
-  },
-
-  addUser() {
-    Modal.open('Invite User', `
-      <p style="color:var(--gray-500);margin-bottom:16px">Enter their email address. They'll receive a setup link to create their own password.</p>
-      <label>Email Address *</label>
-      <input id="nu-email" type="email" placeholder="user@example.com" autocomplete="off">
-      <label>Role</label>
-      <select id="nu-role">
-        <option value="staff">Staff</option>
-        <option value="admin">Admin</option>
-      </select>
-      <div id="invite-result" style="display:none;margin-top:12px"></div>
-      <div style="margin-top:16px">
-        <button class="btn btn-primary" onclick="Pages.Settings.doInvite()">Send Invite Email</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-  },
-
-  async doInvite() {
-    const email = document.getElementById('nu-email')?.value?.trim();
-    const role = document.getElementById('nu-role')?.value;
-    if (!email) { toast('Email required', 'error'); return; }
-    try {
-      const res = await API.post(`/api/orgs/${API.orgId}/users/invite`, { email, role });
-      const resultEl = document.getElementById('invite-result');
-      if (res.emailSent) {
-        resultEl.innerHTML = `<div class="alert alert-success">✓ Invite sent to <strong>${email}</strong>. They'll get an email with a setup link.</div>`;
-      } else {
-        resultEl.innerHTML = `<div class="alert alert-warning">
-          <strong>Email not sent</strong> — SIGNUP_SMTP_EMAIL not configured.<br>
-          Share this setup link manually:<br>
-          <a href="${res.setupUrl}" target="_blank" style="word-break:break-all;font-size:12px">${res.setupUrl}</a>
-        </div>`;
-      }
-      resultEl.style.display = 'block';
-      this.render(document.getElementById('page-settings'));
-    } catch (e) { toast(e.message, 'error'); }
-  },
-
-  resetPassword(id, name) {
-    Modal.open('Reset Password', `
-      <p>Set new password for <strong>${name}</strong></p>
-      <label>New Password</label>
-      <input id="rp-pass" type="password" placeholder="New password (min 6 chars)">
-      <div style="margin-top:16px">
-        <button class="btn btn-primary" onclick="Pages.Settings.doResetPw('${id}')">Set Password</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-  },
-
-  async doResetPw(id) {
-    try {
-      await API.put(`/api/orgs/${API.orgId}/users/${id}/password`, { password: document.getElementById('rp-pass')?.value });
-      toast('Password updated'); Modal.close();
-    } catch (e) { toast(e.message, 'error'); }
-  },
-
-  removeUser(id, name) {
-    confirm(`Remove ${name} from this organization?`, async () => {
-      await API.del(`/api/orgs/${API.orgId}/users/${id}`);
-      toast('User removed');
-      this.render(document.getElementById('page-settings'));
-    });
-  },
-
-  addNeighborhood() {
-    Modal.open('Add Neighborhood', `
-      <label>Hebrew Name</label>
-      <input id="nh-hname" class="he" dir="rtl" placeholder="שם השכונה">
-      <label>English Name (optional)</label>
-      <input id="nh-ename" placeholder="Borough Park">
-      <div style="margin-top:16px">
-        <button class="btn btn-primary" onclick="Pages.Settings.doAddNh()">Add</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-  },
-
-  async doAddNh() {
-    try {
-      await API.post(API.org.neighborhoods(), {
-        name_he: document.getElementById('nh-hname')?.value,
-        name_en: document.getElementById('nh-ename')?.value
-      });
-      toast('Neighborhood added'); Modal.close();
-      this.render(document.getElementById('page-settings'));
-    } catch (e) { toast(e.message, 'error'); }
-  },
-
-  deleteNeighborhood(id) {
-    confirm('Remove this neighborhood?', async () => {
-      await API.del(`${API.org.neighborhoods()}/${id}`);
-      toast('Removed');
-      this.render(document.getElementById('page-settings'));
-    });
-  },
-
-  addDaf() {
-    Modal.open('Add DAF Account', `
-      <label>DAF Name *</label><input id="daf-name" placeholder="Fidelity Charitable">
-      <label>Account Number</label><input id="daf-acct" placeholder="Optional">
-      <label>Contact Name</label><input id="daf-cname" placeholder="Optional">
-      <label>Contact Email</label><input id="daf-email" placeholder="Optional">
-      <div style="margin-top:16px">
-        <button class="btn btn-primary" onclick="Pages.Settings.doAddDaf()">Add DAF</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>
-    `, { small: true });
-  },
-
-  async doAddDaf() {
-    try {
-      await API.post(API.org.daf(), {
-        name: document.getElementById('daf-name')?.value,
-        account_number: document.getElementById('daf-acct')?.value,
-        contact_name: document.getElementById('daf-cname')?.value,
-        contact_email: document.getElementById('daf-email')?.value
-      });
-      toast('DAF account added'); Modal.close();
-      this.render(document.getElementById('page-settings'));
-    } catch (e) { toast(e.message, 'error'); }
-  },
-
-  async deleteDaf(id) {
-    confirm('Remove this DAF account?', async () => {
-      await API.del(`${API.org.daf()}/${id}`);
-      toast('Removed');
-      this.render(document.getElementById('page-settings'));
-    });
-  },
-
-  async saveSola() {
-    try {
-      await API.put(`/api/orgs/${API.orgId}/sola`, {
-        api_key: document.getElementById('sola-key')?.value,
-        merchant_id: document.getElementById('sola-mid')?.value
-      });
-      toast('Sola settings saved');
-    } catch (e) { toast(e.message, 'error'); }
-  }
-};
-
-// ===== app.js =====
-// public/js/app.js - Main application controller
-
-let currentUser = null;
-let currentOrg = null;
-let currentPage = 'dashboard';
-let allOrgs = [];
-
+}
+function closeSidebar() {
+  $('sidebar')?.classList.remove('mob-open');
+  $('sidebar-overlay')?.classList.remove('show');
+}
+
+// ── App boot ──────────────────────────────────────────────────────────────────
 async function init() {
-  // Check for new account invite token
-  const urlParams = new URLSearchParams(window.location.search);
-  const inviteToken = urlParams.get('token');
-  if (window.location.pathname === '/new-account' && inviteToken) {
-    showNewAccount(inviteToken);
-    return;
-  }
+  // Invite/setup token in URL?
+  const params = new URLSearchParams(location.search);
+  const token = params.get('token');
+  if (token && location.pathname.includes('new-account')) { showNewAcct(token); return; }
 
-  // Check for user setup token (existing user invite)
-  if (window.location.pathname === '/complete-setup' && inviteToken) {
-    showCompleteSetup(inviteToken);
-    return;
-  }
+  // Check if first-run setup needed
+  let status;
+  try { status = await fetch('/api/setup-status').then(r => r.json()); }
+  catch(e) { console.error('Setup status error:', e); showLogin(); return; }
 
-  // Check setup
-  const setupStatus = await fetch('/api/setup-status').then(r => r.json());
-  if (setupStatus.needsSetup) {
-    showSetup();
-    return;
-  }
+  if (status?.needsSetup) { showSetup(); return; }
 
-  // Try to restore session
+  // Try to restore existing session
   try {
     const me = await API.get('/auth/me');
-    currentUser = me.user;
-    allOrgs = me.orgs;
-    window.DRM.user = me.user;
-    window.DRM.orgs = me.orgs;
-    if (me.orgs.length > 0) {
-      await setOrg(me.orgs[0]);
-    }
+    DRM.user = me.user;
+    _allOrgs = me.orgs;
+    if (me.orgs.length) await setOrg(me.orgs[0]);
     showApp();
   } catch {
     showLogin();
   }
 }
 
-function showNewAccount(token) {
-  hide('login-screen'); hide('app');
-  const screen = document.getElementById('setup-screen');
-  screen.style.display = 'flex';
-  screen.querySelector('h1').textContent = 'Create Your Account';
-  screen.querySelector('.subtitle').textContent = 'Set up your organization on DRM.';
-  const form = document.getElementById('setup-form');
-  form.innerHTML = `
-    <label>Your Full Name</label>
-    <input type="text" id="na-name" placeholder="Your full name" required autocomplete="name">
-    <label>Organization Name</label>
-    <input type="text" id="na-org" placeholder="Beth Israel Congregation" required>
-    <label>Password</label>
-    <input type="password" id="na-password" placeholder="Choose a password (min 6 chars)" required autocomplete="new-password">
-    <label>Confirm Password</label>
-    <input type="password" id="na-password2" placeholder="Confirm password" required autocomplete="new-password">
-    <button type="submit" class="btn btn-primary btn-full" style="margin-top:20px">Create My Account</button>
-  `;
-  form.onsubmit = async (e) => {
+function showSetup() {
+  _show('setup-screen'); _hide('login-screen'); _hide('app'); _hide('newacct-screen');
+  $('setup-form').onsubmit = async e => {
     e.preventDefault();
-    const errEl = document.getElementById('setup-error');
-    errEl.style.display = 'none';
-    const p1 = document.getElementById('na-password').value;
-    const p2 = document.getElementById('na-password2').value;
-    if (p1 !== p2) { errEl.textContent = 'Passwords do not match'; errEl.style.display = 'block'; return; }
+    const err = $('setup-err'); err.style.display = 'none';
     try {
-      await API.post('/auth/new-account', {
-        token,
-        full_name: document.getElementById('na-name').value,
-        org_name: document.getElementById('na-org').value,
-        password: p1
-      });
-      window.history.replaceState({}, '', '/');
-      toast('Account created! Please sign in.', 'success');
-      showLogin();
-    } catch (err) {
-      errEl.textContent = err.message;
-      errEl.style.display = 'block';
-    }
-  };
-}
-
-function showCompleteSetup(token) {
-  hide('login-screen'); hide('app');
-  const screen = document.getElementById('setup-screen');
-  screen.style.display = 'flex';
-  screen.querySelector('h1').textContent = 'Set Up Your Account';
-  screen.querySelector('.subtitle').textContent = 'You\'ve been invited to DRM. Create your account below.';
-  const form = document.getElementById('setup-form');
-  form.innerHTML = `
-    <label>Full Name</label>
-    <input type="text" id="setup-name" placeholder="Your full name" required>
-    <label>Password</label>
-    <input type="password" id="setup-password" placeholder="Choose a password (min 6 chars)" required>
-    <label>Confirm Password</label>
-    <input type="password" id="setup-password2" placeholder="Confirm password" required>
-    <button type="submit" class="btn btn-primary btn-full" style="margin-top:20px">Create Account</button>
-  `;
-  form.onsubmit = async (e) => {
-    e.preventDefault();
-    const errEl = document.getElementById('setup-error');
-    const p1 = document.getElementById('setup-password').value;
-    const p2 = document.getElementById('setup-password2').value;
-    if (p1 !== p2) { errEl.textContent = 'Passwords do not match'; errEl.style.display = 'block'; return; }
-    try {
-      await API.post('/auth/complete-setup', {
-        token,
-        full_name: document.getElementById('setup-name').value,
-        password: p1
-      });
-      // Clear token from URL and go to login
-      window.history.replaceState({}, '', '/');
+      await API.post('/auth/setup', { full_name: val('s-name'), email: val('s-email'), password: val('s-pass'), org_name: val('s-org') });
       toast('Account created! Please sign in.');
       showLogin();
-    } catch (err) {
-      errEl.textContent = err.message;
-      errEl.style.display = 'block';
-    }
-  };
-}
-
-function showSetup() {
-  hide('login-screen'); hide('app');
-  show('setup-screen');
-  document.getElementById('setup-form').onsubmit = async (e) => {
-    e.preventDefault();
-    try {
-      await API.post('/auth/setup', {
-        full_name: document.getElementById('setup-name').value,
-        email: document.getElementById('setup-email').value,
-        password: document.getElementById('setup-password').value,
-        org_name: document.getElementById('setup-org').value
-      });
-      toast('Account created! Please sign in.', 'success');
-      showLogin();
-    } catch (err) {
-      toast(err.message, 'error');
-    }
+    } catch(e) { err.textContent = e.message; err.style.display = 'block'; }
   };
 }
 
 function showLogin() {
-  hide('setup-screen'); hide('app');
-  show('login-screen');
-  document.getElementById('login-form').onsubmit = async (e) => {
+  _show('login-screen'); _hide('setup-screen'); _hide('app'); _hide('newacct-screen');
+  const form = $('login-form');
+  form.onsubmit = async e => {
     e.preventDefault();
-    const errEl = document.getElementById('login-error');
-    errEl.style.display = 'none';
+    const err = $('login-err'); err.style.display = 'none';
     try {
-      const res = await API.post('/auth/login', {
-        email: document.getElementById('login-email').value,
-        password: document.getElementById('login-password').value
-      });
-      currentUser = res.user;
-      allOrgs = res.orgs;
-      window.DRM.user = res.user;
-      window.DRM.orgs = res.orgs;
-      if (res.orgs.length > 0) {
-        await setOrg(res.activeOrg || res.orgs[0]);
-      }
+      const res = await API.post('/auth/login', { email: val('l-email'), password: val('l-pass') });
+      DRM.user = res.user; _allOrgs = res.orgs;
+      // Store token in localStorage as fallback for environments where cookies don't persist
+      if (res.token) localStorage.setItem('drm_token', res.token);
+      if (res.orgs.length) await setOrg(res.activeOrg || res.orgs[0]);
       showApp();
-    } catch (err) {
-      errEl.textContent = err.message;
-      errEl.style.display = 'block';
-    }
+    } catch(e) { err.textContent = e.message; err.style.display = 'block'; }
+  };
+}
+
+function showNewAcct(token) {
+  _show('newacct-screen'); _hide('login-screen'); _hide('setup-screen'); _hide('app');
+  $('newacct-form').onsubmit = async e => {
+    e.preventDefault();
+    const err = $('newacct-err'); err.style.display = 'none';
+    const p1 = val('na-pass'), p2 = val('na-pass2');
+    if (p1 !== p2) { err.textContent = 'Passwords do not match'; err.style.display = 'block'; return; }
+    try {
+      await API.post('/auth/new-account', { token, full_name: val('na-name'), org_name: val('na-org'), password: p1 });
+      history.replaceState({}, '', '/');
+      toast('Account created! Please sign in.');
+      showLogin();
+    } catch(e) { err.textContent = e.message; err.style.display = 'block'; }
   };
 }
 
 async function setOrg(org) {
-  currentOrg = org;
-  API.orgId = org.id;
-
-  // Update org selector
-  const sel = document.getElementById('org-select');
-  if (sel) {
-    sel.innerHTML = allOrgs.map(o => `<option value="${o.id}" ${o.id === org.id ? 'selected' : ''}>${o.name}</option>`).join('');
-    sel.onchange = async () => {
-      const selected = allOrgs.find(o => o.id === sel.value);
-      if (selected) await setOrg(selected);
-    };
-  }
+  DRM.org = org; API.orgId = org.id;
+  DRM.orgs = _allOrgs;
+  const sel = $('org-select');
+  if (!sel) return;
+  sel.innerHTML = _allOrgs.map(o => `<option value="${o.id}" ${o.id===org.id?'selected':''}>${o.name}</option>`).join('');
+  sel.onchange = async () => {
+    const found = _allOrgs.find(x => x.id === sel.value);
+    if (found) { await setOrg(found); navigateTo(_currentPage); }
+  };
 }
 
 function showApp() {
-  hide('login-screen'); hide('setup-screen');
-  show('app');
-
-  document.getElementById('user-name-display').textContent = currentUser.full_name;
-
-  // Inject SVG icons into nav
-  const navIcons = {
-    dashboard: Icon.dashboard(), donors: Icon.donors(), donations: Icon.donations(),
-    verification: Icon.check(), failures: Icon.x(), bank: Icon.bank(),
-    emails: Icon.email(), kvitel: Icon.scroll(), reports: Icon.chart(), settings: Icon.settings()
-  };
-  document.querySelectorAll('.nav-item[data-page]').forEach(item => {
-    const page = item.dataset.page;
-    if (navIcons[page]) {
-      const span = document.createElement('span');
-      span.className = 'nav-icon-svg';
-      span.innerHTML = navIcons[page];
-      item.prepend(span);
-    }
-  });
-
-  // Sidebar collapse/expand
-  const sidebar = document.getElementById('sidebar');
-  const mainContent = document.getElementById('main-content');
-  const toggleBtn = document.getElementById('sidebar-toggle');
-  const collapsed = localStorage.getItem('sidebar-collapsed') === '1';
-  if (collapsed) {
-    sidebar.classList.add('sidebar-collapsed');
-    mainContent.style.marginLeft = 'var(--sidebar-collapsed-w)';
+  _show('app'); _hide('login-screen'); _hide('setup-screen'); _hide('newacct-screen');
+  const sbUser = $('sb-user'); if (sbUser) sbUser.textContent = DRM.user?.full_name || '';
+  // Restore sidebar state
+  const sb = $('sidebar');
+  if (sb && localStorage.getItem('sb-c') === '1' && window.innerWidth > 768) {
+    sb.classList.add('collapsed');
+    const mc = $('main-content'); if (mc) mc.style.marginLeft = 'var(--sb-cw)';
   }
-  toggleBtn.onclick = () => {
-    const isCollapsed = sidebar.classList.toggle('sidebar-collapsed');
-    mainContent.style.marginLeft = isCollapsed ? 'var(--sidebar-collapsed-w)' : 'var(--sidebar-w)';
-    localStorage.setItem('sidebar-collapsed', isCollapsed ? '1' : '0');
-  };
-
-  // Add tooltips to nav items for collapsed mode
+  // Nav clicks
   document.querySelectorAll('.nav-item').forEach(item => {
-    const label = item.querySelector('.nav-label');
-    if (label) item.setAttribute('data-tooltip', label.textContent.trim());
+    item.onclick = () => { if (window.innerWidth <= 768) closeSidebar(); navigateTo(item.dataset.page); };
   });
-
-  document.getElementById('add-org-btn').onclick = () => {
-    Modal.open('New Organization', `
-      <label>Organization Name</label>
-      <input type="text" id="new-org-name" placeholder="My Organization">
-      <div style="margin-top:16px">
-        <button class="btn btn-primary" onclick="createOrg()">Create</button>
-      </div>
-    `, { small: true });
-  };
-
-  document.getElementById('logout-btn').onclick = async () => {
-    try { await API.post('/auth/logout', {}); } catch {}
-    showLogin();
-  };
-
-  // Nav
-  document.querySelectorAll('.nav-item').forEach(item => {
-    item.addEventListener('click', (e) => {
-      e.preventDefault();
-      const page = item.dataset.page;
-      navigateTo(page);
-    });
-  });
-
+  $('logout-btn').onclick = async () => { try { await API.post('/auth/logout', {}); } catch {} localStorage.removeItem('drm_token'); showLogin(); };
+  $('add-org-btn').onclick = () => Modal.open('New Organization', `
+    <label>Organization Name</label>
+    <input id="no-name" placeholder="My Organization">
+    <div class="bg mt">
+      <button class="btn btn-primary btn-sm" onclick="createOrg()">Create</button>
+      <button class="btn btn-ghost btn-sm" onclick="Modal.close()">Cancel</button>
+    </div>`, { sm: true });
   navigateTo('dashboard');
   loadBadges();
   setInterval(loadBadges, 60000);
 }
 
 async function createOrg() {
-  const name = document.getElementById('new-org-name').value.trim();
-  if (!name) return;
   try {
-    const res = await API.post('/auth/orgs', { name });
-    allOrgs.push(res.org);
-    await setOrg(res.org);
-    Modal.close();
-    toast('Organization created!');
-    navigateTo('dashboard');
-  } catch (e) { toast(e.message, 'error'); }
+    const res = await API.post('/auth/orgs', { name: val('no-name') });
+    _allOrgs.push(res.org); await setOrg(res.org);
+    Modal.close(); toast('Organization created'); navigateTo('dashboard');
+  } catch(e) { toast(e.message, 'err'); }
 }
 
 function navigateTo(page) {
-  currentPage = page;
-
+  _currentPage = page;
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
-
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  const pageEl = document.getElementById(`page-${page}`);
-  if (pageEl) {
-    pageEl.classList.add('active');
-    renderPage(page, pageEl);
-  }
+  const el = $(`page-${page}`);
+  if (el) { el.classList.add('active'); renderPage(page, el); }
 }
 
 function renderPage(page, el) {
-  const renderers = {
-    dashboard: () => Pages.Dashboard?.render(el),
-    donors: () => Pages.Donors?.render(el),
-    donations: () => Pages.Donations?.render(el),
-    verification: () => Pages.Verification?.render(el),
-    failures: () => Pages.Failures?.render(el),
-    bank: () => Pages.Bank?.render(el),
-    emails: () => Pages.Emails?.render(el),
-    kvitel: () => Pages.KvitelPage?.render(el),
-    reports: () => Pages.Reports?.render(el),
-    settings: () => Pages.Settings?.render(el)
+  const map = {
+    dashboard:    renderDashboard,
+    donors:       el => Donors.render(el),
+    donations:    renderDonations,
+    verification: renderVerification,
+    failures:     renderFailures,
+    bank:         renderBank,
+    emails:       renderEmails,
+    kvitel:       renderKvitel,
+    reports:      renderReports,
+    settings:     renderSettings,
   };
-  renderers[page]?.();
+  map[page]?.(el);
 }
 
 async function loadBadges() {
   if (!API.orgId) return;
   try {
-    const stats = await API.get(API.org.stats());
-
-    const vb = document.getElementById('verify-badge');
-    if (stats.needsVerification > 0) {
-      vb.textContent = stats.needsVerification;
-      vb.style.display = 'inline';
-    } else vb.style.display = 'none';
-
-    const fb = document.getElementById('fail-badge');
-    if (stats.failedCharges > 0) {
-      fb.textContent = stats.failedCharges;
-      fb.style.display = 'inline';
-    } else fb.style.display = 'none';
+    const s = await API.get(API.o.stats());
+    const vb = $('verify-badge');
+    if (vb) { vb.textContent = s.needsVerification; vb.style.display = s.needsVerification > 0 ? 'inline' : 'none'; }
+    const fb = $('fail-badge');
+    if (fb) { fb.textContent = s.failedCharges; fb.style.display = s.failedCharges > 0 ? 'inline' : 'none'; }
   } catch {}
 }
 
-function show(id) { const el = document.getElementById(id); if (el) el.style.display = ''; }
-function hide(id) { const el = document.getElementById(id); if (el) el.style.display = 'none'; }
+function _show(id) { const e = $(id); if (e) e.style.display = ''; }
+function _hide(id) { const e = $(id); if (e) e.style.display = 'none'; }
 
-// Start
+// ── Dashboard ─────────────────────────────────────────────────────────────────
+async function renderDashboard(el) {
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const s = await API.get(API.o.stats());
+    el.innerHTML = `
+      <div class="ph">
+        <div><div class="ph-title">Dashboard</div></div>
+        <div class="bg">
+          ${s.failedCharges > 0 ? `<button class="btn btn-red btn-sm" onclick="navigateTo('failures')">! ${s.failedCharges} Failed</button>` : ''}
+          ${s.needsVerification > 0 ? `<button class="btn btn-outline btn-sm" onclick="navigateTo('verification')">${s.needsVerification} Need Verification</button>` : ''}
+        </div>
+      </div>
+      <div class="stat-grid">
+        <div class="stat"><div class="stat-lbl">Total Donors</div><div class="stat-val">${(s.totalDonors||0).toLocaleString()}</div><div class="stat-sub">${s.activeDonors||0} active</div></div>
+        <div class="stat g"><div class="stat-lbl">Total Raised</div><div class="stat-val">${fmt$(s.totalAmount)}</div><div class="stat-sub">${s.totalDonations||0} donations</div></div>
+        <div class="stat o"><div class="stat-lbl">Avg Donation</div><div class="stat-val">${fmt$(s.avgDonation)}</div></div>
+        <div class="stat"><div class="stat-lbl">AutoPay Active</div><div class="stat-val">${s.autopayStats?.active||0}</div><div class="stat-sub">${s.autopayStats?.paused||0} paused</div></div>
+      </div>
+      <div class="g2" style="margin-bottom:14px">
+        <div class="card"><div class="card-title">Monthly Donations</div><div id="ch-monthly"></div></div>
+        <div class="card"><div class="card-title">By Method</div><div id="ch-method"></div></div>
+      </div>
+      <div class="g2">
+        <div class="card"><div class="card-title">By Neighborhood</div><div id="ch-nh"></div></div>
+        <div class="card"><div class="card-title">Top Donors</div>
+          <div class="tw"><table>
+            <thead><tr><th>Donor</th><th>Gifts</th><th>Total</th></tr></thead>
+            <tbody>${(s.topDonors||[]).map(d=>`<tr><td><strong>${d.first_name} ${d.last_name}</strong></td><td>${d.count}</td><td>${fmt$(d.total)}</td></tr>`).join('')||'<tr><td colspan="3" class="empty">No data</td></tr>'}</tbody>
+          </table></div>
+        </div>
+      </div>`;
+    renderBar($('ch-monthly'), [...(s.byMonth||[])].reverse(), 'month', 'total');
+    renderPie($('ch-method'), (s.byMethod||[]).map(m => ({ label: fmtMethod(m.method), v: m.total })));
+    renderPie($('ch-nh'), (s.byNeighborhood||[]).slice(0,8).map(n => ({ label: n.name_he||'Other', v: n.total })));
+  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+
+// ── Donors ────────────────────────────────────────────────────────────────────
+const Donors = {
+  donors:[], total:0, page:1, perPage:25,
+  search:'', hood:'', label:'', autopay:'',
+  sortBy:'last_name', sortDir:'asc', selected:new Set(),
+  hoods:[], labelList:[],
+
+  async render(el) {
+    el.innerHTML = this.shell();
+    await this.loadMeta();
+    await this.load();
+    this.bindEvents();
+  },
+
+  shell() {
+    return `
+    <div class="ph">
+      <div><div class="ph-title">Donors</div><div class="ph-sub" id="d-count"></div></div>
+      <div class="bg">
+        <button class="btn btn-ghost btn-sm" onclick="Donors.importXlsx()">&#8679; Import</button>
+        <button class="btn btn-ghost btn-sm" onclick="Donors.exportXlsx()">&#8681; Export</button>
+        <button class="btn btn-primary btn-sm" onclick="Donors.openAdd()">+ Add Donor</button>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:12px;padding:12px 14px">
+      <div class="search-bar">
+        <div class="sw" style="flex:2">
+          <input id="d-search" placeholder="Search name, email, phone, Hebrew…" autocomplete="off" autocorrect="off" spellcheck="false">
+        </div>
+        <select id="d-hood"><option value="">All Neighborhoods</option></select>
+        <select id="d-label"><option value="">All Labels</option></select>
+        <select id="d-ap"><option value="">All AutoPay</option><option value="1">On</option><option value="0">Off</option></select>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-top:6px">
+        <div class="bg">
+          <button class="btn btn-ghost btn-sm" onclick="Donors.pauseAll()">Pause All AutoPay</button>
+          <button class="btn btn-ghost btn-sm" onclick="Donors.resumeAll()">Resume All</button>
+        </div>
+        <div class="ppw">Show <select id="d-pp"><option value="25">25</option><option value="50">50</option><option value="100">100</option></select> per page</div>
+      </div>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <div id="d-bulk" class="bulk-bar">
+        <span id="d-bulk-cnt">0 selected</span>
+        <button class="btn btn-ghost btn-sm" onclick="Donors.bulkDelete()">Delete Selected</button>
+        <button class="btn btn-ghost btn-sm" onclick="Donors.clearSel()">Clear</button>
+      </div>
+      <div class="tw"><table>
+        <thead><tr>
+          <th style="width:28px"><input type="checkbox" id="sel-all" onchange="Donors.toggleAll(this.checked)"></th>
+          <th class="sort" onclick="Donors.sort('last_name')">Name</th>
+          <th>Hebrew</th>
+          <th>Contact</th>
+          <th class="sort" onclick="Donors.sort('neighborhood_name')">Neighborhood</th>
+          <th class="sort" onclick="Donors.sort('months_old')">Age</th>
+          <th class="sort" onclick="Donors.sort('total_amount')">Total</th>
+          <th>AutoPay</th>
+          <th></th>
+        </tr></thead>
+        <tbody id="d-tbody"><tr><td colspan="9"><div class="spinner"></div></td></tr></tbody>
+      </table></div>
+      <div style="padding:10px 14px;display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--gray-1)">
+        <div id="d-pag"></div><div id="d-info" class="pag-info"></div>
+      </div>
+    </div>`;
+  },
+
+  async loadMeta() {
+    try {
+      [this.hoods, this.labelList] = await Promise.all([API.get(API.o.hoods()), API.get(API.o.labels())]);
+      const hs = $('d-hood');
+      if (hs) hs.innerHTML = '<option value="">All Neighborhoods</option>' + this.hoods.map(h=>`<option value="${h.id}">${h.name_he}</option>`).join('');
+      const ls = $('d-label');
+      if (ls) ls.innerHTML = '<option value="">All Labels</option>' + this.labelList.map(l=>`<option value="${l}">${l}</option>`).join('');
+    } catch {}
+  },
+
+  async load() {
+    const p = new URLSearchParams({ page: this.page, limit: this.perPage });
+    if (this.search) p.set('search', this.search);
+    if (this.hood) p.set('neighborhood', this.hood);
+    if (this.label) p.set('label', this.label);
+    if (this.autopay !== '') p.set('autopay', this.autopay);
+    try {
+      const res = await API.get(API.o.donors() + '?' + p);
+      this.donors = res.donors || []; this.total = res.total || 0;
+      this.renderTable();
+      const cnt = $('d-count'); if (cnt) cnt.textContent = `${this.total.toLocaleString()} donor${this.total!==1?'s':''}`;
+      const info = $('d-info'); if (info && this.total > 0) info.textContent = `${(this.page-1)*this.perPage+1}–${Math.min(this.page*this.perPage,this.total)} of ${this.total}`;
+    } catch(e) { const tb = $('d-tbody'); if (tb) tb.innerHTML = `<tr><td colspan="9"><div class="alert alert-err" style="margin:10px">${e.message}</div></td></tr>`; }
+  },
+
+  renderTable() {
+    const tb = $('d-tbody'); if (!tb) return;
+    if (!this.donors.length) { tb.innerHTML = '<tr><td colspan="9"><div class="empty"><h3>No donors found</h3></div></td></tr>'; return; }
+    const sorted = [...this.donors].sort((a,b) => {
+      const av = a[this.sortBy] ?? '', bv = b[this.sortBy] ?? '';
+      const r = typeof av === 'number' ? av - bv : String(av).localeCompare(String(bv));
+      return this.sortDir === 'asc' ? r : -r;
+    });
+    tb.innerHTML = sorted.map(d => {
+      const lbls = jsonParse(d.labels);
+      const ap = d.autopay_enabled ? (d.autopay_paused ? '<span class="sbadge s-paused">Paused</span>' : '<span class="sbadge s-active">On</span>') : '<span style="color:var(--gray-3)">Off</span>';
+      return `<tr>
+        <td><input type="checkbox" value="${d.id}" ${this.selected.has(d.id)?'checked':''} onchange="Donors.toggleOne('${d.id}',this.checked)"></td>
+        <td><div style="display:flex;align-items:center;gap:8px">
+          ${avatar(d, 28)}
+          <div>
+            <div style="font-weight:600;font-size:13px">${d.title?d.title+' ':''}${d.first_name} ${d.last_name}</div>
+            ${lbls.length ? `<div class="bg" style="gap:3px;margin-top:2px;flex-wrap:wrap">${lbls.map(l=>`<span class="pill pill-blue" style="font-size:10px">${l}</span>`).join('')}</div>` : ''}
+            ${d.needs_verification ? '<div style="font-size:10px;color:var(--amber);font-weight:600">⚠ Verify</div>' : ''}
+          </div>
+        </div></td>
+        <td style="font-family:var(--font-he);direction:rtl;font-size:12px">${d.hebrew_full_name||'—'}</td>
+        <td style="font-size:12px">${d.cell?`<div>${d.cell}</div>`:''}${d.email?`<div style="color:var(--gray-5)">${d.email}</div>`:''}</td>
+        <td style="font-family:var(--font-he);font-size:12px">${d.neighborhood_name||'—'}</td>
+        <td style="font-size:12px">${age(d.months_old)}</td>
+        <td style="font-weight:600">${fmt$(d.total_amount)}</td>
+        <td>${ap}</td>
+        <td><div class="actions">
+          <button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${d.id}')">View</button>
+          <button class="btn btn-ghost btn-sm" onclick="Donors.openEdit('${d.id}')">Edit</button>
+          <button class="btn btn-icon" style="color:var(--red)" onclick="Donors.del('${d.id}','${d.first_name} ${d.last_name}')">&#10005;</button>
+        </div></td>
+      </tr>`;
+    }).join('');
+    document.querySelectorAll('#page-donors th.sort').forEach(th => {
+      th.classList.remove('sa','sd');
+      if (th.onclick?.toString().includes(`'${this.sortBy}'`)) th.classList.add(this.sortDir==='asc'?'sa':'sd');
+    });
+    $('d-pag').innerHTML = pagHtml(this.page, Math.ceil(this.total/this.perPage), 'Donors.goPage');
+    this.updateBulk();
+  },
+
+  sort(col) { if (this.sortBy===col) this.sortDir=this.sortDir==='asc'?'desc':'asc'; else {this.sortBy=col;this.sortDir='asc';} this.renderTable(); },
+  goPage(p) { Donors.page = p; Donors.load(); },
+  bindEvents() {
+    let t;
+    const s = $('d-search');
+    if (s) s.oninput = () => { clearTimeout(t); t = setTimeout(() => { Donors.search=s.value; Donors.page=1; Donors.load(); }, 320); };
+    $('d-hood')?.addEventListener('change', e => { Donors.hood=e.target.value; Donors.page=1; Donors.load(); });
+    $('d-label')?.addEventListener('change', e => { Donors.label=e.target.value; Donors.page=1; Donors.load(); });
+    $('d-ap')?.addEventListener('change', e => { Donors.autopay=e.target.value; Donors.page=1; Donors.load(); });
+    $('d-pp')?.addEventListener('change', e => { Donors.perPage=parseInt(e.target.value); Donors.page=1; Donors.load(); });
+  },
+  toggleAll(c) { document.querySelectorAll('#d-tbody input[type=checkbox]').forEach(cb => { cb.checked=c; if(c)Donors.selected.add(cb.value); else Donors.selected.delete(cb.value); }); Donors.updateBulk(); },
+  toggleOne(id, c) { if(c) this.selected.add(id); else this.selected.delete(id); this.updateBulk(); },
+  clearSel() { this.selected.clear(); const a=$('sel-all'); if(a)a.checked=false; document.querySelectorAll('#d-tbody input[type=checkbox]').forEach(c=>c.checked=false); this.updateBulk(); },
+  updateBulk() { const bar=$('d-bulk'),cnt=$('d-bulk-cnt'); if(bar)bar.className='bulk-bar'+(this.selected.size>0?' show':''); if(cnt)cnt.textContent=`${this.selected.size} selected`; },
+  bulkDelete() { if(!this.selected.size)return; confirmDlg(`Delete ${this.selected.size} donor(s)?`,async()=>{for(const id of this.selected)await API.del(API.o.donor(id)).catch(()=>{}); this.selected.clear(); toast('Deleted'); Donors.load(); }); },
+  async pauseAll() { confirmDlg('Pause AutoPay for all donors?',async()=>{await API.post(`/api/orgs/${API.orgId}/donors/autopay/pause-all`,{}); toast('Paused'); Donors.load();}); },
+  async resumeAll() { await API.post(`/api/orgs/${API.orgId}/donors/autopay/resume-all`,{}); toast('Resumed'); this.load(); },
+  openAdd() { this.form(null); },
+  async openEdit(id) { try { const d = await API.get(API.o.donor(id)); this.form(d.donor); } catch(e) { toast(e.message,'err'); } },
+  del(id, name) { confirmDlg(`Delete "${name}"?`, async () => { await API.del(API.o.donor(id)); toast('Deleted'); Donors.load(); }); },
+  exportXlsx() { API.dl(`/api/orgs/${API.orgId}/reports/donors?format=xlsx`, 'donors.xlsx').catch(e=>toast(e.message,'err')); },
+  importXlsx() {
+    Modal.open('Import Donors', `<p style="color:var(--gray-5);margin-bottom:10px;font-size:13px">Excel columns: First Name, Last Name, Hebrew Name, Email, Cell, Street, City, State, Zip</p>
+      <input type="file" id="imp-f" accept=".xlsx,.xls">
+      <div class="bg mt"><button class="btn btn-primary" onclick="Donors.doImport()">Import</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, { sm: true });
+  },
+  async doImport() {
+    const f = $('imp-f')?.files[0]; if (!f) { toast('Select a file','err'); return; }
+    const fd = new FormData(); fd.append('file', f);
+    try {
+      const r = await fetch(`/api/orgs/${API.orgId}/import/donors`, { method:'POST', body:fd, credentials:'include', headers:{'x-org-id':API.orgId} }).then(r=>r.json());
+      toast(`Imported ${r.imported}${r.errors?.length?` (${r.errors.length} errors)`:''}`);
+      Modal.close(); this.load();
+    } catch(e) { toast(e.message,'err'); }
+  },
+
+  form(donor) {
+    const ie = !!donor;
+    Modal.open(ie?'Edit Donor':'Add Donor', '<div class="spinner"></div>', { lg: true, cb: async () => {
+      const hs = await API.get(API.o.hoods()).catch(()=>[]);
+      const lbls = jsonParse(donor?.labels);
+      Modal.body(`
+        <div class="tabs">
+          <div class="tab on" data-tc="df-basic">Basic</div>
+          <div class="tab" data-tc="df-contact">Contact</div>
+          <div class="tab" data-tc="df-extra">Labels & Kvitel</div>
+        </div>
+        <div id="df-basic" class="tc on">
+          <div class="r4">
+            <div><label>Title</label><input id="df-title" value="${donor?.title||''}" autocomplete="off"></div>
+            <div style="grid-column:span 2"><label>First Name *</label><input id="df-first" value="${donor?.first_name||''}"></div>
+            <div><label>Last Name *</label><input id="df-last" value="${donor?.last_name||''}"></div>
+          </div>
+          <div class="r2">
+            <div><label>Hebrew Title</label><input id="df-htitle" dir="rtl" style="font-family:var(--font-he)" value="${donor?.hebrew_title||''}"></div>
+            <div><label>Hebrew Full Name</label><input id="df-hname" dir="rtl" style="font-family:var(--font-he)" value="${donor?.hebrew_full_name||''}"></div>
+          </div>
+          <div class="r2">
+            <div><label>Neighborhood</label>
+              <div class="bg"><select id="df-nh" style="flex:1"><option value="">— None —</option>${hs.map(h=>`<option value="${h.id}" ${h.id===donor?.neighborhood_id?'selected':''}>${h.name_he}</option>`).join('')}</select>
+              <button type="button" class="btn btn-ghost btn-sm" onclick="Donors.addHood()">+</button></div>
+            </div>
+            <div><label>Created</label><input type="date" id="df-created" value="${donor?.created_at?donor.created_at.slice(0,10):new Date().toISOString().slice(0,10)}" ${ie?'readonly':''}></div>
+          </div>
+        </div>
+        <div id="df-contact" class="tc">
+          <div class="r2">
+            <div><label>Cell</label><input id="df-cell" type="tel" value="${donor?.cell||''}"></div>
+            <div><label>Home Phone</label><input id="df-home" type="tel" value="${donor?.home_phone||''}"></div>
+          </div>
+          <label>Email</label><input id="df-email" type="email" value="${donor?.email||''}">
+          <hr class="divider">
+          <label>Street</label><input id="df-street" value="${donor?.street||''}">
+          <div class="r4">
+            <div><label>Apt</label><input id="df-apt" value="${donor?.apt||''}"></div>
+            <div style="grid-column:span 2"><label>City</label><input id="df-city" value="${donor?.city||''}"></div>
+            <div><label>State</label><input id="df-state" value="${donor?.state||''}" maxlength="2"></div>
+          </div>
+          <div style="max-width:130px"><label>ZIP</label><input id="df-zip" value="${donor?.zip||''}"></div>
+        </div>
+        <div id="df-extra" class="tc">
+          <label>Labels</label><div id="lw-donor"></div>
+          <hr class="divider">
+          <label>Kvitel <span style="font-size:11px;color:var(--gray-5)">(Hebrew, RTL)</span></label>
+          <textarea id="df-kvitel" class="rtl-input" style="min-height:110px">${donor?.kvitel||''}</textarea>
+          <div class="trow" style="margin-top:10px">
+            <div>Include in Kvitel generation</div>
+            <label class="tgl"><input type="checkbox" id="df-kvon" ${donor?.kvitel_enabled!==0?'checked':''}><span class="tgl-s"></span></label>
+          </div>
+        </div>
+        <hr class="divider">
+        <div class="bg">
+          <button class="btn btn-primary" onclick="Donors.save('${donor?.id||''}')">${ie?'Save':'Add Donor'}</button>
+          <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+        </div>`);
+      window._lwDonor = lwInit('lw-donor', lbls);
+      tabsInit('#modal-body');
+    }});
+  },
+
+  async addHood() {
+    const n = prompt('Hebrew neighborhood name:'); if (!n) return;
+    try { const r = await API.post(API.o.hoods(), {name_he:n}); toast('Added'); const s=$('df-nh'); if(s)s.innerHTML+=`<option value="${r.neighborhood.id}" selected>${r.neighborhood.name_he}</option>`; }
+    catch(e) { toast(e.message,'err'); }
+  },
+
+  async save(id) {
+    const data = { title:val('df-title'), first_name:val('df-first'), last_name:val('df-last'), hebrew_title:val('df-htitle'), hebrew_full_name:val('df-hname'), neighborhood_id:val('df-nh')||null, cell:val('df-cell'), home_phone:val('df-home'), email:val('df-email'), street:val('df-street'), apt:val('df-apt'), city:val('df-city'), state:val('df-state'), zip:val('df-zip'), kvitel:val('df-kvitel'), kvitel_enabled:$('df-kvon')?.checked?1:0, labels:window._lwDonor?.get()||[] };
+    if (!data.first_name || !data.last_name) { toast('First and last name required','err'); return; }
+    try { if(id) await API.put(API.o.donor(id),data); else await API.post(API.o.donors(),data); toast(id?'Saved':'Added'); Modal.close(); this.load(); this.loadMeta(); }
+    catch(e) { toast(e.message,'err'); }
+  },
+};
+
+// ── Donor Detail ──────────────────────────────────────────────────────────────
+const DonorDetail = {
+  data: null,
+  async open(id) {
+    Modal.open('Loading…', '<div class="spinner"></div>', { lg: true });
+    try {
+      this.data = await API.get(API.o.donor(id));
+      this.data.recurring = await API.get(`/api/orgs/${API.orgId}/donors/${id}/recurring`).catch(()=>[]);
+      this.render();
+    } catch(e) { Modal.body(`<div class="alert alert-err">${e.message}</div>`); }
+  },
+
+  render() {
+    const { donor, paymentMethods, donations, recurring } = this.data;
+    const lbls = jsonParse(donor.labels);
+    Modal.title('');
+    Modal.body(`
+      <div class="donor-detail-hdr">
+        <div class="dd-av">${inits(donor.first_name, donor.last_name)}</div>
+        <div style="flex:1">
+          <div style="font-size:19px;font-weight:700">${donor.title?donor.title+' ':''}${donor.first_name} ${donor.last_name}</div>
+          ${donor.hebrew_full_name?`<div style="font-family:var(--font-he);direction:rtl;opacity:.85;font-size:14px">${donor.hebrew_title||''} ${donor.hebrew_full_name}</div>`:''}
+          <div style="font-size:12px;opacity:.7;margin-top:3px">${age(donor.months_old)} · ${donor.email||''} ${donor.cell?'· '+donor.cell:''} ${donor.neighborhood_name?'· '+donor.neighborhood_name:''}</div>
+          <div class="bg" style="gap:4px;margin-top:5px;flex-wrap:wrap">${lbls.map(l=>`<span class="pill pill-blue" style="font-size:10px">${l}</span>`).join('')}${donor.needs_verification?'<span class="pill pill-amber" style="font-size:10px">⚠ Verify</span>':''}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-size:22px;font-weight:700">${fmt$(donor.total_amount)}</div>
+          <div style="opacity:.7;font-size:12px">${donor.total_donations||0} donations</div>
+          <div class="bg" style="justify-content:flex-end;margin-top:6px">
+            <button class="btn btn-blue btn-sm" onclick="Donors.openEdit('${donor.id}')">Edit</button>
+            ${donor.needs_verification?`<button class="btn btn-green btn-sm" onclick="DonorDetail.verify('${donor.id}')">Verify</button>`:''}
+          </div>
+        </div>
+      </div>
+      <div class="tabs" style="margin-top:0;border-radius:0">
+        <div class="tab on" data-tc="dd-ov">Overview</div>
+        <div class="tab" data-tc="dd-cards">Cards</div>
+        <div class="tab" data-tc="dd-don">Donations</div>
+        <div class="tab" data-tc="dd-rec">Recurring</div>
+        <div class="tab" data-tc="dd-kv">Kvitel</div>
+        <div class="tab" data-tc="dd-notes">Notes</div>
+      </div>
+      <div id="dd-ov" class="tc on" style="padding:16px">
+        <div class="g2">
+          <div>
+            <div class="card-title">Contact</div>
+            ${donor.cell?`<p style="font-size:13px;margin-bottom:4px">Cell: ${donor.cell}</p>`:''}
+            ${donor.home_phone?`<p style="font-size:13px;margin-bottom:4px">Home: ${donor.home_phone}</p>`:''}
+            ${donor.email?`<p style="font-size:13px">Email: ${donor.email}</p>`:''}
+            <hr class="divider">
+            <div class="card-title">Address</div>
+            <p style="font-size:13px">${[donor.street,donor.apt,donor.city,donor.state,donor.zip].filter(Boolean).join(', ')||'—'}</p>
+          </div>
+          <div>
+            <div class="card-title">Email Preferences</div>
+            <div class="trow"><div style="font-size:13px">Donation receipts</div><label class="tgl"><input type="checkbox" ${!donor.donation_emails_paused?'checked':''} onchange="DonorDetail.pref('${donor.id}','donation_emails_paused',!this.checked)"><span class="tgl-s"></span></label></div>
+            <div class="trow"><div style="font-size:13px">Marketing emails</div><label class="tgl"><input type="checkbox" ${!donor.marketing_emails_paused?'checked':''} onchange="DonorDetail.pref('${donor.id}','marketing_emails_paused',!this.checked)"><span class="tgl-s"></span></label></div>
+          </div>
+        </div>
+      </div>
+      <div id="dd-cards" class="tc" style="padding:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <strong>Payment Methods</strong>
+          <button class="btn btn-blue btn-sm" onclick="DonorDetail.addCard('${donor.id}')">+ Add</button>
+        </div>
+        <div id="pm-list">${paymentMethods.length ? paymentMethods.map(pm=>this.pmCard(pm,donor.id)).join('') : '<p style="color:var(--gray-5)">No payment methods yet</p>'}</div>
+      </div>
+      <div id="dd-don" class="tc" style="padding:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <strong>Donations</strong>
+          <div class="bg">
+            <button class="btn btn-ghost btn-sm" onclick="DonorDetail.manual('${donor.id}')">+ Manual</button>
+            <button class="btn btn-blue btn-sm" onclick="DonorDetail.chargeNow('${donor.id}')">Charge Card</button>
+          </div>
+        </div>
+        <div class="scroll-box"><table>
+          <thead><tr><th>Date</th><th>Amount</th><th>Method</th><th>Trans ID</th><th>Status</th><th>Notes</th><th></th></tr></thead>
+          <tbody>${donations.length ? donations.map(d=>this.donRow(d,donor.id)).join('') : '<tr><td colspan="7"><div class="empty">No donations yet</div></td></tr>'}</tbody>
+        </table></div>
+      </div>
+      <div id="dd-rec" class="tc" style="padding:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <strong>Recurring Schedules</strong>
+          <button class="btn btn-primary btn-sm" onclick="DonorDetail.addRecurring('${donor.id}')">+ Add</button>
+        </div>
+        ${recurring.length ? recurring.map(s=>this.recCard(s,donor.id)).join('') : '<div class="alert alert-info">No recurring schedules. Add one to charge weekly, bi-weekly, or monthly automatically.</div>'}
+      </div>
+      <div id="dd-kv" class="tc" style="padding:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <strong>Kvitel</strong>
+          <label class="tgl"><input type="checkbox" id="kv-on" ${donor.kvitel_enabled!==0?'checked':''} onchange="DonorDetail.pref('${donor.id}','kvitel_enabled',this.checked?1:0)"><span class="tgl-s"></span></label>
+        </div>
+        <textarea id="kv-txt" class="rtl-input" style="min-height:160px;width:100%">${donor.kvitel||''}</textarea>
+        <button class="btn btn-primary btn-sm mt" onclick="DonorDetail.saveKv('${donor.id}')">Save</button>
+      </div>
+      <div id="dd-notes" class="tc" style="padding:16px">
+        <div style="margin-bottom:12px">
+          <textarea id="new-note" placeholder="Add a note…" style="min-height:70px;width:100%"></textarea>
+          <button class="btn btn-primary btn-sm" style="margin-top:6px" onclick="DonorDetail.addNote('${donor.id}')">Add Note</button>
+        </div>
+        ${this.notesList(donor)}
+      </div>`);
+    tabsInit('#modal-body');
+  },
+
+  pmCard(pm, did) {
+    const tok = pm.sola_token ? '<span class="pill pill-blue" style="font-size:10px">Tokenized</span>' : '';
+    let info = '';
+    if (pm.type==='credit_card') info = cbrand(pm.card_brand, pm.last_four);
+    else if (pm.type==='daf') info = `DAF: ${pm.daf_name||''}`;
+    else info = pm.other_description || fmtMethod(pm.type);
+    return `<div class="sched-item">
+      <div>
+        <div class="sched-main">${info} ${pm.label?`<span style="font-size:12px;color:var(--gray-5)">${pm.label}</span>`:''} ${pm.is_default?'<span class="pill pill-green" style="font-size:10px">Default</span>':''} ${tok}</div>
+      </div>
+      <div class="bg">
+        ${pm.type==='credit_card'&&pm.sola_token?`<button class="btn btn-ghost btn-sm" onclick="DonorDetail.chargeCard('${did}','${pm.id}')">Charge</button>`:''}
+        <button class="btn btn-icon" style="color:var(--red)" onclick="DonorDetail.delPM('${did}','${pm.id}')">&#10005;</button>
+      </div>
+    </div>`;
+  },
+
+  donRow(d, did) {
+    const dn = jsonParse(d.donation_notes);
+    return `<tr>
+      <td style="font-size:12px;white-space:nowrap">${fmtD(d.donation_date)}</td>
+      <td style="font-weight:600">${fmt$(d.amount)}${d.refund_amount>0?`<br><span style="font-size:11px;color:var(--red)">−${fmt$(d.refund_amount)}</span>`:''}</td>
+      <td style="font-size:12px">${fmtMethod(d.method)}${d.last_four?` ••${d.last_four}`:''}</td>
+      <td style="font-size:11px;color:var(--gray-5);max-width:100px;word-break:break-all">${d.transaction_id||'—'}</td>
+      <td>${sbadge(d.status)}</td>
+      <td style="font-size:12px;max-width:130px">${d.notes||''}${dn.map(n=>`<div style="font-style:italic;color:var(--gray-5);font-size:11px">${fmtD(n.at)}: ${n.text}</div>`).join('')}</td>
+      <td><div class="actions">
+        <button class="btn btn-icon" title="Add note" onclick="DonorDetail.addDonNote('${did}','${d.id}')">&#9997;</button>
+        ${(d.status==='completed'||d.status==='partial_refund')?`<button class="btn btn-icon" title="Refund" onclick="DonorDetail.refund('${did}','${d.id}','${d.amount}','${d.transaction_id||''}')">&#8617;</button>`:''}
+      </div></td>
+    </tr>`;
+  },
+
+  recCard(s, did) {
+    const pm = s.pm_label || (s.pm_type==='credit_card' ? `${s.card_brand||'Card'} ••${s.last_four||''}` : fmtMethod(s.pm_type));
+    const lim = s.occurrences_limit ? `${s.occurrences_count||0}/${s.occurrences_limit}` : 'Unlimited';
+    return `<div class="sched-item">
+      <div>
+        <div class="sched-main">${fmt$(s.amount)} / ${fmtFreq(s.frequency)} ${sbadge(s.status)}</div>
+        <div class="sched-sub">${pm} · Next: ${fmtD(s.next_run)} · ${lim}</div>
+        ${s.last_failure?`<div style="font-size:11px;color:var(--red);margin-top:2px">Last error: ${s.last_failure}</div>`:''}
+      </div>
+      <div class="bg">
+        ${s.status==='active'?`<button class="btn btn-ghost btn-sm" onclick="DonorDetail.toggleRec('${did}','${s.id}','paused')">Pause</button>`:`<button class="btn btn-ghost btn-sm" onclick="DonorDetail.toggleRec('${did}','${s.id}','active')">Resume</button>`}
+        <button class="btn btn-ghost btn-sm" onclick="DonorDetail.editRec('${did}','${s.id}','${s.amount}','${s.frequency}','${s.next_run||''}')">Edit</button>
+        <button class="btn btn-icon" style="color:var(--red)" onclick="DonorDetail.delRec('${did}','${s.id}')">&#10005;</button>
+      </div>
+    </div>`;
+  },
+
+  notesList(donor) {
+    const notes = jsonParse(donor.notes);
+    if (!notes.length) return '<p style="color:var(--gray-5)">No notes yet</p>';
+    return notes.slice().reverse().map(n=>`<div class="note-item"><div class="note-meta">${fmtDT(n.at)}${n.by?' · '+n.by:''}</div><div>${n.text}</div></div>`).join('');
+  },
+
+  async verify(id) { await API.post(`/api/orgs/${API.orgId}/donors/${id}/verify`,{}); toast('Verified ✓'); this.open(id); loadBadges(); },
+  async pref(id, f, v) { await API.put(API.o.donor(id), {[f]:v}); },
+  async saveKv(id) { await API.put(API.o.donor(id), {kvitel:val('kv-txt'),kvitel_enabled:$('kv-on')?.checked?1:0}); toast('Saved'); },
+  async addNote(id) {
+    const txt = $('new-note')?.value?.trim(); if (!txt) return;
+    const notes = jsonParse(this.data?.donor?.notes);
+    notes.push({text:txt, at:new Date().toISOString(), by:DRM.user?.full_name||''});
+    await API.put(API.o.donor(id), {notes}); toast('Note added'); this.open(id);
+  },
+
+  addCard(did) {
+    Modal.open('Add Payment Method', `
+      <label>Type</label>
+      <select id="pm-type" onchange="DonorDetail._pmTypeChange()">
+        <option value="credit_card">Credit Card (Sola)</option>
+        <option value="daf">DAF</option>
+        <option value="check">Check</option>
+        <option value="other">Other</option>
+      </select>
+      <div id="cc-f">
+        <div class="alert alert-info" style="margin-top:10px;font-size:12px">Card tokenized via Sola — raw number never stored.</div>
+        <div class="r2"><div><label>Card Number</label><input id="pm-num" maxlength="19" autocomplete="cc-number"></div><div><label>Expiry (MMYY)</label><input id="pm-exp" maxlength="4" autocomplete="cc-exp" placeholder="0128"></div></div>
+        <div class="r2"><div><label>CVV</label><input id="pm-cvv" type="password" maxlength="4"></div><div><label>ZIP</label><input id="pm-zip" maxlength="5"></div></div>
+        <label>Card Brand</label>
+        <select id="pm-brand"><option value="">— Select —</option><option>Visa</option><option>Mastercard</option><option>Amex</option><option>Discover</option></select>
+      </div>
+      <div id="daf-f" style="display:none"><label>DAF Name</label><input id="pm-daf" placeholder="Fidelity Charitable…"></div>
+      <div id="oth-f" style="display:none"><label>Description</label><input id="pm-oth" placeholder="Check, Cash, Wire…"></div>
+      <label>Nickname (optional)</label><input id="pm-lbl" autocomplete="off">
+      <div class="trow mt"><div>Set as default</div><label class="tgl"><input type="checkbox" id="pm-def" checked><span class="tgl-s"></span></label></div>
+      <div class="bg mt">
+        <button class="btn btn-primary" id="pm-btn" onclick="DonorDetail.saveCard('${did}')">Save & Tokenize</button>
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+      </div>`, { sm: true });
+  },
+  _pmTypeChange() {
+    const t = val('pm-type');
+    $('cc-f').style.display = t==='credit_card'?'':'none';
+    $('daf-f').style.display = t==='daf'?'':'none';
+    $('oth-f').style.display = (t==='check'||t==='other')?'':'none';
+    const btn=$('pm-btn'); if(btn) btn.textContent = t==='credit_card'?'Save & Tokenize':'Add Method';
+  },
+  async saveCard(did) {
+    const type=val('pm-type'), lbl=val('pm-lbl'), def=$('pm-def')?.checked?1:0, btn=$('pm-btn');
+    try {
+      if (type==='credit_card') {
+        const num=val('pm-num').replace(/\s/g,''), exp=val('pm-exp').replace(/\D/g,''), cvv=val('pm-cvv'), brand=val('pm-brand');
+        if (!num||!exp) { toast('Card number and expiry required','err'); return; }
+        if (btn) { btn.textContent='Tokenizing…'; btn.disabled=true; }
+        const r = await API.post(`/api/orgs/${API.orgId}/payments/save-card`, {donor_id:did,card_num:num,exp,cvv,label:lbl});
+        if (brand && r.paymentMethod?.id) await API.put(`/api/orgs/${API.orgId}/donors/${did}/payment-methods/${r.paymentMethod.id}`, {card_brand:brand}).catch(()=>{});
+        toast(`Card ••${r.paymentMethod?.last_four||'??'} saved`);
+      } else {
+        await API.post(`/api/orgs/${API.orgId}/donors/${did}/payment-methods`, {type, label:lbl||null, daf_name:val('pm-daf')||null, other_description:val('pm-oth')||null, is_default:def});
+        toast('Added');
+      }
+      Modal.close(); this.open(did);
+    } catch(e) { if(btn){btn.textContent='Save & Tokenize';btn.disabled=false;} toast(e.message,'err'); }
+  },
+  async delPM(did, pmId) { confirmDlg('Remove payment method?', async()=>{ await API.del(`/api/orgs/${API.orgId}/donors/${did}/payment-methods/${pmId}`); toast('Removed'); DonorDetail.open(did); }); },
+
+  chargeNow(did) {
+    const pms = (this.data?.paymentMethods||[]).filter(p=>p.type==='credit_card'&&p.sola_token);
+    if (!pms.length) { toast('No tokenized cards on file. Add a card first.','err'); return; }
+    Modal.open('Charge Card', `
+      <label>Payment Method</label>
+      <select id="cn-pm">${pms.map(p=>`<option value="${p.id}">${cbrand(p.card_brand,p.last_four)} ${p.label?'('+p.label+')':''}</option>`).join('')}</select>
+      <label>Amount ($)</label><input type="number" id="cn-amt" step="0.01" placeholder="0.00">
+      <label>Notes (optional)</label><input id="cn-notes" autocomplete="off">
+      <div class="bg mt">
+        <button class="btn btn-primary" onclick="DonorDetail._doCharge('${did}')">Charge Now</button>
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+      </div>`, { sm: true });
+  },
+  chargeCard(did, pmId) {
+    Modal.open('Charge Card', `
+      <label>Amount ($)</label><input type="number" id="cn-amt" step="0.01" placeholder="0.00">
+      <label>Notes (optional)</label><input id="cn-notes" autocomplete="off">
+      <div class="bg mt">
+        <button class="btn btn-primary" onclick="DonorDetail._doCharge('${did}','${pmId}')">Charge Now</button>
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+      </div>`, { sm: true });
+  },
+  async _doCharge(did, pmId) {
+    const amt = parseFloat(val('cn-amt')); if (!amt||amt<=0) { toast('Enter amount','err'); return; }
+    try {
+      const r = await API.post(`/api/orgs/${API.orgId}/payments/charge`, {donor_id:did,payment_method_id:pmId||val('cn-pm'),amount:amt,notes:val('cn-notes')});
+      toast(`Charged ${fmt$(amt)} · Trans: ${r.transaction_id}`); Modal.close(); this.open(did);
+    } catch(e) { toast(e.message,'err'); }
+  },
+
+  manual(did) {
+    const now = new Date().toISOString().slice(0,16);
+    Modal.open('Manual Donation', `
+      <div class="r2"><div><label>Amount ($) *</label><input type="number" id="md-amt" step="0.01" placeholder="0.00"></div><div><label>Method *</label>
+        <select id="md-meth"><option value="check">Check</option><option value="cash">Cash</option><option value="daf">DAF</option><option value="wire">Wire</option><option value="other">Other</option></select></div></div>
+      <div class="r2"><div><label>Date *</label><input type="datetime-local" id="md-date" value="${now}"></div><div><label>Trans ID</label><input id="md-tx" autocomplete="off"></div></div>
+      <label>Notes</label><input id="md-notes" autocomplete="off">
+      <div class="bg mt">
+        <button class="btn btn-primary" onclick="DonorDetail._saveManual('${did}')">Record</button>
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+      </div>`, { sm: true });
+  },
+  async _saveManual(did) {
+    const amt = parseFloat(val('md-amt')); if (!amt||amt<=0) { toast('Amount required','err'); return; }
+    try { await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations`, {amount:amt,method:val('md-meth'),donation_date:val('md-date')||new Date().toISOString(),transaction_id:val('md-tx')||null,notes:val('md-notes')||null,status:'completed'}); toast('Recorded'); Modal.close(); this.open(did); }
+    catch(e) { toast(e.message,'err'); }
+  },
+
+  addDonNote(did, donId) { Modal.open('Add Note to Donation', `<textarea id="dn-txt" style="min-height:80px;width:100%" placeholder="Note…"></textarea><div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveDonNote('${did}','${donId}')">Add</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, {sm:true}); },
+  async _saveDonNote(did, donId) { const txt=val('dn-txt').trim(); if(!txt)return; try{await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations/${donId}/notes`,{text:txt}); toast('Added'); Modal.close(); this.open(did);}catch(e){toast(e.message,'err');} },
+
+  refund(did, donId, amt, txId) { Modal.open('Refund', `<p style="margin-bottom:10px;font-size:13px;color:var(--gray-5)">Original: ${fmt$(amt)}</p><label>Refund Amount ($)</label><input type="number" id="rf-amt" step="0.01" max="${amt}" value="${amt}"><label>Reason</label><input id="rf-rsn" autocomplete="off">${txId?`<div class="alert alert-info" style="margin-top:10px;font-size:12px">Sola Ref: ${txId}</div>`:''}<div class="bg mt"><button class="btn btn-red" onclick="DonorDetail._doRefund('${did}','${donId}','${txId}')">Refund</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, {sm:true}); },
+  async _doRefund(did, donId, txId) { const amt=parseFloat(val('rf-amt')); if(!amt||amt<=0){toast('Enter amount','err');return;} try{await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations/${donId}/refund`,{amount:amt,notes:val('rf-rsn'),ref_num:txId||undefined}); toast(`Refund of ${fmt$(amt)} processed`); Modal.close(); this.open(did);}catch(e){toast(e.message,'err');} },
+
+  addRecurring(did) {
+    const pms = this.data?.paymentMethods||[];
+    if (!pms.length) { toast('Add a payment method first','err'); return; }
+    Modal.open('Add Recurring Schedule', `
+      <label>Payment Method</label>
+      <select id="rec-pm">${pms.map(p=>`<option value="${p.id}">${fmtMethod(p.type)} ${p.last_four?'••'+p.last_four:''} ${p.label?'('+p.label+')':''}</option>`).join('')}</select>
+      <div class="r2"><div><label>Amount ($) *</label><input type="number" id="rec-amt" step="0.01" placeholder="0.00"></div><div><label>Frequency *</label>
+        <select id="rec-freq"><option value="weekly">Weekly</option><option value="biweekly">Bi-Weekly</option><option value="monthly" selected>Monthly</option><option value="quarterly">Quarterly</option><option value="yearly">Yearly</option><option value="once">One-Time</option></select></div></div>
+      <div class="r2"><div><label>Start Date *</label><input type="date" id="rec-start" value="${new Date().toISOString().slice(0,10)}"></div><div><label>End Date (optional)</label><input type="date" id="rec-end"></div></div>
+      <label>Max Charges (blank = unlimited)</label>
+      <input type="number" id="rec-lim" placeholder="e.g. 12 for one year of monthly" min="1">
+      <label>Notes</label><input id="rec-notes" autocomplete="off">
+      <div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveRec('${did}')">Save</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, {sm:true});
+  },
+  async _saveRec(did) { const amt=parseFloat(val('rec-amt')); if(!amt||amt<=0){toast('Amount required','err');return;} try{await API.post(`/api/orgs/${API.orgId}/donors/${did}/recurring`,{payment_method_id:val('rec-pm'),amount:amt,frequency:val('rec-freq'),start_date:val('rec-start'),end_date:val('rec-end')||null,occurrences_limit:val('rec-lim')?parseInt(val('rec-lim')):null,notes:val('rec-notes')||null}); toast('Schedule created'); Modal.close(); this.open(did);}catch(e){toast(e.message,'err');} },
+  async toggleRec(did, sid, status) { await API.put(`/api/orgs/${API.orgId}/donors/${did}/recurring/${sid}`,{status}); toast(status==='paused'?'Paused':'Resumed'); this.open(did); },
+  editRec(did, sid, amt, freq, nextRun) { Modal.open('Edit Schedule', `<label>Amount ($)</label><input type="number" id="er-amt" value="${amt}" step="0.01"><label>Frequency</label><select id="er-freq">${['weekly','biweekly','monthly','quarterly','yearly','once'].map(f=>`<option value="${f}" ${f===freq?'selected':''}>${fmtFreq(f)}</option>`).join('')}</select><label>Next Run</label><input type="date" id="er-next" value="${nextRun?nextRun.slice(0,10):''}"><div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveEditRec('${did}','${sid}')">Save</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true}); },
+  async _saveEditRec(did, sid) { await API.put(`/api/orgs/${API.orgId}/donors/${did}/recurring/${sid}`,{amount:parseFloat(val('er-amt')),frequency:val('er-freq'),next_run:val('er-next')}); toast('Updated'); Modal.close(); this.open(did); },
+  async delRec(did, sid) { confirmDlg('Cancel this schedule?', async()=>{ await API.del(`/api/orgs/${API.orgId}/donors/${did}/recurring/${sid}`); toast('Cancelled'); DonorDetail.open(did); }); },
+};
+
+// ── Other pages ───────────────────────────────────────────────────────────────
+async function renderDonations(el) {
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const rows = await API.get(`/api/orgs/${API.orgId}/reports/donations`);
+    window._donAll = rows;
+    el.innerHTML = `
+      <div class="ph"><div><div class="ph-title">Donations</div><div class="ph-sub">${rows.length} records</div></div>
+        <button class="btn btn-ghost btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/reports/donations?format=xlsx','donations.xlsx').catch(e=>toast(e.message,'err'))">&#8681; XLSX</button>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden">
+        <div style="padding:12px 14px;border-bottom:1px solid var(--gray-1)">
+          <div class="search-bar">
+            <div class="sw" style="flex:1"><input id="don-s" placeholder="Search donor or trans ID…" oninput="_filterDon()" autocomplete="off"></div>
+            <select id="don-meth" onchange="_filterDon()"><option value="">All Methods</option>${[...new Set(rows.map(d=>d.method))].map(m=>`<option value="${m}">${fmtMethod(m)}</option>`).join('')}</select>
+            <select id="don-stat" onchange="_filterDon()"><option value="">All Status</option><option value="completed">Completed</option><option value="pending">Pending</option><option value="failed">Failed</option></select>
+          </div>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Date</th><th>Donor</th><th>Amount</th><th>Method</th><th>Trans ID</th><th>Status</th></tr></thead>
+          <tbody id="don-tb">${_donRows(rows)}</tbody>
+        </table></div>
+      </div>`;
+  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+function _donRows(rows) { if(!rows.length)return'<tr><td colspan="6"><div class="empty">No donations</div></td></tr>'; return rows.map(d=>`<tr><td style="font-size:12px">${fmtD(d.donation_date)}</td><td><strong>${d.first_name} ${d.last_name}</strong></td><td style="font-weight:600">${fmt$(d.amount)}</td><td style="font-size:12px">${fmtMethod(d.method)}${d.last_four?` ••${d.last_four}`:''}</td><td style="font-size:11px;color:var(--gray-5)">${d.transaction_id||'—'}</td><td>${sbadge(d.status)}</td></tr>`).join(''); }
+function _filterDon() { const s=val('don-s').toLowerCase(),m=val('don-meth'),st=val('don-stat'); const f=(window._donAll||[]).filter(d=>(!s||`${d.first_name} ${d.last_name} ${d.transaction_id||''}`.toLowerCase().includes(s))&&(!m||d.method===m)&&(!st||d.status===st)); const tb=$('don-tb'); if(tb)tb.innerHTML=_donRows(f); }
+
+async function renderVerification(el) {
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const donors = await API.get(API.o.verify());
+    window._verDonors = donors;
+    el.innerHTML = `
+      <div class="ph"><div><div class="ph-title">Info Check</div><div class="ph-sub">${donors.length} need verification</div></div>
+        ${donors.length?`<button class="btn btn-green btn-sm" onclick="_verifyAll()">Verify All</button>`:''}
+      </div>
+      ${donors.length?`<div class="alert alert-warn">These donors haven't had their info verified in over 6 months.</div>`:'' }
+      ${donors.length ? `
+        <div class="card" style="padding:0;overflow:hidden"><div class="tw"><table>
+          <thead><tr><th>Donor</th><th>Contact</th><th>Neighborhood</th><th>Age</th><th>Last Verified</th><th></th></tr></thead>
+          <tbody>${donors.map(d=>`<tr id="vr-${d.id}">
+            <td><div style="display:flex;align-items:center;gap:8px">${avatar(d,26)}<div><div style="font-weight:600;font-size:13px">${d.first_name} ${d.last_name}</div>${d.hebrew_full_name?`<div style="font-family:var(--font-he);font-size:11px">${d.hebrew_full_name}</div>`:''}</div></div></td>
+            <td style="font-size:12px">${d.cell||''}${d.email?`<br>${d.email}`:''}</td>
+            <td style="font-family:var(--font-he);font-size:12px">${d.neighborhood_name||'—'}</td>
+            <td style="font-size:12px">${age(d.months_old)}</td>
+            <td style="font-size:12px;color:var(--red)">${d.info_verified_at?fmtD(d.info_verified_at):'Never'}</td>
+            <td><div class="actions"><button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${d.id}')">View</button><button class="btn btn-green btn-sm" onclick="_verifyOne('${d.id}')">Verify</button></div></td>
+          </tr>`).join('')}</tbody>
+        </table></div></div>` :
+        `<div class="card"><div class="empty"><h3>All donors verified!</h3><p>No info checks needed right now.</p></div></div>`}`;
+  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+async function _verifyOne(id) { await API.post(`/api/orgs/${API.orgId}/donors/${id}/verify`,{}); const row=$(`vr-${id}`); if(row){row.style.opacity=0;row.style.transition='opacity .3s';setTimeout(()=>row.remove(),320);} toast('Verified'); loadBadges(); }
+function _verifyAll() { confirmDlg(`Verify all ${(window._verDonors||[]).length} donors?`, async()=>{ for(const d of window._verDonors||[])await API.post(`/api/orgs/${API.orgId}/donors/${d.id}/verify`,{}).catch(()=>{}); toast('All verified'); renderVerification($('page-verification')); loadBadges(); }); }
+
+async function renderFailures(el) {
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const fs = await API.get(API.o.failures());
+    const un = fs.filter(f=>!f.acknowledged);
+    el.innerHTML = `
+      <div class="ph"><div><div class="ph-title">Failed Charges</div><div class="ph-sub">${un.length} unacknowledged</div></div>
+        ${un.length?`<button class="btn btn-ghost btn-sm" onclick="_ackAll()">Acknowledge All</button>`:''}
+      </div>
+      ${un.length?`<div class="alert alert-err">${un.length} charge${un.length>1?'s':''} failed — admins notified.</div>`:''}
+      ${fs.length ? `
+        <div class="card" style="padding:0;overflow:hidden"><div class="tw"><table>
+          <thead><tr><th>Date</th><th>Donor</th><th>Amount</th><th>Reason</th><th>Status</th><th></th></tr></thead>
+          <tbody>${fs.map(f=>`<tr id="fr-${f.id}" style="${f.acknowledged?'opacity:.6':''}">
+            <td style="font-size:12px">${fmtDT(f.occurred_at)}</td>
+            <td><strong>${f.first_name} ${f.last_name}</strong>${f.email?`<br><span style="font-size:11px;color:var(--gray-5)">${f.email}</span>`:''}</td>
+            <td style="font-weight:600">${fmt$(f.amount)}</td>
+            <td style="font-size:12px;color:var(--red)">${f.failure_reason||'Unknown'}</td>
+            <td>${f.acknowledged?'<span class="pill pill-green">Acked</span>':'<span class="pill pill-red">New</span>'}</td>
+            <td><div class="actions"><button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${f.donor_id}')">View</button>${!f.acknowledged?`<button class="btn btn-ghost btn-sm" onclick="_ackOne('${f.id}')">Ack</button>`:''}</div></td>
+          </tr>`).join('')}</tbody>
+        </table></div></div>` :
+        `<div class="card"><div class="empty"><h3>No failed charges</h3></div></div>`}`;
+  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+async function _ackOne(id) { await API.post(`/api/orgs/${API.orgId}/charge-failures/${id}/acknowledge`,{}); toast('Acknowledged'); const r=$(`fr-${id}`); if(r){r.style.opacity=.6; const btn=r.querySelector('.btn-ghost'); if(btn&&btn.textContent==='Ack')btn.remove();} loadBadges(); }
+async function _ackAll() { confirmDlg('Acknowledge all?',async()=>{await API.post(`/api/orgs/${API.orgId}/charge-failures/acknowledge-all`,{}); toast('All acknowledged'); renderFailures($('page-failures')); loadBadges();}); }
+
+async function renderBank(el) {
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const txs = await API.get(`/api/orgs/${API.orgId}/bank/transactions`);
+    el.innerHTML = `
+      <div class="ph"><div><div class="ph-title">Bank</div></div>
+        <div class="bg">
+          <button class="btn btn-ghost btn-sm" onclick="API.post('/api/orgs/${API.orgId}/bank/sync',{}).then(()=>toast('Sync initiated')).catch(e=>toast(e.message,'err'))">&#8635; Sync</button>
+          <button class="btn btn-primary btn-sm" onclick="_connectBank()">+ Connect Bank</button>
+        </div>
+      </div>
+      <div class="alert alert-info">Chase bank requires API credentials or Plaid integration. Contact support to set up.</div>
+      ${txs.length ? `<div class="card" style="padding:0;overflow:hidden"><div class="tw"><table>
+        <thead><tr><th>Date</th><th>Description</th><th>Amount</th><th>Type</th><th>Label</th><th></th></tr></thead>
+        <tbody>${txs.map(t=>`<tr>
+          <td style="font-size:12px">${fmtD(t.transaction_date)}</td>
+          <td>${t.description||t.merchant||'—'}</td>
+          <td style="font-weight:600;color:${t.direction==='credit'?'var(--green)':'var(--red)'}">${t.direction==='debit'?'−':''}${fmt$(t.amount)}</td>
+          <td>${t.direction==='credit'?'<span class="pill pill-green">Credit</span>':'<span class="pill pill-red">Debit</span>'}</td>
+          <td>${t.label?`<span class="pill pill-blue">${t.label}</span>`:'—'}</td>
+          <td><button class="btn btn-ghost btn-sm" onclick="_labelTx('${t.id}')">Label</button></td>
+        </tr>`).join('')}</tbody>
+      </table></div></div>` : `<div class="card"><div class="empty"><h3>No transactions</h3><p>Connect your bank to see transactions.</p></div></div>`}`;
+  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+function _connectBank(){Modal.open('Connect Bank',`<div class="alert alert-info">Chase requires OAuth credentials or Plaid.</div><label>API Key</label><input id="bk-key" type="password"><label>API Secret</label><input id="bk-sec" type="password"><div class="bg mt"><button class="btn btn-primary" onclick="API.post('/api/orgs/${API.orgId}/bank',{api_key:val('bk-key'),api_secret:val('bk-sec')}).then(()=>{toast('Connected');Modal.close()}).catch(e=>toast(e.message,'err'))">Connect</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+function _labelTx(id){Modal.open('Label Transaction',`<label>Label</label><input id="tx-lbl" placeholder="e.g. Donation, Expense…"><div class="bg mt"><button class="btn btn-primary" onclick="API.post('/api/orgs/${API.orgId}/bank/transactions/${id}/label',{label:val('tx-lbl')}).then(()=>{toast('Labeled');Modal.close();renderBank($('page-bank'))}).catch(e=>toast(e.message,'err'))">Save</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+
+async function renderEmails(el) {
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const [cfg, sched] = await Promise.all([API.get(API.o.email()), API.get(API.o.schedEmails())]);
+    el.innerHTML = `
+      <div class="ph"><div class="ph-title">Emails</div></div>
+      <div class="tabs"><div class="tab on" data-tc="em-smtp">SMTP</div><div class="tab" data-tc="em-tpl">Template</div><div class="tab" data-tc="em-sched">Scheduled</div></div>
+      <div id="em-smtp" class="tc on"><div class="card">
+        <div class="trow"><div>Pause all donation receipt emails</div><label class="tgl"><input type="checkbox" id="em-pause" ${cfg?.donation_emails_paused?'checked':''}><span class="tgl-s"></span></label></div>
+        <hr class="divider">
+        <div class="r2"><div><label>SMTP Email</label><input id="em-email" value="${cfg?.smtp_email||''}" autocomplete="email"></div><div><label>From Name</label><input id="em-name" value="${cfg?.from_name||''}"></div></div>
+        <div class="r2"><div><label>SMTP Host</label><input id="em-host" value="${cfg?.smtp_host||'smtp.gmail.com'}"></div><div><label>Port</label><input id="em-port" type="number" value="${cfg?.smtp_port||587}"></div></div>
+        <label>App Password <span style="font-size:11px;color:var(--gray-5)">(blank = keep existing)</span></label>
+        <input id="em-pass" type="password" placeholder="Paste app password here">
+        <small style="color:var(--gray-5)">Gmail: Google Account → Security → App Passwords</small>
+        <div class="bg mt">
+          <button class="btn btn-primary" onclick="_saveEmailCfg()">Save</button>
+          <button class="btn btn-ghost btn-sm" onclick="_testEmail()">Send Test</button>
+        </div>
+      </div></div>
+      <div id="em-tpl" class="tc"><div class="card">
+        <p style="color:var(--gray-5);font-size:12px;margin-bottom:10px">Variables: {first_name} {last_name} {title} {amount} {date} {transaction_id} {method} {org_name}</p>
+        <label>Donation Receipt Template (HTML)</label>
+        <textarea id="em-tpl-txt" style="min-height:240px;font-size:12px;font-family:monospace">${cfg?.receipt_template||''}</textarea>
+        <div class="bg mt"><button class="btn btn-primary" onclick="API.put(API.o.email(),{receipt_template:val('em-tpl-txt')}).then(()=>toast('Saved')).catch(e=>toast(e.message,'err'))">Save Template</button></div>
+      </div></div>
+      <div id="em-sched" class="tc"><div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <strong>Scheduled Emails</strong>
+          <button class="btn btn-primary btn-sm" onclick="_schedEmail()">+ Schedule</button>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Subject</th><th>Scheduled</th><th>Status</th><th></th></tr></thead>
+          <tbody>${sched.map(e=>`<tr><td>${e.subject}</td><td style="font-size:12px">${fmtDT(e.scheduled_for)}</td><td>${sbadge(e.status)}</td><td>${e.status==='pending'?`<button class="btn btn-ghost btn-sm" onclick="API.del('${API.o.schedEmails()}/${e.id}').then(()=>{toast('Cancelled');renderEmails($('page-emails'))}).catch(e=>toast(e.message,'err'))">Cancel</button>`:''}</td></tr>`).join('')||'<tr><td colspan="4"><div class="empty">No scheduled emails</div></td></tr>'}</tbody>
+        </table></div>
+      </div></div>`;
+    tabsInit('#page-emails');
+  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+async function _saveEmailCfg(){try{const d={smtp_email:val('em-email'),smtp_host:val('em-host'),smtp_port:parseInt(val('em-port')),from_name:val('em-name'),donation_emails_paused:$('em-pause')?.checked?1:0};if(val('em-pass'))d.smtp_password=val('em-pass');await API.put(API.o.email(),d);toast('Saved');}catch(e){toast(e.message,'err');}}
+function _testEmail(){Modal.open('Test Email',`<label>Send to</label><input id="te-to" type="email"><div class="bg mt"><button class="btn btn-primary" onclick="API.post('/api/orgs/${API.orgId}/email-settings/test',{to:val('te-to')}).then(()=>{toast('Sent');Modal.close()}).catch(e=>toast(e.message,'err'))">Send</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+function _schedEmail(){const now=new Date();now.setHours(now.getHours()+1);Modal.open('Schedule Email',`<label>Subject</label><input id="se-subj"><label>Body (HTML)</label><textarea id="se-body" style="min-height:140px;font-size:12px"></textarea><label>Send At</label><input type="datetime-local" id="se-at" value="${toLocalDT(now.toISOString())}"><div class="bg mt"><button class="btn btn-primary" onclick="API.post(API.o.schedEmails(),{subject:val('se-subj'),html_body:val('se-body'),scheduled_for:val('se-at')}).then(()=>{toast('Scheduled');Modal.close();renderEmails($('page-emails'))}).catch(e=>toast(e.message,'err'))">Schedule</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+
+async function renderKvitel(el) {
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const [s, donors] = await Promise.all([API.get(API.o.kvitel()), API.get(API.o.donors()+'?limit=200')]);
+    const c = s || {};
+    const fonts = ['Noto Sans Hebrew','Frank Ruhl Libre','Heebo','Narkisim','Times New Roman','Livvorn'];
+    el.innerHTML = `
+      <div class="ph"><div class="ph-title">Kvitel</div>
+        <div class="bg">
+          <button class="btn btn-outline btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/kvitel/generate-pdf','kvitel.pdf','POST',{}).catch(e=>toast(e.message,'err'))">&#8681; PDF</button>
+          <button class="btn btn-primary btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/kvitel/generate-docx','kvitel.docx','POST',{}).catch(e=>toast(e.message,'err'))">&#8681; DOCX</button>
+        </div>
+      </div>
+      <div class="g2">
+        <div class="card">
+          <div class="card-title">Header</div>
+          <div class="r2"><div><label>Text</label><input id="kh-txt" value="${c.header_text||''}"></div><div><label>Font</label><select id="kh-font">${fonts.map(f=>`<option ${c.header_font===f?'selected':''}>${f}</option>`).join('')}</select></div></div>
+          <div class="r4">
+            <div><label>Size (pt)</label><input type="number" id="kh-sz" value="${c.header_size||18}" min="10" max="60"></div>
+            <div><label>Bold</label><br><label class="tgl" style="margin-top:6px"><input type="checkbox" id="kh-bold" ${c.header_bold!==0?'checked':''}><span class="tgl-s"></span></label></div>
+            <div><label>Align</label><select id="kh-align"><option value="center" ${c.header_align==='center'?'selected':''}>Center</option><option value="right" ${c.header_align==='right'?'selected':''}>Right</option><option value="left" ${c.header_align==='left'?'selected':''}>Left</option></select></div>
+            <div><label>Direction</label><select id="kh-dir"><option value="rtl" ${(c.header_dir||'rtl')==='rtl'?'selected':''}>RTL</option><option value="ltr" ${c.header_dir==='ltr'?'selected':''}>LTR</option></select></div>
+          </div>
+          <hr class="divider">
+          <div class="card-title">Body</div>
+          <div class="r2"><div><label>Font</label><select id="kb-font" onchange="$('kv-prev').style.fontFamily=this.value">${fonts.map(f=>`<option ${c.font_family===f?'selected':''}>${f}</option>`).join('')}</select></div><div><label>Size (pt)</label><input type="number" id="kb-sz" value="${c.font_size||12}" step="0.5" min="8" max="24"></div></div>
+          <div class="r2"><div><label>Line Height</label><input type="number" id="kb-lh" value="${c.line_height||1.6}" step="0.1" min="1" max="3"></div><div><label>Columns</label><select id="kb-cols">${[1,2,3,4].map(n=>`<option ${c.columns==n?'selected':''}>${n}</option>`).join('')}</select></div></div>
+          <div class="r2"><div><label>Column Gap (in)</label><input type="number" id="kb-gap" value="${c.column_gap||0.5}" step="0.1" min="0" max="2"></div><div><label>Page</label><select id="kb-page"><option value="letter" ${c.page_size==='letter'?'selected':''}>Letter 8.5×11</option><option value="legal" ${c.page_size==='legal'?'selected':''}>Legal 8.5×14</option><option value="a4" ${c.page_size==='a4'?'selected':''}>A4</option></select></div></div>
+          <div class="r4" style="margin-top:4px">${['top','bottom','left','right'].map(m=>`<div><label>Margin ${m} (in)</label><input type="number" id="km-${m}" value="${c['margin_'+m]||1}" step="0.25" min="0" max="3"></div>`).join('')}</div>
+          <div class="trow mt"><div>Group by Neighborhood</div><label class="tgl"><input type="checkbox" id="kb-nh" ${c.group_by_neighborhood!==0?'checked':''}><span class="tgl-s"></span></label></div>
+          <div class="bg mt"><button class="btn btn-primary" onclick="_saveKvitelCfg()">Save Settings</button></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Preview <span style="font-size:11px;color:var(--gray-5)">(RTL always)</span></div>
+          <div id="kv-prev" class="kv-preview" style="font-family:${c.font_family||'Noto Sans Hebrew'}">
+            ${(donors.donors||[]).filter(d=>d.kvitel).slice(0,15).map(d=>`<div style="margin-bottom:14px"><strong>${d.hebrew_full_name||d.first_name+' '+d.last_name}</strong>${d.neighborhood_name?`<span style="font-size:11px;color:var(--gray-5)"> — ${d.neighborhood_name}</span>`:''}<div style="font-size:13px;white-space:pre-line;margin-top:3px">${d.kvitel}</div></div>`).join('<hr style="border:none;border-top:1px solid #eee;margin:8px 0">') || '<p style="color:var(--gray-5)">No donors with kvitel content</p>'}
+          </div>
+          <p style="font-size:12px;color:var(--gray-5);margin-top:8px">${(donors.donors||[]).filter(d=>d.kvitel).length} donors with kvitel</p>
+        </div>
+      </div>`;
+  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+async function _saveKvitelCfg(){
+  try{
+    const ht=val('kh-txt'),hf=val('kh-font'),hs=parseFloat(val('kh-sz')),hb=$('kh-bold')?.checked,ha=val('kh-align'),hd=val('kh-dir');
+    await API.put(API.o.kvitel(),{
+      header_text:ht,header_font:hf,header_size:hs,header_bold:hb?1:0,header_align:ha,header_dir:hd,
+      header_html:`<p style="font-family:${hf};font-size:${hs}pt;font-weight:${hb?'bold':'normal'};text-align:${ha};direction:${hd}">${ht}</p>`,
+      font_family:val('kb-font'),font_size:parseFloat(val('kb-sz')),line_height:parseFloat(val('kb-lh')),
+      columns:parseInt(val('kb-cols')),column_gap:parseFloat(val('kb-gap')),page_size:val('kb-page'),
+      group_by_neighborhood:$('kb-nh')?.checked?1:0,
+      margin_top:parseFloat(val('km-top')),margin_bottom:parseFloat(val('km-bottom')),
+      margin_left:parseFloat(val('km-left')),margin_right:parseFloat(val('km-right')),
+    });
+    toast('Settings saved');
+  }catch(e){toast(e.message,'err');}
+}
+
+async function renderReports(el) {
+  const today = new Date().toISOString().slice(0,10);
+  const m1 = today.slice(0,7)+'-01';
+  el.innerHTML = `
+    <div class="ph"><div class="ph-title">Reports</div></div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="r4">
+        <div><label>From</label><input type="date" id="rp-from" value="${m1}"></div>
+        <div><label>To</label><input type="date" id="rp-to" value="${today}"></div>
+        <div><label>Method</label><select id="rp-meth"><option value="">All</option>${['credit_card','daf','check','cash','wire','other'].map(m=>`<option value="${m}">${fmtMethod(m)}</option>`).join('')}</select></div>
+        <div><label>Status</label><select id="rp-stat"><option value="">All</option><option value="completed">Completed</option><option value="pending">Pending</option><option value="failed">Failed</option></select></div>
+      </div>
+      <div class="bg mt">
+        <button class="btn btn-primary" onclick="_runReport()">Generate</button>
+        <button class="btn btn-ghost btn-sm" onclick="_dlReport()">&#8681; XLSX</button>
+        <button class="btn btn-ghost btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/reports/donors?format=xlsx','donors.xlsx').catch(e=>toast(e.message,'err'))">&#8681; Donors XLSX</button>
+      </div>
+    </div>
+    <div id="rp-out"></div>`;
+}
+async function _runReport(){const p=new URLSearchParams({from:val('rp-from'),to:val('rp-to'),method:val('rp-meth'),status:val('rp-stat')});const out=$('rp-out');out.innerHTML='<div class="spinner"></div>';try{const rows=await API.get(`/api/orgs/${API.orgId}/reports/donations?${p}`);const tot=rows.reduce((s,r)=>s+(r.amount||0),0);out.innerHTML=`<div class="card" style="padding:0;overflow:hidden"><div style="padding:10px 14px;border-bottom:1px solid var(--gray-1)"><strong>${rows.length} donations · Total: ${fmt$(tot)}</strong></div><div class="tw"><table><thead><tr><th>Date</th><th>Donor</th><th>Amount</th><th>Method</th><th>Trans ID</th><th>Status</th></tr></thead><tbody>${rows.map(d=>`<tr><td style="font-size:12px">${fmtD(d.donation_date)}</td><td><strong>${d.first_name} ${d.last_name}</strong></td><td style="font-weight:600">${fmt$(d.amount)}</td><td style="font-size:12px">${fmtMethod(d.method)}</td><td style="font-size:11px;color:var(--gray-5)">${d.transaction_id||'—'}</td><td>${sbadge(d.status)}</td></tr>`).join('')||'<tr><td colspan="6"><div class="empty">No results</div></td></tr>'}</tbody></table></div></div>`;}catch(e){out.innerHTML=`<div class="alert alert-err">${e.message}</div>`;}}
+function _dlReport(){const p=new URLSearchParams({from:val('rp-from'),to:val('rp-to'),method:val('rp-meth'),status:val('rp-stat'),format:'xlsx'});API.dl(`/api/orgs/${API.orgId}/reports/donations?${p}`,'report.xlsx').catch(e=>toast(e.message,'err'));}
+
+async function renderSettings(el) {
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const [users, log, daf, hoods] = await Promise.all([API.get(API.o.users()), API.get(API.o.log()), API.get(API.o.daf()), API.get(API.o.hoods())]);
+    el.innerHTML = `
+      <div class="ph"><div class="ph-title">Settings</div></div>
+      <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-daf">DAF</div><div class="tab" data-tc="st-log">Login Log</div></div>
+      <div id="st-users" class="tc on"><div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <strong>Users</strong>
+          <div class="bg">
+            ${DRM.user?.is_super_admin?`<button class="btn btn-outline btn-sm" onclick="_inviteAcct()">+ Invite New Account</button>`:''}
+            <button class="btn btn-primary btn-sm" onclick="_inviteUser()">+ Invite User</button>
+          </div>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Last Login</th><th></th></tr></thead>
+          <tbody>${users.map(u=>`<tr><td><strong>${u.full_name}</strong></td><td style="font-size:12px">${u.email}</td><td><span class="pill ${u.role==='admin'?'pill-blue':'pill-gray'}">${u.role}</span></td><td style="font-size:12px">${fmtDT(u.last_login)}</td><td><div class="actions"><button class="btn btn-ghost btn-sm" onclick="_resetPw('${u.id}','${u.full_name}')">Reset PW</button><button class="btn btn-icon" style="color:var(--red)" onclick="_removeUser('${u.id}','${u.full_name}')">&#10005;</button></div></td></tr>`).join('')}</tbody>
+        </table></div>
+      </div></div>
+      <div id="st-nh" class="tc"><div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><strong>Neighborhoods</strong><button class="btn btn-primary btn-sm" onclick="_addHood()">+ Add</button></div>
+        ${hoods.map(h=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--gray-1)"><span style="font-family:var(--font-he);font-size:15px">${h.name_he}</span><button class="btn btn-icon" style="color:var(--red)" onclick="API.del(API.o.hoods()+'/${h.id}').then(()=>{toast('Removed');renderSettings($('page-settings'))}).catch(e=>toast(e.message,'err'))">&#10005;</button></div>`).join('')||'<p style="color:var(--gray-5)">No neighborhoods yet</p>'}
+      </div></div>
+      <div id="st-daf" class="tc"><div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><strong>DAF Accounts</strong><button class="btn btn-primary btn-sm" onclick="_addDaf()">+ Add DAF</button></div>
+        ${daf.map(d=>`<div class="sched-item"><div><div class="sched-main">${d.name}</div>${d.contact_email?`<div class="sched-sub">${d.contact_name||''} ${d.contact_email}</div>`:''}</div><button class="btn btn-icon" style="color:var(--red)" onclick="API.del(API.o.daf()+'/${d.id}').then(()=>{toast('Removed');renderSettings($('page-settings'))}).catch(e=>toast(e.message,'err'))">&#10005;</button></div>`).join('')||'<p style="color:var(--gray-5)">No DAF accounts</p>'}
+      </div></div>
+      <div id="st-log" class="tc"><div class="card">
+        <div class="card-title">Login Audit Log</div>
+        <div class="scroll-box"><table><thead><tr><th>Time</th><th>User</th><th>Action</th><th>IP</th></tr></thead>
+        <tbody>${log.slice(0,100).map(l=>`<tr><td style="font-size:12px">${fmtDT(l.created_at)}</td><td>${l.full_name}</td><td><span class="pill ${l.action==='login'?'pill-green':'pill-gray'}">${l.action}</span></td><td style="font-size:11px;color:var(--gray-5)">${l.ip||'—'}</td></tr>`).join('')}</tbody>
+        </table></div>
+      </div></div>`;
+    tabsInit('#page-settings');
+  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+function _inviteUser(){Modal.open('Invite User',`<p style="color:var(--gray-5);font-size:13px;margin-bottom:12px">They'll receive a setup link to create their own password.</p><label>Email *</label><input id="iu-email" type="email" autocomplete="off"><label>Role</label><select id="iu-role"><option value="staff">Staff</option><option value="admin">Admin</option></select><div id="iu-res" style="display:none;margin-top:10px"></div><div class="bg mt"><button class="btn btn-primary" onclick="_doInviteUser()">Send Invite</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+async function _doInviteUser(){try{const r=await API.post(`/api/orgs/${API.orgId}/users/invite`,{email:val('iu-email'),role:val('iu-role')});const res=$('iu-res');res.innerHTML=r.emailSent?`<div class="alert alert-ok">Invite sent to ${val('iu-email')}</div>`:`<div class="alert alert-warn">Email not configured. Share this link:<br><a href="${r.setupUrl}" target="_blank" style="font-size:11px;word-break:break-all">${r.setupUrl}</a></div>`;res.style.display='block';renderSettings($('page-settings'));}catch(e){toast(e.message,'err');}}
+function _inviteAcct(){Modal.open('Invite New Account',`<p style="color:var(--gray-5);font-size:13px;margin-bottom:12px">They'll get a link to create their org and admin account.</p><label>Email *</label><input id="ia-email" type="email" autocomplete="off"><div id="ia-res" style="display:none;margin-top:10px"></div><div class="bg mt"><button class="btn btn-primary" onclick="_doInviteAcct()">Send Invite</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+async function _doInviteAcct(){try{const r=await API.post('/auth/invite-account',{email:val('ia-email')});const res=$('ia-res');res.innerHTML=r.emailSent?`<div class="alert alert-ok">Invite sent to ${val('ia-email')}</div>`:`<div class="alert alert-warn">Email not configured. Share this link:<br><a href="${r.setupUrl}" target="_blank" style="font-size:11px;word-break:break-all">${r.setupUrl}</a></div>`;res.style.display='block';}catch(e){toast(e.message,'err');}}
+function _resetPw(id,name){Modal.open('Reset Password',`<p style="margin-bottom:10px">New password for <strong>${name}</strong></p><label>Password</label><input id="rp-pw" type="password"><div class="bg mt"><button class="btn btn-primary" onclick="API.put('/api/orgs/${API.orgId}/users/${id}/password',{password:val('rp-pw')}).then(()=>{toast('Updated');Modal.close()}).catch(e=>toast(e.message,'err'))">Set</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+function _removeUser(id,name){confirmDlg(`Remove ${name}?`,async()=>{await API.del(`/api/orgs/${API.orgId}/users/${id}`);toast('Removed');renderSettings($('page-settings'));});}
+function _addHood(){Modal.open('Add Neighborhood',`<label>Hebrew Name</label><input id="nh-he" dir="rtl" style="font-family:var(--font-he)" placeholder="שם השכונה"><label>English (optional)</label><input id="nh-en"><div class="bg mt"><button class="btn btn-primary" onclick="API.post(API.o.hoods(),{name_he:val('nh-he'),name_en:val('nh-en')}).then(()=>{toast('Added');Modal.close();renderSettings($('page-settings'))}).catch(e=>toast(e.message,'err'))">Add</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+function _addDaf(){Modal.open('Add DAF Account',`<label>DAF Name *</label><input id="df-nm" placeholder="Fidelity Charitable"><label>Contact Name</label><input id="df-cn"><label>Contact Email</label><input id="df-ce" type="email"><div class="bg mt"><button class="btn btn-primary" onclick="API.post(API.o.daf(),{name:val('df-nm'),contact_name:val('df-cn'),contact_email:val('df-ce')}).then(()=>{toast('Added');Modal.close();renderSettings($('page-settings'))}).catch(e=>toast(e.message,'err'))">Add</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', init);
