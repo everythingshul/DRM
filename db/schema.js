@@ -55,7 +55,7 @@ function createTables() {
       neighborhood_id TEXT, street TEXT, apt TEXT, city TEXT, state TEXT, zip TEXT,
       labels TEXT DEFAULT '[]', kvitel TEXT DEFAULT '', kvitel_enabled INTEGER DEFAULT 1,
       autopay_enabled INTEGER DEFAULT 0, autopay_paused INTEGER DEFAULT 0,
-      autopay_day INTEGER DEFAULT 1, autopay_hour INTEGER DEFAULT 7,
+      autopay_day INTEGER DEFAULT 1, autopay_hour INTEGER DEFAULT 7, autopay_minute INTEGER DEFAULT 0,
       donation_emails_paused INTEGER DEFAULT 0, marketing_emails_paused INTEGER DEFAULT 0,
       info_verified_at DATETIME, notes TEXT DEFAULT '[]',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -161,6 +161,7 @@ function runMigrations() {
     `ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'admin'`,
     `ALTER TABLE email_settings ADD COLUMN marketing_template TEXT DEFAULT ''`,
     `ALTER TABLE organizations ADD COLUMN settings TEXT DEFAULT '{}'`,
+    `ALTER TABLE donors ADD COLUMN autopay_minute INTEGER DEFAULT 0`,
     `ALTER TABLE kvitel_settings ADD COLUMN header_text TEXT DEFAULT ''`,
     `ALTER TABLE kvitel_settings ADD COLUMN header_font TEXT DEFAULT 'Frank Ruhl Libre'`,
     `ALTER TABLE kvitel_settings ADD COLUMN header_size REAL DEFAULT 18`,

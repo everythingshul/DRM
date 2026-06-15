@@ -205,8 +205,31 @@ router.get('/receipt/:donationId', async (req, res) => {
 
     // Header bar
     page.drawRectangle({ x:0, y:340, width:612, height:56, color: navy });
-    page.drawText(don.org_name, { x:24, y:364, size:18, font:bold, color:rgb(1,1,1) });
-    page.drawText('DONATION RECEIPT', { x:24, y:348, size:10, font, color:rgb(0.7,0.8,0.95) });
+
+    // Try to embed org logo
+    let logoX = 24;
+    try {
+      const org = get('SELECT settings FROM organizations WHERE id=?', [req.orgId]);
+      const orgSettings = (() => { try { return JSON.parse(org?.settings||'{}'); } catch { return {}; } })();
+      const logoUrl = orgSettings.logo_url;
+      if (logoUrl) {
+        const fs = require('fs'), path = require('path');
+        const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
+        // logoUrl is like /org-logos/filename.png
+        const logoFile = path.join(DATA_DIR, 'logos', path.basename(logoUrl));
+        if (fs.existsSync(logoFile)) {
+          const logoBytes = fs.readFileSync(logoFile);
+          const logoImg = logoUrl.endsWith('.jpg') || logoUrl.endsWith('.jpeg')
+            ? await doc.embedJpg(logoBytes) : await doc.embedPng(logoBytes);
+          const scaled = logoImg.scaleToFit(120, 44);
+          page.drawImage(logoImg, { x:24, y:352-scaled.height/2+22, width:scaled.width, height:scaled.height });
+          logoX = 24 + scaled.width + 12;
+        }
+      }
+    } catch(logoErr) { /* logo optional */ }
+
+    page.drawText(don.org_name, { x:logoX, y:364, size:16, font:bold, color:rgb(1,1,1) });
+    page.drawText('DONATION RECEIPT', { x:logoX, y:348, size:10, font, color:rgb(0.7,0.8,0.95) });
 
     // Body
     const row = (label, value, y) => {

@@ -183,6 +183,12 @@ router.post('/charge-failures/:id/acknowledge', (req, res) => {
   res.json({ success: true });
 });
 
+router.post('/charge-failures/:id/unacknowledge', (req, res) => {
+  run('UPDATE charge_failures SET acknowledged = 0, acknowledged_at = NULL, acknowledged_by = NULL WHERE id = ? AND org_id = ?',
+    [req.params.id, req.orgId]);
+  res.json({ success: true });
+});
+
 router.post('/charge-failures/acknowledge-all', (req, res) => {
   run('UPDATE charge_failures SET acknowledged = 1, acknowledged_at = CURRENT_TIMESTAMP, acknowledged_by = ? WHERE org_id = ? AND acknowledged = 0',
     [req.user.id, req.orgId]);
@@ -420,4 +426,62 @@ router.put('/timezone', requireOrgAdmin, (req, res) => {
   current.timezone = timezone;
   run('UPDATE organizations SET settings=? WHERE id=?', [JSON.stringify(current), req.orgId]);
   res.json({ success: true });
+});
+
+// ── Outstanding manual charges (non-CC/DAF that need manual collection) ────────
+router.get('/outstanding-charges', (req, res) => {
+  const charges = all(`
+    SELECT sc.*, d.first_name, d.last_name, d.email, d.cell,
+           pm.type as pm_type, pm.label as pm_label, pm.other_description
+    FROM scheduled_charges sc
+    JOIN donors d ON sc.donor_id = d.id
+    LEFT JOIN payment_methods pm ON sc.payment_method_id = pm.id
+    WHERE sc.org_id=? AND sc.status='pending'
+      AND (pm.type IS NULL OR pm.type NOT IN ('credit_card','daf'))
+    ORDER BY sc.scheduled_for ASC
+  `, [req.orgId]);
+  res.json(charges);
+});
+
+// Mark outstanding charge as collected (enter transaction details)
+router.post('/outstanding-charges/:id/collect', (req, res) => {
+  try {
+    const { transaction_id, notes, amount } = req.body;
+    const charge = get('SELECT * FROM scheduled_charges WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
+    if (!charge) return res.status(404).json({ error: 'Charge not found' });
+
+    const txId = transaction_id || ('ES' + String(Math.floor(Math.random()*1000000000)).padStart(9,'0'));
+
+    // Record the donation
+    const donId = require('uuid').v4();
+    run(`INSERT INTO donations (id,org_id,donor_id,amount,method,payment_method_id,transaction_id,donation_date,status,notes,is_manual,created_by)
+         VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP,'completed',?,1,'manual-collection')`,
+      [donId, req.orgId, charge.donor_id, amount || charge.amount,
+       'check', charge.payment_method_id, txId, notes || charge.notes || null]);
+
+    // Mark charge as completed
+    run('UPDATE scheduled_charges SET status=?,processed_at=CURRENT_TIMESTAMP,failure_reason=? WHERE id=?',
+      ['completed', `Manually collected: ${txId}`, req.params.id]);
+
+    res.json({ success: true, donation: get('SELECT * FROM donations WHERE id=?', [donId]) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Logo upload for receipts ────────────────────────────────────────────────────
+router.post('/upload-logo', requireOrgAdmin, (req, res) => {
+  // Logo is uploaded as base64 in body
+  const { logo_base64, mime_type } = req.body;
+  if (!logo_base64) return res.status(400).json({ error: 'No logo data' });
+  const fs = require('fs');
+  const path = require('path');
+  const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
+  const dir = path.join(DATA_DIR, 'logos');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const ext = (mime_type || 'image/png').includes('jpeg') ? 'jpg' : 'png';
+  const filename = `org-${req.orgId}-logo.${ext}`;
+  const filepath = path.join(dir, filename);
+  fs.writeFileSync(filepath, Buffer.from(logo_base64, 'base64'));
+  const logoUrl = `/org-logos/${filename}`;
+  run("UPDATE organizations SET settings=json_set(COALESCE(settings,'{}'),'$.logo_url',?) WHERE id=?", [logoUrl, req.orgId]);
+  res.json({ success: true, logo_url: logoUrl });
 });

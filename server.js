@@ -32,6 +32,8 @@ app.use(cookieParser());
 
 // Static files
 app.use(express.static(path.join(__dirname, 'public')));
+// Serve org-uploaded logos
+app.use('/org-logos', express.static(path.join(DATA_DIR, 'logos')));
 
 // File upload
 const upload = multer({

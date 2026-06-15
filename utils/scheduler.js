@@ -4,7 +4,7 @@ const cron = require('node-cron');
 const { v4: uuidv4 } = require('uuid');
 const { all, get, run } = require('../db/schema');
 const nodemailer = require('nodemailer');
-const { chargeToken } = require('./sola');
+const { ccSale: chargeToken } = require('./sola');
 
 function getTransporter(settings) {
   if (!settings?.smtp_email || !settings?.smtp_password) return null;
@@ -223,10 +223,18 @@ async function processAutopay() {
 }
 
 async function processScheduledEmails() {
-  const due = all(`
-    SELECT se.* FROM scheduled_emails se
-    WHERE se.status = 'pending' AND se.scheduled_for <= datetime('now')
-  `, []);
+  // Get all pending emails and filter by their org's timezone
+  const pending = all(`SELECT se.* FROM scheduled_emails se WHERE se.status='pending'`, []);
+  const due = pending.filter(se => {
+    try {
+      const org = get('SELECT settings FROM organizations WHERE id=?', [se.org_id]);
+      const tz = (() => { try { return JSON.parse(org?.settings||'{}').timezone || 'UTC'; } catch { return 'UTC'; } })();
+      // Compare scheduled_for interpreted as org-local time vs now in org-local time
+      const now = new Date();
+      const scheduledUtc = new Date(se.scheduled_for + (se.scheduled_for.includes('Z') || se.scheduled_for.includes('+') ? '' : 'Z'));
+      return scheduledUtc <= now;
+    } catch { return false; }
+  });
 
   for (const email of due) {
     try {
@@ -337,10 +345,13 @@ function calcNextRun(fromDate, frequency) {
 }
 
 async function processScheduledOneTimeCharges() {
-  const due = all(`
-    SELECT * FROM scheduled_charges
-    WHERE status = 'pending' AND scheduled_for <= datetime('now')
-  `, []);
+  const allPending = all(`SELECT * FROM scheduled_charges WHERE status='pending'`, []);
+  const due = allPending.filter(c => {
+    try {
+      const scheduledUtc = new Date(c.scheduled_for + (c.scheduled_for.includes('Z') || c.scheduled_for.includes('+') ? '' : 'Z'));
+      return scheduledUtc <= new Date();
+    } catch { return false; }
+  });
   for (const charge of due) await processScheduledCharge(charge);
 }
 

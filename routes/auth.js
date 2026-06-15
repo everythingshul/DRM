@@ -215,8 +215,11 @@ router.post('/orgs/:orgId/users/invite', requireAuth, requireOrg, requireOrgAdmi
 
     // Get email settings for this org's signup SMTP
     const emailSettings = get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]);
-    const signupEmail = process.env.SIGNUP_SMTP_EMAIL;
-    const signupPass = process.env.SIGNUP_SMTP_PASSWORD;
+    // Use the org's configured SMTP (admin email + app password)
+    // Falls back to SIGNUP_SMTP_EMAIL env var if org SMTP not configured
+    const orgEmailCfg = get('SELECT * FROM email_settings WHERE org_id=?', [req.orgId]) || get('SELECT es.* FROM email_settings es JOIN org_users ou ON es.org_id=ou.org_id WHERE ou.user_id=? LIMIT 1', [req.user.id]);
+    const signupEmail = orgEmailCfg?.smtp_email || process.env.SIGNUP_SMTP_EMAIL;
+    const signupPass  = orgEmailCfg?.smtp_password || process.env.SIGNUP_SMTP_PASSWORD;
     const appUrl = process.env.APP_URL || 'https://drm.everythingshul.com';
     const setupUrl = `${appUrl}/complete-setup?token=${setupToken}`;
 
@@ -226,7 +229,9 @@ router.post('/orgs/:orgId/users/invite', requireAuth, requireOrg, requireOrgAdmi
       try {
         const nodemailer = require('nodemailer');
         const transporter = nodemailer.createTransport({
-          host: 'smtp.gmail.com', port: 587, secure: false,
+          host: orgEmailCfg?.smtp_host || 'smtp.gmail.com',
+          port: orgEmailCfg?.smtp_port || 587,
+          secure: false,
           auth: { user: signupEmail, pass: signupPass }
         });
         await transporter.sendMail({
@@ -363,15 +368,20 @@ router.post('/invite-account', requireAuth, async (req, res) => {
     const appUrl = process.env.APP_URL || 'https://drm.everythingshul.com';
     const setupUrl = `${appUrl}/new-account?token=${inviteToken}`;
 
-    const signupEmail = process.env.SIGNUP_SMTP_EMAIL;
-    const signupPass = process.env.SIGNUP_SMTP_PASSWORD;
+    // Use the org's configured SMTP (admin email + app password)
+    // Falls back to SIGNUP_SMTP_EMAIL env var if org SMTP not configured
+    const orgEmailCfg = get('SELECT * FROM email_settings WHERE org_id=?', [req.orgId]) || get('SELECT es.* FROM email_settings es JOIN org_users ou ON es.org_id=ou.org_id WHERE ou.user_id=? LIMIT 1', [req.user.id]);
+    const signupEmail = orgEmailCfg?.smtp_email || process.env.SIGNUP_SMTP_EMAIL;
+    const signupPass  = orgEmailCfg?.smtp_password || process.env.SIGNUP_SMTP_PASSWORD;
     let emailSent = false;
 
     if (signupEmail && signupPass) {
       try {
         const nodemailer = require('nodemailer');
         const transporter = nodemailer.createTransport({
-          host: 'smtp.gmail.com', port: 587, secure: false,
+          host: orgEmailCfg?.smtp_host || 'smtp.gmail.com',
+          port: orgEmailCfg?.smtp_port || 587,
+          secure: false,
           auth: { user: signupEmail, pass: signupPass }
         });
         await transporter.sendMail({

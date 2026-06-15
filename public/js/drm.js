@@ -343,16 +343,22 @@ async function createOrg() {
   } catch(e) { toast(e.message, 'err'); }
 }
 
-function navigateTo(page) {
+function navigateTo(page, force=false) {
+  const wasOnPage = _currentPage === page;
   _currentPage = page;
-  // Update URL hash so each page has its own link
   if (location.hash !== '#' + page) history.pushState(null, '', '#' + page);
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   const el = $('page-' + page);
-  if (el) { el.classList.add('active'); renderPage(page, el); }
+  if (el) {
+    el.classList.add('active');
+    // Don't re-render if already on same page and not forced (preserves scroll/state)
+    if (!wasOnPage || force || !el.innerHTML.trim()) renderPage(page, el);
+  }
 }
+// Re-render current page (call after mutations)
+function reloadPage() { const el = $('page-' + _currentPage); if(el) renderPage(_currentPage, el); }
 window.addEventListener('popstate', () => {
   const page = location.hash.replace('#','') || 'dashboard';
   const valid = ['dashboard','donors','donations','verification','failures','bank','emails','kvitel','reports','settings'];
@@ -580,9 +586,9 @@ const Donors = {
   async pauseAll() { confirmDlg('Pause AutoPay for all donors?',async()=>{await API.post(`/api/orgs/${API.orgId}/donors/autopay/pause-all`,{}); toast('Paused'); Donors.load();}); },
   async resumeAll() { await API.post(`/api/orgs/${API.orgId}/donors/autopay/resume-all`,{}); toast('Resumed'); this.load(); },
   openAdd() { this.form(null); },
-  async openEdit(id) { try { const d = await API.get(API.o.donor(id)); this.form(d.donor); } catch(e) { toast(e.message,'err'); } },
+  async openEdit(id) { try { const d = await API.get(API.o.donor(id)); this.form(d.donor); } catch(e) { toast(e.message||'Unknown error','err'); } },
   del(id, name) { confirmDlg(`Delete "${name}"?`, async () => { await API.del(API.o.donor(id)); toast('Deleted'); Donors.load(); }); },
-  exportXlsx() { API.dl(`/api/orgs/${API.orgId}/reports/donors?format=xlsx`, 'donors.xlsx').catch(e=>toast(e.message,'err')); },
+  exportXlsx() { API.dl(`/api/orgs/${API.orgId}/reports/donors?format=xlsx`, 'donors.xlsx').catch(e=>toast(e.message||'Unknown error','err')); },
   importXlsx() {
     Modal.open('Import Donors', `<p style="color:var(--gray-5);margin-bottom:10px;font-size:13px">Excel columns: First Name, Last Name, Hebrew Name, Email, Cell, Street, City, State, Zip</p>
       <input type="file" id="imp-f" accept=".xlsx,.xls">
@@ -595,7 +601,7 @@ const Donors = {
       const r = await fetch(`/api/orgs/${API.orgId}/import/donors`, { method:'POST', body:fd, credentials:'include', headers:{'x-org-id':API.orgId} }).then(r=>r.json());
       toast(`Imported ${r.imported}${r.errors?.length?` (${r.errors.length} errors)`:''}`);
       Modal.close(); this.load();
-    } catch(e) { toast(e.message,'err'); }
+    } catch(e) { toast(e.message||'Unknown error','err'); }
   },
 
   form(donor) {
@@ -665,14 +671,14 @@ const Donors = {
   async addHood() {
     const n = prompt('Hebrew neighborhood name:'); if (!n) return;
     try { const r = await API.post(API.o.hoods(), {name_he:n}); toast('Added'); const s=$('df-nh'); if(s)s.innerHTML+=`<option value="${r.neighborhood.id}" selected>${r.neighborhood.name_he}</option>`; }
-    catch(e) { toast(e.message,'err'); }
+    catch(e) { toast(e.message||'Unknown error','err'); }
   },
 
   async save(id) {
     const data = { title:val('df-title'), first_name:val('df-first'), last_name:val('df-last'), hebrew_title:val('df-htitle'), hebrew_full_name:val('df-hname'), neighborhood_id:val('df-nh')||null, cell:val('df-cell'), home_phone:val('df-home'), email:val('df-email'), street:val('df-street'), apt:val('df-apt'), city:val('df-city'), state:val('df-state'), zip:val('df-zip'), kvitel:val('df-kvitel'), kvitel_enabled:$('df-kvon')?.checked?1:0, labels:window._lwDonor?.get()||[] };
     if (!data.first_name || !data.last_name) { toast('First and last name required','err'); return; }
     try { if(id) await API.put(API.o.donor(id),data); else await API.post(API.o.donors(),data); toast(id?'Saved':'Added'); Modal.close(); this.load(); this.loadMeta(); }
-    catch(e) { toast(e.message,'err'); }
+    catch(e) { toast(e.message||'Unknown error','err'); }
   },
 };
 
@@ -785,7 +791,7 @@ const DonorDetail = {
     const tok = pm.sola_token ? '<span class="pill pill-blue" style="font-size:10px">Tokenized</span>' : '';
     let info = '';
     if (pm.type==='credit_card') info = cbrand(pm.card_brand, pm.last_four);
-    else if (pm.type==='daf') info = `DAF: ${pm.daf_name||''}`;
+    else if (pm.type==='daf') { const parts=pm.other_description?.split('|')||['']; info = `DAF: ${pm.daf_name||''}${parts[0]?' ••'+parts[0].slice(-4):''}` }
     else info = pm.other_description || fmtMethod(pm.type);
     return `<div class="sched-item">
       <div>
@@ -863,7 +869,15 @@ const DonorDetail = {
         <label>Card Brand</label>
         <select id="pm-brand"><option value="">— Select —</option><option>Visa</option><option>Mastercard</option><option>Amex</option><option>Discover</option></select>
       </div>
-      <div id="daf-f" style="display:none"><label>DAF Name</label><input id="pm-daf" placeholder="Fidelity Charitable…"></div>
+      <div id="daf-f" style="display:none">
+        <div class="alert alert-info" style="font-size:12px;margin-top:8px">DAF donations are processed via Sola using the donor's DAF card. Sola auto-routes to the correct DAF provider (Matbia, OJC, Pledger, DonorsFund, iMasser).</div>
+        <label>DAF Provider</label>
+        <select id="pm-dafprov"><option value="Matbia">Matbia</option><option value="OJC">OJC</option><option value="Pledger">Pledger</option><option value="DonorsFund">DonorsFund</option><option value="iMasser">iMasser</option><option value="Other">Other</option></select>
+        <label>DAF Card Number *</label>
+        <input id="pm-daf" placeholder="Enter DAF card number" autocomplete="off">
+        <label>Expiry (MMYY, or leave 1299 for no expiry)</label>
+        <input id="pm-dafexp" value="1299" maxlength="4">
+      </div>
       <div id="oth-f" style="display:none"><label>Description</label><input id="pm-oth" placeholder="Check, Cash, Wire…"></div>
       <label>Nickname (optional)</label><input id="pm-lbl" autocomplete="off">
       <div class="trow mt"><div>Set as default</div><label class="tgl"><input type="checkbox" id="pm-def" checked><span class="tgl-s"></span></label></div>
@@ -889,12 +903,23 @@ const DonorDetail = {
         const r = await API.post(`/api/orgs/${API.orgId}/payments/save-card`, {donor_id:did,card_num:num,exp,cvv,label:lbl});
         if (brand && r.paymentMethod?.id) await API.put(`/api/orgs/${API.orgId}/donors/${did}/payment-methods/${r.paymentMethod.id}`, {card_brand:brand}).catch(()=>{});
         toast(`Card ••${r.paymentMethod?.last_four||'??'} saved`);
+      } else if (type === 'daf') {
+        const dafCard = val('pm-daf');
+        if (!dafCard) { toast('DAF card number required','err'); return; }
+        // Store DAF as payment method with card num in daf_name field for charging
+        await API.post(`/api/orgs/${API.orgId}/donors/${did}/payment-methods`, {
+          type:'daf', label:lbl||val('pm-dafprov')||'DAF',
+          daf_name: val('pm-dafprov'),
+          other_description: dafCard + '|' + val('pm-dafexp'), // card|exp stored here
+          is_default:def
+        });
+        toast('DAF method added');
       } else {
-        await API.post(`/api/orgs/${API.orgId}/donors/${did}/payment-methods`, {type, label:lbl||null, daf_name:val('pm-daf')||null, other_description:val('pm-oth')||null, is_default:def});
+        await API.post(`/api/orgs/${API.orgId}/donors/${did}/payment-methods`, {type, label:lbl||null, other_description:val('pm-oth')||null, is_default:def});
         toast('Added');
       }
       Modal.close(); this.open(did);
-    } catch(e) { if(btn){btn.textContent='Save & Tokenize';btn.disabled=false;} toast(e.message,'err'); }
+    } catch(e) { if(btn){btn.textContent='Save & Tokenize';btn.disabled=false;} toast(e.message||'Unknown error','err'); }
   },
   async delPM(did, pmId) { confirmDlg('Remove payment method?', async()=>{ await API.del(`/api/orgs/${API.orgId}/donors/${did}/payment-methods/${pmId}`); toast('Removed'); DonorDetail.open(did); }); },
 
@@ -925,7 +950,7 @@ const DonorDetail = {
     try {
       const r = await API.post(`/api/orgs/${API.orgId}/payments/charge`, {donor_id:did,payment_method_id:pmId||val('cn-pm'),amount:amt,notes:val('cn-notes')});
       toast(`Charged ${fmt$(amt)} · Trans: ${r.transaction_id}`); Modal.close(); this.open(did);
-    } catch(e) { toast(e.message,'err'); }
+    } catch(e) { toast(e.message||'Unknown error','err'); }
   },
 
   manual(did) {
@@ -990,7 +1015,7 @@ const DonorDetail = {
   },
 
   addDonNote(did, donId) { Modal.open('Add Note to Donation', `<textarea id="dn-txt" style="min-height:80px;width:100%" placeholder="Note…"></textarea><div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveDonNote('${did}','${donId}')">Add</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, {sm:true}); },
-  async _saveDonNote(did, donId) { const txt=val('dn-txt').trim(); if(!txt)return; try{await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations/${donId}/notes`,{text:txt}); toast('Added'); Modal.close(); this.open(did);}catch(e){toast(e.message,'err');} },
+  async _saveDonNote(did, donId) { const txt=val('dn-txt').trim(); if(!txt)return; try{await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations/${donId}/notes`,{text:txt}); toast('Added'); Modal.close(); this.open(did);}catch(e){toast(e.message||'Unknown error','err');} },
 
   refund(did, donId, amt, txId) { Modal.open('Refund', `<p style="margin-bottom:10px;font-size:13px;color:var(--gray-5)">Original: ${fmt$(amt)}</p><label>Refund Amount ($)</label><input type="number" id="rf-amt" step="0.01" max="${amt}" value="${amt}"><label>Reason</label><input id="rf-rsn" autocomplete="off">${txId?`<div class="alert alert-info" style="margin-top:10px;font-size:12px">Sola Ref: ${txId}</div>`:''}<div class="bg mt"><button class="btn btn-red" onclick="DonorDetail._doRefund('${did}','${donId}','${txId}')">Refund</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, {sm:true}); },
   async _doRefund(did, donId, txId) {
@@ -998,7 +1023,7 @@ const DonorDetail = {
     try {
       await API.post(`/api/orgs/${API.orgId}/payments/refund`, {donation_id:donId, donor_id:did, amount:amt, notes:val('rf-rsn')});
       toast(`Refund of ${fmt$(amt)} processed`); Modal.close(); this.open(did);
-    } catch(e) { toast(e.message,'err'); }
+    } catch(e) { toast(e.message||'Unknown error','err'); }
   },
 
   addRecurring(did) {
@@ -1015,7 +1040,7 @@ const DonorDetail = {
       <label>Notes</label><input id="rec-notes" autocomplete="off">
       <div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveRec('${did}')">Save</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, {sm:true});
   },
-  async _saveRec(did) { const amt=parseFloat(val('rec-amt')); if(!amt||amt<=0){toast('Amount required','err');return;} try{await API.post(`/api/orgs/${API.orgId}/donors/${did}/recurring`,{payment_method_id:val('rec-pm'),amount:amt,frequency:val('rec-freq'),start_date:val('rec-start'),end_date:val('rec-end')||null,occurrences_limit:val('rec-lim')?parseInt(val('rec-lim')):null,notes:val('rec-notes')||null}); toast('Schedule created'); Modal.close(); this.open(did);}catch(e){toast(e.message,'err');} },
+  async _saveRec(did) { const amt=parseFloat(val('rec-amt')); if(!amt||amt<=0){toast('Amount required','err');return;} try{await API.post(`/api/orgs/${API.orgId}/donors/${did}/recurring`,{payment_method_id:val('rec-pm'),amount:amt,frequency:val('rec-freq'),start_date:val('rec-start'),end_date:val('rec-end')||null,occurrences_limit:val('rec-lim')?parseInt(val('rec-lim')):null,notes:val('rec-notes')||null}); toast('Schedule created'); Modal.close(); this.open(did);}catch(e){toast(e.message||'Unknown error','err');} },
   async toggleRec(did, sid, status) { await API.put(`/api/orgs/${API.orgId}/donors/${did}/recurring/${sid}`,{status}); toast(status==='paused'?'Paused':'Resumed'); this.open(did); },
   editRec(did, sid, amt, freq, nextRun) { Modal.open('Edit Schedule', `<label>Amount ($)</label><input type="number" id="er-amt" value="${amt}" step="0.01"><label>Frequency</label><select id="er-freq">${['weekly','biweekly','monthly','quarterly','yearly','once'].map(f=>`<option value="${f}" ${f===freq?'selected':''}>${fmtFreq(f)}</option>`).join('')}</select><label>Next Run</label><input type="date" id="er-next" value="${nextRun?nextRun.slice(0,10):''}"><div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveEditRec('${did}','${sid}')">Save</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true}); },
   async _saveEditRec(did, sid) { await API.put(`/api/orgs/${API.orgId}/donors/${did}/recurring/${sid}`,{amount:parseFloat(val('er-amt')),frequency:val('er-freq'),next_run:val('er-next')}); toast('Updated'); Modal.close(); this.open(did); },
@@ -1030,7 +1055,7 @@ async function renderDonations(el) {
     window._donAll = rows;
     el.innerHTML = `
       <div class="ph"><div><div class="ph-title">Donations</div><div class="ph-sub">${rows.length} records</div></div>
-        <button class="btn btn-ghost btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/reports/donations?format=xlsx','donations.xlsx').catch(e=>toast(e.message,'err'))">&#8681; XLSX</button>
+        <button class="btn btn-ghost btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/reports/donations?format=xlsx','donations.xlsx').catch(e=>toast(e.message||'Unknown error','err'))">&#8681; XLSX</button>
       </div>
       <div class="card" style="padding:0;overflow:hidden">
         <div style="padding:12px 14px;border-bottom:1px solid var(--gray-1)">
@@ -1130,7 +1155,7 @@ async function renderBank(el) {
     el.innerHTML = `
       <div class="ph"><div><div class="ph-title">Bank</div></div>
         <div class="bg">
-          <button class="btn btn-ghost btn-sm" onclick="API.post('/api/orgs/${API.orgId}/bank/sync',{}).then(()=>toast('Sync initiated')).catch(e=>toast(e.message,'err'))">&#8635; Sync</button>
+          <button class="btn btn-ghost btn-sm" onclick="API.post('/api/orgs/${API.orgId}/bank/sync',{}).then(()=>toast('Sync initiated')).catch(e=>toast(e.message||'Unknown error','err'))">&#8635; Sync</button>
           <button class="btn btn-primary btn-sm" onclick="_connectBank()">+ Connect Bank</button>
         </div>
       </div>
@@ -1148,8 +1173,8 @@ async function renderBank(el) {
       </table></div></div>` : `<div class="card"><div class="empty"><h3>No transactions</h3><p>Connect your bank to see transactions.</p></div></div>`}`;
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
-function _connectBank(){Modal.open('Connect Bank',`<div class="alert alert-info">Chase requires OAuth credentials or Plaid.</div><label>API Key</label><input id="bk-key" type="password"><label>API Secret</label><input id="bk-sec" type="password"><div class="bg mt"><button class="btn btn-primary" onclick="API.post('/api/orgs/${API.orgId}/bank',{api_key:val('bk-key'),api_secret:val('bk-sec')}).then(()=>{toast('Connected');Modal.close()}).catch(e=>toast(e.message,'err'))">Connect</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
-function _labelTx(id){Modal.open('Label Transaction',`<label>Label</label><input id="tx-lbl" placeholder="e.g. Donation, Expense…"><div class="bg mt"><button class="btn btn-primary" onclick="API.post('/api/orgs/${API.orgId}/bank/transactions/${id}/label',{label:val('tx-lbl')}).then(()=>{toast('Labeled');Modal.close();renderBank($('page-bank'))}).catch(e=>toast(e.message,'err'))">Save</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+function _connectBank(){Modal.open('Connect Bank',`<div class="alert alert-info">Chase requires OAuth credentials or Plaid.</div><label>API Key</label><input id="bk-key" type="password"><label>API Secret</label><input id="bk-sec" type="password"><div class="bg mt"><button class="btn btn-primary" onclick="API.post('/api/orgs/${API.orgId}/bank',{api_key:val('bk-key'),api_secret:val('bk-sec')}).then(()=>{toast('Connected');Modal.close()}).catch(e=>toast(e.message||'Unknown error','err'))">Connect</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+function _labelTx(id){Modal.open('Label Transaction',`<label>Label</label><input id="tx-lbl" placeholder="e.g. Donation, Expense…"><div class="bg mt"><button class="btn btn-primary" onclick="API.post('/api/orgs/${API.orgId}/bank/transactions/${id}/label',{label:val('tx-lbl')}).then(()=>{toast('Labeled');Modal.close();renderBank($('page-bank'))}).catch(e=>toast(e.message||'Unknown error','err'))">Save</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
 
 async function renderEmails(el) {
   el.innerHTML = '<div class="spinner"></div>';
@@ -1175,7 +1200,7 @@ async function renderEmails(el) {
         <p style="color:var(--gray-5);font-size:12px;margin-bottom:10px">Variables: {first_name} {last_name} {title} {amount} {date} {transaction_id} {method} {org_name}</p>
         <label>Donation Receipt Template (HTML)</label>
         <textarea id="em-tpl-txt" style="min-height:240px;font-size:12px;font-family:monospace">${cfg?.receipt_template||''}</textarea>
-        <div class="bg mt"><button class="btn btn-primary" onclick="API.put(API.o.email(),{receipt_template:val('em-tpl-txt')}).then(()=>toast('Saved')).catch(e=>toast(e.message,'err'))">Save Template</button></div>
+        <div class="bg mt"><button class="btn btn-primary" onclick="API.put(API.o.email(),{receipt_template:val('em-tpl-txt')}).then(()=>toast('Saved')).catch(e=>toast(e.message||'Unknown error','err'))">Save Template</button></div>
       </div></div>
       <div id="em-sched" class="tc"><div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -1184,18 +1209,27 @@ async function renderEmails(el) {
         </div>
         <div class="tw"><table>
           <thead><tr><th>Subject</th><th>Scheduled</th><th>Status</th><th></th></tr></thead>
-          <tbody>${sched.map(e=>`<tr><td>${e.subject}</td><td style="font-size:12px">${fmtDT(e.scheduled_for)}</td><td>${sbadge(e.status)}</td><td>${e.status==='pending'?`<button class="btn btn-ghost btn-sm" onclick="API.del('${API.o.schedEmails()}/${e.id}').then(()=>{toast('Cancelled');renderEmails($('page-emails'))}).catch(e=>toast(e.message,'err'))">Cancel</button>`:''}</td></tr>`).join('')||'<tr><td colspan="4"><div class="empty">No scheduled emails</div></td></tr>'}</tbody>
+          <tbody>${sched.map(e=>`<tr>
+            <td style="max-width:180px;font-size:13px">${e.subject}</td>
+            <td style="font-size:12px;white-space:nowrap">${fmtDT(e.scheduled_for)}</td>
+            <td>${sbadge(e.status)}</td>
+            <td><div class="actions">
+              ${e.status==='pending'?`<button class="btn btn-ghost btn-sm" onclick="_editSchedEmail('${e.id}')">Edit</button>`:''}
+              <button class="btn btn-ghost btn-sm" onclick="_testSchedEmail('${e.id}')">Test</button>
+              ${e.status==='pending'?`<button class="btn btn-icon" style="color:var(--red)" onclick="API.del('/api/orgs/${API.orgId}/scheduled-emails/${e.id}').then(()=>{toast('Cancelled');renderEmails($('page-emails'))}).catch(e=>toast(e.message||'Unknown error','err'))">&#10005;</button>`:''}
+            </div></td>
+          </tr>`).join('')||'<tr><td colspan="4"><div class="empty">No scheduled emails</div></td></tr>'}</tbody>
         </table></div>
       </div></div>`;
     tabsInit('#page-emails');
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
-async function _saveEmailCfg(){try{const d={smtp_email:val('em-email'),smtp_host:val('em-host'),smtp_port:parseInt(val('em-port')),from_name:val('em-name'),donation_emails_paused:$('em-pause')?.checked?1:0};if(val('em-pass'))d.smtp_password=val('em-pass');await API.put(API.o.email(),d);toast('Saved');}catch(e){toast(e.message,'err');}}
+async function _saveEmailCfg(){try{const d={smtp_email:val('em-email'),smtp_host:val('em-host'),smtp_port:parseInt(val('em-port')),from_name:val('em-name'),donation_emails_paused:$('em-pause')?.checked?1:0};if(val('em-pass'))d.smtp_password=val('em-pass');await API.put(API.o.email(),d);toast('Saved');}catch(e){toast(e.message||'Unknown error','err');}}
 function _testEmail(){Modal.open('Send Test Email',`
   <p style="font-size:13px;color:var(--gray-5);margin-bottom:10px">Sends a test receipt email with placeholder data. Tax ID 11-6076986 will be included.</p>
   <label>Send to</label><input id="te-to" type="email" placeholder="your@email.com">
   <div class="bg mt">
-    <button class="btn btn-primary" onclick="API.post('/api/orgs/${API.orgId}/email-settings/test',{to:val('te-to')}).then(()=>{toast('Sent ✓');Modal.close()}).catch(e=>toast(e.message,'err'))">Send Test</button>
+    <button class="btn btn-primary" onclick="API.post('/api/orgs/${API.orgId}/email-settings/test',{to:val('te-to')}).then(()=>{toast('Sent ✓');Modal.close()}).catch(e=>toast(e.message||'Unknown error','err'))">Send Test</button>
     <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
   </div>`,{sm:true});}
 function _editSchedEmail(id, subject, scheduledFor) {
@@ -1204,7 +1238,7 @@ function _editSchedEmail(id, subject, scheduledFor) {
     <label>Body (HTML)</label><textarea id="ese-body" style="min-height:140px;font-size:12px"></textarea>
     <label>Send At</label><input type="datetime-local" id="ese-at" value="${toLocalDT(scheduledFor)}">
     <div class="bg mt">
-      <button class="btn btn-primary" onclick="API.put(API.o.schedEmails()+'/'+id,{subject:val('ese-subj'),html_body:val('ese-body'),scheduled_for:val('ese-at')}).then(()=>{toast('Updated');Modal.close();renderEmails($('page-emails'))}).catch(e=>toast(e.message,'err'))">Save</button>
+      <button class="btn btn-primary" onclick="API.put(API.o.schedEmails()+'/'+id,{subject:val('ese-subj'),html_body:val('ese-body'),scheduled_for:val('ese-at')}).then(()=>{toast('Updated');Modal.close();renderEmails($('page-emails'))}).catch(e=>toast(e.message||'Unknown error','err'))">Save</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
     </div>`, {sm:true});
 }
@@ -1213,11 +1247,11 @@ function _testSchedEmail(id) {
     <p style="font-size:13px;color:var(--gray-5);margin-bottom:10px">Send this email now as a test.</p>
     <label>Send to</label><input id="tse-to" type="email" placeholder="your@email.com">
     <div class="bg mt">
-      <button class="btn btn-primary" onclick="API.post(API.o.schedEmails()+'/'+id+'/test',{to:val('tse-to')}).then(()=>{toast('Test sent!');Modal.close()}).catch(e=>toast(e.message,'err'))">Send Test</button>
+      <button class="btn btn-primary" onclick="API.post(API.o.schedEmails()+'/'+id+'/test',{to:val('tse-to')}).then(()=>{toast('Test sent!');Modal.close()}).catch(e=>toast(e.message||'Unknown error','err'))">Send Test</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
     </div>`, {sm:true});
 }
-function _schedEmail(){const now=new Date();now.setHours(now.getHours()+1);Modal.open('Schedule Email',`<label>Subject</label><input id="se-subj"><label>Body (HTML)</label><textarea id="se-body" style="min-height:140px;font-size:12px"></textarea><label>Send At</label><input type="datetime-local" id="se-at" value="${toLocalDT(now.toISOString())}"><div class="bg mt"><button class="btn btn-primary" onclick="API.post(API.o.schedEmails(),{subject:val('se-subj'),html_body:val('se-body'),scheduled_for:val('se-at')}).then(()=>{toast('Scheduled');Modal.close();renderEmails($('page-emails'))}).catch(e=>toast(e.message,'err'))">Schedule</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+function _schedEmail(){const now=new Date();now.setHours(now.getHours()+1);Modal.open('Schedule Email',`<label>Subject</label><input id="se-subj"><label>Body (HTML)</label><textarea id="se-body" style="min-height:140px;font-size:12px"></textarea><label>Send At</label><input type="datetime-local" id="se-at" value="${toLocalDT(now.toISOString())}"><div class="bg mt"><button class="btn btn-primary" onclick="API.post(API.o.schedEmails(),{subject:val('se-subj'),html_body:val('se-body'),scheduled_for:val('se-at')}).then(()=>{toast('Scheduled');Modal.close();renderEmails($('page-emails'))}).catch(e=>toast(e.message||'Unknown error','err'))">Schedule</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
 
 async function renderKvitel(el) {
   el.innerHTML = '<div class="spinner"></div>';
@@ -1228,8 +1262,8 @@ async function renderKvitel(el) {
     el.innerHTML = `
       <div class="ph"><div class="ph-title">Kvitel</div>
         <div class="bg">
-          <button class="btn btn-outline btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/kvitel/generate-pdf','kvitel.pdf','POST',{}).catch(e=>toast(e.message,'err'))">&#8681; PDF</button>
-          <button class="btn btn-primary btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/kvitel/generate-docx','kvitel.docx','POST',{}).catch(e=>toast(e.message,'err'))">&#8681; DOCX</button>
+          <button class="btn btn-outline btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/kvitel/generate-pdf','kvitel.pdf','POST',{}).catch(e=>toast(e.message||'Unknown error','err'))">&#8681; PDF</button>
+          <button class="btn btn-primary btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/kvitel/generate-docx','kvitel.docx','POST',{}).catch(e=>toast(e.message||'Unknown error','err'))">&#8681; DOCX</button>
         </div>
       </div>
       <div class="g2">
@@ -1274,7 +1308,7 @@ async function _saveKvitelCfg(){
       margin_left:parseFloat(val('km-left')),margin_right:parseFloat(val('km-right')),
     });
     toast('Settings saved');
-  }catch(e){toast(e.message,'err');}
+  }catch(e){toast(e.message||'Unknown error','err');}
 }
 
 async function renderReports(el) {
@@ -1292,18 +1326,19 @@ async function renderReports(el) {
       <div class="bg mt">
         <button class="btn btn-primary" onclick="_runReport()">Generate</button>
         <button class="btn btn-ghost btn-sm" onclick="_dlReport()">&#8681; XLSX</button>
-        <button class="btn btn-ghost btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/reports/donors?format=xlsx','donors.xlsx').catch(e=>toast(e.message,'err'))">&#8681; Donors XLSX</button>
+        <button class="btn btn-ghost btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/reports/donors?format=xlsx','donors.xlsx').catch(e=>toast(e.message||'Unknown error','err'))">&#8681; Donors XLSX</button>
       </div>
     </div>
     <div id="rp-out"></div>`;
 }
 async function _runReport(){const p=new URLSearchParams({from:val('rp-from'),to:val('rp-to'),method:val('rp-meth'),status:val('rp-stat')});const out=$('rp-out');out.innerHTML='<div class="spinner"></div>';try{const rows=await API.get(`/api/orgs/${API.orgId}/reports/donations?${p}`);const tot=rows.reduce((s,r)=>s+(r.amount||0),0);out.innerHTML=`<div class="card" style="padding:0;overflow:hidden"><div style="padding:10px 14px;border-bottom:1px solid var(--gray-1)"><strong>${rows.length} donations · Total: ${fmt$(tot)}</strong></div><div class="tw"><table><thead><tr><th>Date</th><th>Donor</th><th>Amount</th><th>Method</th><th>Trans ID</th><th>Status</th><th></th></tr></thead><tbody>${rows.map(d=>`<tr><td style="font-size:12px">${fmtD(d.donation_date)}</td><td><strong>${d.first_name} ${d.last_name}</strong></td><td style="font-weight:600">${fmt$(d.amount)}</td><td style="font-size:12px">${fmtMethod(d.method)}</td><td style="font-size:11px;color:var(--gray-5)">${d.transaction_id||'—'}</td><td>${sbadge(d.status)}</td></tr>`).join('')||'<tr><td colspan="8"><div class="empty">No results</div></td></tr>'}</tbody></table></div></div>`;}catch(e){out.innerHTML=`<div class="alert alert-err">${e.message}</div>`;}}
-function _dlReport(){const p=new URLSearchParams({from:val('rp-from'),to:val('rp-to'),method:val('rp-meth'),status:val('rp-stat'),format:'xlsx'});API.dl(`/api/orgs/${API.orgId}/reports/donations?${p}`,'report.xlsx').catch(e=>toast(e.message,'err'));}
+function _dlReport(){const p=new URLSearchParams({from:val('rp-from'),to:val('rp-to'),method:val('rp-meth'),status:val('rp-stat'),format:'xlsx'});API.dl(`/api/orgs/${API.orgId}/reports/donations?${p}`,'report.xlsx').catch(e=>toast(e.message||'Unknown error','err'));}
 
 async function renderSettings(el) {
   el.innerHTML = '<div class="spinner"></div>';
   try {
-    const [users, log, daf, hoods] = await Promise.all([API.get(API.o.users()), API.get(API.o.log()), API.get(API.o.daf()), API.get(API.o.hoods())]);
+    const [users, log, hoods] = await Promise.all([API.get(API.o.users()), API.get(API.o.log()), API.get(API.o.hoods())]);
+    const daf = []; // DAF accounts are per-donor payment methods, not global settings
     el.innerHTML = `
       <div class="ph"><div class="ph-title">Settings</div></div>
       <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-daf">DAF</div><div class="tab" data-tc="st-log">Login Log</div></div>
@@ -1322,11 +1357,11 @@ async function renderSettings(el) {
       </div></div>
       <div id="st-nh" class="tc"><div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><strong>Neighborhoods</strong><button class="btn btn-primary btn-sm" onclick="_addHood()">+ Add</button></div>
-        ${hoods.map(h=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--gray-1)"><span style="font-family:var(--font-he);font-size:15px">${h.name_he}</span><button class="btn btn-icon" style="color:var(--red)" onclick="API.del(API.o.hoods()+'/${h.id}').then(()=>{toast('Removed');renderSettings($('page-settings'))}).catch(e=>toast(e.message,'err'))">&#10005;</button></div>`).join('')||'<p style="color:var(--gray-5)">No neighborhoods yet</p>'}
+        ${hoods.map(h=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--gray-1)"><span style="font-family:var(--font-he);font-size:15px">${h.name_he}</span><button class="btn btn-icon" style="color:var(--red)" onclick="API.del(API.o.hoods()+'/${h.id}').then(()=>{toast('Removed');renderSettings($('page-settings'))}).catch(e=>toast(e.message||'Unknown error','err'))">&#10005;</button></div>`).join('')||'<p style="color:var(--gray-5)">No neighborhoods yet</p>'}
       </div></div>
       <div id="st-daf" class="tc"><div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><strong>DAF Accounts</strong><button class="btn btn-primary btn-sm" onclick="_addDaf()">+ Add DAF</button></div>
-        ${daf.map(d=>`<div class="sched-item"><div><div class="sched-main">${d.name}</div>${d.contact_email?`<div class="sched-sub">${d.contact_name||''} ${d.contact_email}</div>`:''}</div><button class="btn btn-icon" style="color:var(--red)" onclick="API.del(API.o.daf()+'/${d.id}').then(()=>{toast('Removed');renderSettings($('page-settings'))}).catch(e=>toast(e.message,'err'))">&#10005;</button></div>`).join('')||'<p style="color:var(--gray-5)">No DAF accounts</p>'}
+        ${daf.map(d=>`<div class="sched-item"><div><div class="sched-main">${d.name}</div>${d.contact_email?`<div class="sched-sub">${d.contact_name||''} ${d.contact_email}</div>`:''}</div><button class="btn btn-icon" style="color:var(--red)" onclick="API.del(API.o.daf()+'/${d.id}').then(()=>{toast('Removed');renderSettings($('page-settings'))}).catch(e=>toast(e.message||'Unknown error','err'))">&#10005;</button></div>`).join('')||'<p style="color:var(--gray-5)">No DAF accounts</p>'}
       </div></div>
       <div id="st-log" class="tc"><div class="card">
         <div class="card-title">Login Audit Log</div>
@@ -1338,13 +1373,92 @@ async function renderSettings(el) {
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
 function _inviteUser(){Modal.open('Invite User',`<p style="color:var(--gray-5);font-size:13px;margin-bottom:12px">They'll receive a setup link to create their own password.</p><label>Email *</label><input id="iu-email" type="email" autocomplete="off"><label>Role</label><select id="iu-role"><option value="staff">Staff</option><option value="admin">Admin</option></select><div id="iu-res" style="display:none;margin-top:10px"></div><div class="bg mt"><button class="btn btn-primary" onclick="_doInviteUser()">Send Invite</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
-async function _doInviteUser(){try{const r=await API.post(`/api/orgs/${API.orgId}/users/invite`,{email:val('iu-email'),role:val('iu-role')});const res=$('iu-res');res.innerHTML=r.emailSent?`<div class="alert alert-ok">Invite sent to ${val('iu-email')}</div>`:`<div class="alert alert-warn">Email not configured. Share this link:<br><a href="${r.setupUrl}" target="_blank" style="font-size:11px;word-break:break-all">${r.setupUrl}</a></div>`;res.style.display='block';renderSettings($('page-settings'));}catch(e){toast(e.message,'err');}}
+async function _doInviteUser(){try{const r=await API.post(`/api/orgs/${API.orgId}/users/invite`,{email:val('iu-email'),role:val('iu-role')});const res=$('iu-res');res.innerHTML=r.emailSent?`<div class="alert alert-ok">Invite sent to ${val('iu-email')}</div>`:`<div class="alert alert-warn">Email not configured. Share this link:<br><a href="${r.setupUrl}" target="_blank" style="font-size:11px;word-break:break-all">${r.setupUrl}</a></div>`;res.style.display='block';renderSettings($('page-settings'));}catch(e){toast(e.message||'Unknown error','err');}}
 function _inviteAcct(){Modal.open('Invite New Account',`<p style="color:var(--gray-5);font-size:13px;margin-bottom:12px">They'll get a link to create their org and admin account.</p><label>Email *</label><input id="ia-email" type="email" autocomplete="off"><div id="ia-res" style="display:none;margin-top:10px"></div><div class="bg mt"><button class="btn btn-primary" onclick="_doInviteAcct()">Send Invite</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
-async function _doInviteAcct(){try{const r=await API.post('/auth/invite-account',{email:val('ia-email')});const res=$('ia-res');res.innerHTML=r.emailSent?`<div class="alert alert-ok">Invite sent to ${val('ia-email')}</div>`:`<div class="alert alert-warn">Email not configured. Share this link:<br><a href="${r.setupUrl}" target="_blank" style="font-size:11px;word-break:break-all">${r.setupUrl}</a></div>`;res.style.display='block';}catch(e){toast(e.message,'err');}}
-function _resetPw(id,name){Modal.open('Reset Password',`<p style="margin-bottom:10px">New password for <strong>${name}</strong></p><label>Password</label><input id="rp-pw" type="password"><div class="bg mt"><button class="btn btn-primary" onclick="API.put('/api/orgs/${API.orgId}/users/${id}/password',{password:val('rp-pw')}).then(()=>{toast('Updated');Modal.close()}).catch(e=>toast(e.message,'err'))">Set</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+async function _doInviteAcct(){try{const r=await API.post('/auth/invite-account',{email:val('ia-email')});const res=$('ia-res');res.innerHTML=r.emailSent?`<div class="alert alert-ok">Invite sent to ${val('ia-email')}</div>`:`<div class="alert alert-warn">Email not configured. Share this link:<br><a href="${r.setupUrl}" target="_blank" style="font-size:11px;word-break:break-all">${r.setupUrl}</a></div>`;res.style.display='block';}catch(e){toast(e.message||'Unknown error','err');}}
+function _resetPw(id,name){Modal.open('Reset Password',`<p style="margin-bottom:10px">New password for <strong>${name}</strong></p><label>Password</label><input id="rp-pw" type="password"><div class="bg mt"><button class="btn btn-primary" onclick="API.put('/api/orgs/${API.orgId}/users/${id}/password',{password:val('rp-pw')}).then(()=>{toast('Updated');Modal.close()}).catch(e=>toast(e.message||'Unknown error','err'))">Set</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
 function _removeUser(id,name){confirmDlg(`Remove ${name}?`,async()=>{await API.del(`/api/orgs/${API.orgId}/users/${id}`);toast('Removed');renderSettings($('page-settings'));});}
-function _addHood(){Modal.open('Add Neighborhood',`<label>Hebrew Name</label><input id="nh-he" dir="rtl" style="font-family:var(--font-he)" placeholder="שם השכונה"><label>English (optional)</label><input id="nh-en"><div class="bg mt"><button class="btn btn-primary" onclick="API.post(API.o.hoods(),{name_he:val('nh-he'),name_en:val('nh-en')}).then(()=>{toast('Added');Modal.close();renderSettings($('page-settings'))}).catch(e=>toast(e.message,'err'))">Add</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
-function _addDaf(){Modal.open('Add DAF Account',`<label>DAF Name *</label><input id="df-nm" placeholder="Fidelity Charitable"><label>Contact Name</label><input id="df-cn"><label>Contact Email</label><input id="df-ce" type="email"><div class="bg mt"><button class="btn btn-primary" onclick="API.post(API.o.daf(),{name:val('df-nm'),contact_name:val('df-cn'),contact_email:val('df-ce')}).then(()=>{toast('Added');Modal.close();renderSettings($('page-settings'))}).catch(e=>toast(e.message,'err'))">Add</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+function _uploadLogo() {
+  Modal.open('Upload Receipt Logo', `
+    <p style="font-size:13px;color:var(--gray-5);margin-bottom:10px">Upload your organization logo to appear on PDF receipts.</p>
+    <input type="file" id="logo-file" accept="image/png,image/jpeg">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_doUploadLogo()">Upload</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+async function _doUploadLogo() {
+  const file = $('logo-file')?.files?.[0]; if (!file) { toast('Select a file','err'); return; }
+  const reader = new FileReader();
+  reader.onload = async e => {
+    const base64 = e.target.result.split(',')[1];
+    try {
+      await API.post('/api/orgs/' + API.orgId + '/upload-logo', {logo_base64: base64, mime_type: file.type});
+      toast('Logo uploaded ✓'); Modal.close();
+    } catch(err) { toast(err.message||'Upload failed','err'); }
+  };
+  reader.readAsDataURL(file);
+}
+function _addHood(){Modal.open('Add Neighborhood',`<label>Hebrew Name</label><input id="nh-he" dir="rtl" style="font-family:var(--font-he)" placeholder="שם השכונה"><label>English (optional)</label><input id="nh-en"><div class="bg mt"><button class="btn btn-primary" onclick="API.post(API.o.hoods(),{name_he:val('nh-he'),name_en:val('nh-en')}).then(()=>{toast('Added');Modal.close();renderSettings($('page-settings'))}).catch(e=>toast(e.message||'Unknown error','err'))">Add</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+function _addDaf(){Modal.open('Add DAF Account',`<label>DAF Name *</label><input id="df-nm" placeholder="Fidelity Charitable"><label>Contact Name</label><input id="df-cn"><label>Contact Email</label><input id="df-ce" type="email"><div class="bg mt"><button class="btn btn-primary" onclick="API.post(API.o.daf(),{name:val('df-nm'),contact_name:val('df-cn'),contact_email:val('df-ce')}).then(()=>{toast('Added');Modal.close();renderSettings($('page-settings'))}).catch(e=>toast(e.message||'Unknown error','err'))">Add</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
+// ── Outstanding Manual Charges ────────────────────────────────────────────────
+async function renderOutstanding(el) {
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const charges = await API.get('/api/orgs/' + API.orgId + '/outstanding-charges');
+    const badge = $('outstanding-badge');
+    if (badge) { if(charges.length){badge.textContent=charges.length;badge.style.display='inline';}else{badge.style.display='none';} }
+    el.innerHTML = `
+      <div class="ph">
+        <div><div class="ph-title">Pending Manual Collection</div>
+        <div class="ph-sub">Scheduled charges that need to be collected manually (check, cash, wire, etc.)</div></div>
+      </div>
+      ${charges.length ? `
+      <div class="card" style="padding:0;overflow:hidden">
+        <div class="tw"><table>
+          <thead><tr><th>Scheduled</th><th>Donor</th><th>Amount</th><th>Method</th><th>Notes</th><th></th></tr></thead>
+          <tbody>${charges.map(c => `<tr id="oc-${c.id}">
+            <td style="font-size:12px;white-space:nowrap">${fmtD(c.scheduled_for)}</td>
+            <td><strong>${c.first_name} ${c.last_name}</strong>${c.cell?`<br><span style="font-size:11px;color:var(--gray-5)">${c.cell}</span>`:''}</td>
+            <td style="font-weight:600">${fmt$(c.amount)}</td>
+            <td style="font-size:12px">${c.pm_label||c.pm_type||'Manual'}</td>
+            <td style="font-size:12px">${c.notes||''}</td>
+            <td><div class="actions">
+              <button class="btn btn-primary btn-sm" onclick="_collectCharge('${c.id}','${c.amount}')">Collect</button>
+              <button class="btn btn-ghost btn-sm" onclick="DonorDetail.open('${c.donor_id}')">View Donor</button>
+            </div></td>
+          </tr>`).join('')}</tbody>
+        </table></div>
+      </div>` : `<div class="card"><div class="empty"><h3>No outstanding charges</h3><p>All manual charges have been collected.</p></div></div>`}`;
+  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message||'Error'}</div>`; }
+}
+function _collectCharge(chargeId, amount) {
+  Modal.open('Mark as Collected', `
+    <p style="font-size:13px;color:var(--gray-5);margin-bottom:12px">Enter the transaction details for this collected payment.</p>
+    <label>Amount Collected ($)</label>
+    <input type="number" id="oc-amt" value="${amount}" step="0.01">
+    <label>Transaction ID / Check # (auto-assigned if blank)</label>
+    <input id="oc-tx" placeholder="e.g. check #1042 or wire ref" autocomplete="off">
+    <label>Notes (optional)</label>
+    <input id="oc-notes" autocomplete="off">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_doCollectCharge('${chargeId}')">Mark Collected</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+function _doCollectCharge(chargeId) {
+  API.post('/api/orgs/' + API.orgId + '/outstanding-charges/' + chargeId + '/collect', {
+    amount: parseFloat(val('oc-amt')),
+    transaction_id: val('oc-tx') || null,
+    notes: val('oc-notes') || null
+  }).then(() => {
+    toast('Collected ✓'); Modal.close();
+    const row = $('oc-' + chargeId);
+    if (row) { row.style.opacity='0'; row.style.transition='opacity .3s'; setTimeout(()=>row.remove(),320); }
+    renderOutstanding($('page-outstanding'));
+  }).catch(e => toast(e.message||'Error','err'));
+}
+
 document.addEventListener('DOMContentLoaded', init);
