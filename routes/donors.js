@@ -344,7 +344,108 @@ router.delete('/meta/neighborhoods/:id', (req, res) => {
   res.json({ success: true });
 });
 
-// --- LABELS (aggregate all unique labels in org) ---
+// --- RECURRING SCHEDULES ---
+router.get('/:id/recurring', (req, res) => {
+  const schedules = all(`
+    SELECT rs.*, pm.label as pm_label, pm.last_four, pm.card_brand, pm.type as pm_type
+    FROM recurring_schedules rs
+    LEFT JOIN payment_methods pm ON rs.payment_method_id = pm.id
+    WHERE rs.donor_id = ? AND rs.org_id = ? AND rs.status IN ('active','paused')
+    ORDER BY rs.created_at DESC
+  `, [req.params.id, req.orgId]);
+  res.json(schedules);
+});
+
+router.post('/:id/recurring', (req, res) => {
+  try {
+    const { payment_method_id, amount, frequency, start_date, end_date, occurrences_limit, notes } = req.body;
+    if (!payment_method_id || !amount || !frequency || !start_date) {
+      return res.status(400).json({ error: 'payment_method_id, amount, frequency and start_date required' });
+    }
+    const id = uuidv4();
+    run(`INSERT INTO recurring_schedules
+         (id, org_id, donor_id, payment_method_id, amount, frequency, start_date, next_run, end_date, occurrences_limit, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, req.orgId, req.params.id, payment_method_id, amount, frequency,
+       start_date, start_date, end_date || null, occurrences_limit || null, notes || null]);
+    res.json({ success: true, schedule: get('SELECT * FROM recurring_schedules WHERE id = ?', [id]) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.put('/:id/recurring/:sid', (req, res) => {
+  const { amount, frequency, next_run, end_date, occurrences_limit, status, notes } = req.body;
+  const existing = get('SELECT * FROM recurring_schedules WHERE id = ? AND donor_id = ?', [req.params.sid, req.params.id]);
+  if (!existing) return res.status(404).json({ error: 'Schedule not found' });
+  run(`UPDATE recurring_schedules SET
+       amount = ?, frequency = ?, next_run = ?, end_date = ?,
+       occurrences_limit = ?, status = ?, notes = ?
+       WHERE id = ?`,
+    [amount ?? existing.amount, frequency ?? existing.frequency, next_run ?? existing.next_run,
+     end_date ?? existing.end_date, occurrences_limit ?? existing.occurrences_limit,
+     status ?? existing.status, notes ?? existing.notes, req.params.sid]);
+  res.json({ success: true });
+});
+
+router.delete('/:id/recurring/:sid', (req, res) => {
+  run(`UPDATE recurring_schedules SET status = 'cancelled' WHERE id = ? AND donor_id = ? AND org_id = ?`,
+    [req.params.sid, req.params.id, req.orgId]);
+  res.json({ success: true });
+});
+
+// --- DONATION NOTES ---
+router.post('/:donorId/donations/:donId/notes', (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text) return res.status(400).json({ error: 'Text required' });
+    const don = get('SELECT * FROM donations WHERE id = ? AND donor_id = ?', [req.params.donId, req.params.donorId]);
+    if (!don) return res.status(404).json({ error: 'Donation not found' });
+    const notes = (() => { try { return JSON.parse(don.donation_notes || '[]'); } catch { return []; } })();
+    notes.push({ text, at: new Date().toISOString() });
+    run('UPDATE donations SET donation_notes = ? WHERE id = ?', [JSON.stringify(notes), req.params.donId]);
+    res.json({ success: true, notes });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- REFUNDS ---
+router.post('/:donorId/donations/:donId/refund', async (req, res) => {
+  try {
+    const { amount, notes, ref_num } = req.body;
+    if (!amount) return res.status(400).json({ error: 'Amount required' });
+    const don = get('SELECT * FROM donations WHERE id = ? AND donor_id = ? AND org_id = ?',
+      [req.params.donId, req.params.donorId, req.orgId]);
+    if (!don) return res.status(404).json({ error: 'Donation not found' });
+
+    const refundAmt = parseFloat(amount);
+    const totalRefunded = (don.refund_amount || 0) + refundAmt;
+    if (totalRefunded > don.amount) return res.status(400).json({ error: 'Refund exceeds donation amount' });
+
+    // If CC and we have a ref_num, hit Sola
+    let solaRefNum = null;
+    if (don.method === 'credit_card' && (ref_num || don.transaction_id)) {
+      try {
+        const { refundTransaction } = require('../utils/sola');
+        const result = await refundTransaction(req.orgId, {
+          refNum: ref_num || don.transaction_id,
+          amount: refundAmt
+        });
+        solaRefNum = result.refNum;
+      } catch (e) {
+        return res.status(500).json({ error: 'Sola refund failed: ' + e.message });
+      }
+    }
+
+    const newStatus = totalRefunded >= don.amount ? 'refunded' : 'partial_refund';
+    const refundNote = `${notes || 'Refund'} — $${refundAmt.toFixed(2)}${solaRefNum ? ' (Sola ref: ' + solaRefNum + ')' : ''}`;
+    run(`UPDATE donations SET refund_amount = ?, refund_notes = ?, status = ? WHERE id = ?`,
+      [totalRefunded, refundNote, newStatus, req.params.donId]);
+
+    res.json({ success: true, newStatus, solaRefNum });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- LABELS ---
 router.get('/meta/labels', (req, res) => {
   const donors = all('SELECT labels FROM donors WHERE org_id = ?', [req.orgId]);
   const labelSet = new Set();

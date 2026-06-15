@@ -244,6 +244,88 @@ async function processScheduledEmails() {
   }
 }
 
+async function processRecurringSchedules() {
+  const due = all(`
+    SELECT rs.*, d.first_name, d.last_name, d.email, d.zip
+    FROM recurring_schedules rs
+    JOIN donors d ON rs.donor_id = d.id
+    WHERE rs.status = 'active'
+      AND rs.next_run <= datetime('now')
+      AND (rs.end_date IS NULL OR rs.next_run <= rs.end_date)
+      AND (rs.occurrences_limit IS NULL OR rs.occurrences_count < rs.occurrences_limit)
+  `, []);
+
+  for (const sched of due) {
+    const pm = get('SELECT * FROM payment_methods WHERE id = ?', [sched.payment_method_id]);
+    const org = get('SELECT * FROM organizations WHERE id = ?', [sched.org_id]);
+    const donor = get('SELECT * FROM donors WHERE id = ?', [sched.donor_id]);
+    if (!pm || !org || !donor) continue;
+
+    try {
+      let txId = null;
+
+      if (pm.type === 'credit_card' && pm.sola_token) {
+        const result = await chargeToken(sched.org_id, {
+          token: pm.sola_token,
+          amount: sched.amount,
+          name: `${donor.first_name} ${donor.last_name}`,
+          zip: donor.zip || '',
+          email: donor.email || '',
+          invoiceNum: sched.id.slice(0, 16),
+          customNote: `Recurring ${sched.frequency} charge`
+        });
+        txId = result.refNum;
+      }
+
+      const donId = uuidv4();
+      run(`INSERT INTO donations (id, org_id, donor_id, amount, method, payment_method_id, transaction_id, donation_date, status, is_recurring, notes, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'completed', 1, ?, 'system')`,
+        [donId, sched.org_id, sched.donor_id, sched.amount, pm.type, pm.id, txId,
+         `Recurring ${sched.frequency} — ${sched.notes || ''}`]);
+
+      // Calculate next run
+      const nextRun = calcNextRun(sched.next_run, sched.frequency);
+      const newCount = (sched.occurrences_count || 0) + 1;
+      const limitHit = sched.occurrences_limit && newCount >= sched.occurrences_limit;
+      const endHit = sched.end_date && new Date(nextRun) > new Date(sched.end_date);
+
+      run(`UPDATE recurring_schedules SET
+           next_run = ?, occurrences_count = ?, last_run = CURRENT_TIMESTAMP, last_failure = NULL,
+           status = ?
+           WHERE id = ?`,
+        [nextRun, newCount, (limitHit || endHit) ? 'completed' : 'active', sched.id]);
+
+      const donation = get('SELECT * FROM donations WHERE id = ?', [donId]);
+      await sendReceiptEmail(donor, donation, org);
+      await sendChargeNotificationToOwner(org, donor, donation, true, null);
+
+    } catch (e) {
+      run(`UPDATE recurring_schedules SET last_failure = ?, status = 'active' WHERE id = ?`,
+        [e.message, sched.id]);
+
+      run(`INSERT INTO charge_failures (id, org_id, donor_id, amount, failure_reason, payment_method_id)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        [uuidv4(), sched.org_id, sched.donor_id, sched.amount, e.message, sched.payment_method_id]);
+
+      await sendChargeNotificationToOwner(org, donor, { amount: sched.amount }, false, e.message);
+    }
+  }
+}
+
+function calcNextRun(fromDate, frequency) {
+  const d = new Date(fromDate);
+  switch (frequency) {
+    case 'weekly':    d.setDate(d.getDate() + 7); break;
+    case 'biweekly':  d.setDate(d.getDate() + 14); break;
+    case 'monthly':   d.setMonth(d.getMonth() + 1); break;
+    case 'quarterly': d.setMonth(d.getMonth() + 3); break;
+    case 'yearly':    d.setFullYear(d.getFullYear() + 1); break;
+    case 'once':      return null;
+    default:          d.setMonth(d.getMonth() + 1);
+  }
+  return d.toISOString();
+}
+
 async function processScheduledOneTimeCharges() {
   const due = all(`
     SELECT * FROM scheduled_charges
@@ -256,6 +338,7 @@ function startScheduler() {
   cron.schedule('* * * * *', async () => {
     try {
       await processScheduledOneTimeCharges();
+      await processRecurringSchedules();
       await processScheduledEmails();
     } catch (e) { console.error('Scheduler error:', e.message); }
   });

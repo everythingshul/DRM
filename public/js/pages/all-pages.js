@@ -535,24 +535,23 @@ Pages.KvitelPage = {
               </div>
             </div>
             <div class="input-row input-row-2">
-              <div><label>Font</label>
-                <select id="kv-font">
+              <div><label>Body Font</label>
+                <select id="kv-font" onchange="Pages.KvitelPage.updatePreviewFont()">
                   <option value="Noto Sans Hebrew" ${s.font_family==='Noto Sans Hebrew'?'selected':''}>Noto Sans Hebrew</option>
                   <option value="Frank Ruhl Libre" ${s.font_family==='Frank Ruhl Libre'?'selected':''}>Frank Ruhl Libre</option>
                   <option value="Heebo" ${s.font_family==='Heebo'?'selected':''}>Heebo</option>
+                  <option value="Narkisim" ${s.font_family==='Narkisim'?'selected':''}>Narkisim</option>
+                  <option value="Times New Roman" ${s.font_family==='Times New Roman'?'selected':''}>Times New Roman</option>
+                  <option value="Livvorn" ${s.font_family==='Livvorn'?'selected':''}>Livvorn (Livorna)</option>
                 </select>
               </div>
-              <div><label>Font Size (pt)</label>
+              <div><label>Body Font Size (pt)</label>
                 <input type="number" id="kv-fontsize" value="${s.font_size||12}" step="0.5" min="8" max="24">
               </div>
             </div>
             <div class="input-row input-row-2">
-              <div><label>Column Gap (in)</label>
-                <input type="number" id="kv-gap" value="${s.column_gap||0.5}" step="0.1" min="0" max="2">
-              </div>
-              <div><label>Line Height</label>
-                <input type="number" id="kv-lh" value="${s.line_height||1.6}" step="0.1" min="1" max="3">
-              </div>
+              <div><label>Column Gap (in)</label><input type="number" id="kv-gap" value="${s.column_gap||0.5}" step="0.1" min="0" max="2"></div>
+              <div><label>Line Height</label><input type="number" id="kv-lh" value="${s.line_height||1.6}" step="0.1" min="1" max="3"></div>
             </div>
             <div class="input-row input-row-4" style="margin-top:4px">
               ${['top','bottom','left','right'].map(m=>`<div><label>Margin ${m} (in)</label><input type="number" id="kv-m${m}" value="${s['margin_'+m]||1}" step="0.25" min="0" max="3"></div>`).join('')}
@@ -561,18 +560,47 @@ Pages.KvitelPage = {
               <div class="toggle-label">Group by Neighborhood</div>
               <label class="toggle"><input type="checkbox" id="kv-bynh" ${s.group_by_neighborhood!==0?'checked':''}><span class="toggle-slider"></span></label>
             </div>
+
             <hr class="section-divider">
-            <div><label>Header Text/HTML</label>
-              <textarea id="kv-header" style="min-height:80px;font-size:13px" placeholder="<h2>Organization Name — Kvitel</h2>">${s.header_html||''}</textarea>
+            <div class="card-title" style="margin-bottom:10px">Header</div>
+            <div class="input-row input-row-2">
+              <div><label>Header Text</label>
+                <input id="kv-header-text" value="${(s.header_html||'').replace(/<[^>]+>/g,'')}" placeholder="Organization Name — Kvitel">
+              </div>
+              <div><label>Header Font</label>
+                <select id="kv-hfont">
+                  ${['Noto Sans Hebrew','Frank Ruhl Libre','Heebo','Narkisim','Times New Roman','Livvorn'].map(f=>`<option ${(s.header_font||'Frank Ruhl Libre')===f?'selected':''}>${f}</option>`).join('')}
+                </select>
+              </div>
             </div>
-            <div style="margin-top:12px">
+            <div class="input-row input-row-4" style="margin-top:4px">
+              <div><label>Size (pt)</label><input type="number" id="kv-hsize" value="${s.header_size||18}" min="10" max="48"></div>
+              <div><label>Bold</label><br>
+                <label class="toggle" style="margin-top:6px"><input type="checkbox" id="kv-hbold" ${s.header_bold!==0?'checked':''}><span class="toggle-slider"></span></label>
+              </div>
+              <div><label>Alignment</label>
+                <select id="kv-halign">
+                  <option value="center" ${(s.header_align||'center')==='center'?'selected':''}>Center</option>
+                  <option value="right" ${s.header_align==='right'?'selected':''}>Right</option>
+                  <option value="left" ${s.header_align==='left'?'selected':''}>Left</option>
+                </select>
+              </div>
+              <div><label>Direction</label>
+                <select id="kv-hdir">
+                  <option value="rtl" ${(s.header_dir||'rtl')==='rtl'?'selected':''}>RTL (Hebrew)</option>
+                  <option value="ltr" ${s.header_dir==='ltr'?'selected':''}>LTR</option>
+                </select>
+              </div>
+            </div>
+
+            <div style="margin-top:14px">
               <button class="btn btn-primary" onclick="Pages.KvitelPage.saveSettings()">Save Settings</button>
             </div>
           </div>
 
           <div class="card">
-            <div class="card-title">Kvitel Preview</div>
-            <div class="kvitel-preview" id="kv-preview">
+            <div class="card-title">Preview <span style="font-size:12px;color:var(--gray-500)">(RTL, always)</span></div>
+            <div class="kvitel-preview" id="kv-preview" style="font-family:${s.font_family||'Noto Sans Hebrew'}">
               ${this.buildPreview(donors.donors || [])}
             </div>
             <p style="font-size:12px;color:var(--gray-500);margin-top:8px">
@@ -594,10 +622,27 @@ Pages.KvitelPage = {
     ).join('<hr style="border:none;border-top:1px solid #eee;margin:8px 0">');
   },
 
+  updatePreviewFont() {
+    const font = document.getElementById('kv-font')?.value;
+    const prev = document.getElementById('kv-preview');
+    if (prev && font) prev.style.fontFamily = font;
+  },
+
   async saveSettings() {
     try {
+      const headerText = document.getElementById('kv-header-text')?.value || '';
+      const hfont = document.getElementById('kv-hfont')?.value || 'Frank Ruhl Libre';
+      const hsize = parseFloat(document.getElementById('kv-hsize')?.value || 18);
+      const hbold = document.getElementById('kv-hbold')?.checked !== false;
+      const halign = document.getElementById('kv-halign')?.value || 'center';
+      const hdir = document.getElementById('kv-hdir')?.value || 'rtl';
+      // Build header_html from settings
+      const headerHtml = `<p style="font-family:${hfont};font-size:${hsize}pt;font-weight:${hbold?'bold':'normal'};text-align:${halign};direction:${hdir}">${headerText}</p>`;
+
       await API.put(API.org.kvitelSettings(), {
-        header_html: document.getElementById('kv-header')?.value,
+        header_html: headerHtml,
+        header_font: hfont, header_size: hsize,
+        header_bold: hbold ? 1 : 0, header_align: halign, header_dir: hdir,
         page_size: document.getElementById('kv-pagesize')?.value,
         columns: parseInt(document.getElementById('kv-cols')?.value),
         column_gap: parseFloat(document.getElementById('kv-gap')?.value),
@@ -740,7 +785,7 @@ Pages.Settings = {
             <div style="display:flex;justify-content:space-between;margin-bottom:16px;align-items:center">
               <strong>Organization Users</strong>
               <div class="btn-group">
-                ${currentUser?.is_super_admin ? `<button class="btn btn-outline btn-sm" onclick="Pages.Settings.inviteAccount()">+ Invite New Account</button>` : ''}
+                ${window.DRM?.user?.is_super_admin ? `<button class="btn btn-outline btn-sm" onclick="Pages.Settings.inviteAccount()">+ Invite New Account</button>` : ''}
                 <button class="btn btn-primary btn-sm" onclick="Pages.Settings.addUser()">+ Invite User</button>
               </div>
             </div>

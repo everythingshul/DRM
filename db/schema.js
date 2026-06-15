@@ -32,6 +32,7 @@ async function initDb() {
   db.run('PRAGMA foreign_keys=ON');
 
   createTables();
+  runMigrations();
   seedSolaKey();
   saveDb();
 
@@ -173,17 +174,42 @@ function createTables() {
       method TEXT NOT NULL,
       payment_method_id TEXT,
       transaction_id TEXT,
-      status TEXT DEFAULT 'completed' CHECK(status IN ('completed','pending','failed','scheduled','processing')),
+      status TEXT DEFAULT 'completed' CHECK(status IN ('completed','pending','failed','scheduled','processing','refunded','partial_refund')),
       donation_date DATETIME NOT NULL,
       scheduled_date DATETIME,
       notes TEXT,
+      donation_notes TEXT DEFAULT '[]',
+      refund_amount REAL DEFAULT 0,
+      refund_notes TEXT,
       is_manual INTEGER DEFAULT 0,
       is_autopay INTEGER DEFAULT 0,
+      is_recurring INTEGER DEFAULT 0,
       receipt_sent INTEGER DEFAULT 0,
-      stripe_payment_intent_id TEXT,
       failure_reason TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       created_by TEXT,
+      FOREIGN KEY(org_id) REFERENCES organizations(id),
+      FOREIGN KEY(donor_id) REFERENCES donors(id)
+    );
+
+    -- Recurring charge schedules (replaces one-time scheduled_charges for autopay)
+    CREATE TABLE IF NOT EXISTS recurring_schedules (
+      id TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL,
+      donor_id TEXT NOT NULL,
+      payment_method_id TEXT NOT NULL,
+      amount REAL NOT NULL,
+      frequency TEXT NOT NULL CHECK(frequency IN ('weekly','biweekly','monthly','quarterly','yearly','once')),
+      start_date DATETIME NOT NULL,
+      next_run DATETIME,
+      end_date DATETIME,
+      occurrences_limit INTEGER,
+      occurrences_count INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'active' CHECK(status IN ('active','paused','completed','cancelled')),
+      notes TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_run DATETIME,
+      last_failure TEXT,
       FOREIGN KEY(org_id) REFERENCES organizations(id),
       FOREIGN KEY(donor_id) REFERENCES donors(id)
     );
@@ -304,6 +330,11 @@ function createTables() {
       id TEXT PRIMARY KEY,
       org_id TEXT UNIQUE NOT NULL,
       header_html TEXT DEFAULT '',
+      header_font TEXT DEFAULT 'Frank Ruhl Libre',
+      header_size REAL DEFAULT 18,
+      header_bold INTEGER DEFAULT 1,
+      header_align TEXT DEFAULT 'center',
+      header_dir TEXT DEFAULT 'rtl',
       page_size TEXT DEFAULT 'letter',
       columns INTEGER DEFAULT 2,
       column_gap REAL DEFAULT 0.5,
@@ -344,6 +375,24 @@ function createTables() {
       try { db.run(s + ';'); } catch(e) { /* table exists */ }
     }
   });
+}
+
+function runMigrations() {
+  const migrations = [
+    `ALTER TABLE donations ADD COLUMN donation_notes TEXT DEFAULT '[]'`,
+    `ALTER TABLE donations ADD COLUMN refund_amount REAL DEFAULT 0`,
+    `ALTER TABLE donations ADD COLUMN refund_notes TEXT`,
+    `ALTER TABLE donations ADD COLUMN is_recurring INTEGER DEFAULT 0`,
+    `ALTER TABLE payment_methods ADD COLUMN sola_token TEXT`,
+    `ALTER TABLE kvitel_settings ADD COLUMN header_font TEXT DEFAULT 'Frank Ruhl Libre'`,
+    `ALTER TABLE kvitel_settings ADD COLUMN header_size REAL DEFAULT 18`,
+    `ALTER TABLE kvitel_settings ADD COLUMN header_bold INTEGER DEFAULT 1`,
+    `ALTER TABLE kvitel_settings ADD COLUMN header_align TEXT DEFAULT 'center'`,
+    `ALTER TABLE kvitel_settings ADD COLUMN header_dir TEXT DEFAULT 'rtl'`,
+  ];
+  for (const m of migrations) {
+    try { db.run(m); } catch(e) { /* column already exists */ }
+  }
 }
 
 // Query helpers

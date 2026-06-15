@@ -32,6 +32,8 @@ async function init() {
     const me = await API.get('/auth/me');
     currentUser = me.user;
     allOrgs = me.orgs;
+    window.DRM.user = me.user;
+    window.DRM.orgs = me.orgs;
     if (me.orgs.length > 0) {
       await setOrg(me.orgs[0]);
     }
@@ -156,6 +158,8 @@ function showLogin() {
       });
       currentUser = res.user;
       allOrgs = res.orgs;
+      window.DRM.user = res.user;
+      window.DRM.orgs = res.orgs;
       if (res.orgs.length > 0) {
         await setOrg(res.activeOrg || res.orgs[0]);
       }
@@ -187,6 +191,22 @@ function showApp() {
   show('app');
 
   document.getElementById('user-name-display').textContent = currentUser.full_name;
+
+  // Inject SVG icons into nav
+  const navIcons = {
+    dashboard: Icon.dashboard(), donors: Icon.donors(), donations: Icon.donations(),
+    verification: Icon.check(), failures: Icon.x(), bank: Icon.bank(),
+    emails: Icon.email(), kvitel: Icon.scroll(), reports: Icon.chart(), settings: Icon.settings()
+  };
+  document.querySelectorAll('.nav-item[data-page]').forEach(item => {
+    const page = item.dataset.page;
+    if (navIcons[page]) {
+      const span = document.createElement('span');
+      span.className = 'nav-icon-svg';
+      span.innerHTML = navIcons[page];
+      item.prepend(span);
+    }
+  });
 
   // Sidebar collapse/expand
   const sidebar = document.getElementById('sidebar');
