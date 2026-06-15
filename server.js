@@ -100,8 +100,16 @@ app.post('/api/orgs/:orgId/import/donors',
   }
 );
 
-// Serve SPA (including invite paths)
-app.get(['/new-account', '/complete-setup', '*'], (req, res) => {
+// Serve SPA — only for non-file routes
+app.get(['/new-account', '/complete-setup'], (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.get('*', (req, res) => {
+  // Don't intercept actual file requests (css, js, images, etc.)
+  if (req.path.includes('.')) {
+    return res.status(404).send('Not found');
+  }
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
