@@ -179,6 +179,125 @@ router.put('/orgs/:orgId/users/:userId/password', requireAuth, requireOrg, requi
   }
 });
 
+// Invite user by email — sends setup link, no password set by admin
+router.post('/orgs/:orgId/users/invite', requireAuth, requireOrg, requireOrgAdmin, async (req, res) => {
+  try {
+    const { email, role = 'staff' } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email required' });
+
+    // Check if user already exists in org
+    let user = get('SELECT * FROM users WHERE email = ?', [email.toLowerCase().trim()]);
+    let isNew = false;
+
+    if (!user) {
+      // Create a placeholder user with a random temp password they'll never use
+      const crypto = require('crypto');
+      const tempPass = crypto.randomBytes(32).toString('hex');
+      const hash = await bcrypt.hash(tempPass, 12);
+      const userId = uuidv4();
+      const name = email.split('@')[0]; // placeholder name until they set up
+      run('INSERT INTO users (id, email, password_hash, full_name) VALUES (?, ?, ?, ?)',
+        [userId, email.toLowerCase().trim(), hash, name]);
+      user = get('SELECT * FROM users WHERE id = ?', [userId]);
+      isNew = true;
+    }
+
+    const existing = get('SELECT * FROM org_users WHERE org_id = ? AND user_id = ?', [req.orgId, user.id]);
+    if (existing) return res.status(400).json({ error: 'User already in this organization' });
+
+    run('INSERT INTO org_users (id, org_id, user_id, role, invited_by) VALUES (?, ?, ?, ?, ?)',
+      [uuidv4(), req.orgId, user.id, role, req.user.id]);
+
+    // Generate a setup token (same JWT mechanism, 48h)
+    const { generateToken } = require('../middleware/auth');
+    const setupToken = generateToken({ userId: user.id, setupMode: true, orgId: req.orgId });
+
+    // Get email settings for this org's signup SMTP
+    const emailSettings = get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]);
+    const signupEmail = process.env.SIGNUP_SMTP_EMAIL;
+    const signupPass = process.env.SIGNUP_SMTP_PASSWORD;
+    const appUrl = process.env.APP_URL || 'https://drm.everythingshul.com';
+    const setupUrl = `${appUrl}/complete-setup?token=${setupToken}`;
+
+    // Try sending the invite email
+    let emailSent = false;
+    if (signupEmail && signupPass) {
+      try {
+        const nodemailer = require('nodemailer');
+        const transporter = nodemailer.createTransport({
+          host: 'smtp.gmail.com', port: 587, secure: false,
+          auth: { user: signupEmail, pass: signupPass }
+        });
+        await transporter.sendMail({
+          from: `"DRM – Everything Shul" <${signupEmail}>`,
+          to: email,
+          subject: 'You\'ve been invited to DRM',
+          html: `
+            <div style="font-family:Inter,sans-serif;max-width:520px;margin:0 auto">
+              <h2 style="color:#1a3a6b">Welcome to DRM</h2>
+              <p>You've been invited to join <strong>${req.org.name}</strong> on DRM – Donor Relationship Manager, powered by Everything Shul.</p>
+              <p>Click the button below to set up your account. This link expires in 48 hours.</p>
+              <div style="margin:24px 0">
+                <a href="${setupUrl}" style="background:#1a3a6b;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600;display:inline-block">
+                  Set Up My Account →
+                </a>
+              </div>
+              <p style="color:#6b7280;font-size:13px">If the button doesn't work, copy this link:<br>${setupUrl}</p>
+              <hr style="border:none;border-top:1px solid #eee;margin:20px 0">
+              <p style="color:#9ca3af;font-size:12px">DRM – Powered by Everything Shul &nbsp;·&nbsp; drm.everythingshul.com</p>
+            </div>
+          `
+        });
+        emailSent = true;
+      } catch (e) {
+        console.error('Invite email failed:', e.message);
+      }
+    }
+
+    res.json({
+      success: true,
+      emailSent,
+      setupUrl: emailSent ? null : setupUrl, // Return URL if email couldn't send so admin can share manually
+      user: { id: user.id, email: user.email, role }
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Complete account setup from invite link
+router.get('/complete-setup', (req, res) => {
+  // Serve the SPA — JS will handle the token
+  res.sendFile(require('path').join(__dirname, '../public/index.html'));
+});
+
+router.post('/complete-setup', async (req, res) => {
+  try {
+    const { token, full_name, password } = req.body;
+    if (!token || !full_name || !password) return res.status(400).json({ error: 'All fields required' });
+    if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+
+    const jwt = require('jsonwebtoken');
+    const { JWT_SECRET } = require('../middleware/auth');
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch (e) {
+      return res.status(400).json({ error: 'This setup link has expired or is invalid' });
+    }
+    if (!decoded.setupMode) return res.status(400).json({ error: 'Invalid setup token' });
+
+    const hash = await bcrypt.hash(password, 12);
+    run('UPDATE users SET full_name = ?, password_hash = ? WHERE id = ?', [full_name, hash, decoded.userId]);
+
+    res.json({ success: true, message: 'Account set up! Please log in.' });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Login log
 router.get('/orgs/:orgId/login-log', requireAuth, requireOrg, requireOrgAdmin, (req, res) => {
   const log = all(`
@@ -213,6 +332,116 @@ router.post('/setup', async (req, res) => {
     run('INSERT INTO kvitel_settings (id, org_id) VALUES (?, ?)', [uuidv4(), orgId]);
 
     res.json({ success: true, message: 'Setup complete. Please log in.' });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Super admin: invite a new organization account
+// They get an email with a link to set up their own org + admin account
+router.post('/invite-account', requireAuth, async (req, res) => {
+  try {
+    if (!req.user.is_super_admin) return res.status(403).json({ error: 'Super admin only' });
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email required' });
+
+    // Check not already a user
+    const existing = get('SELECT id FROM users WHERE email = ?', [email.toLowerCase().trim()]);
+    if (existing) return res.status(400).json({ error: 'An account with that email already exists' });
+
+    // Generate a one-time invite token (JWT, 7 days)
+    const jwt = require('jsonwebtoken');
+    const { JWT_SECRET } = require('../middleware/auth');
+    const inviteToken = jwt.sign(
+      { inviteEmail: email.toLowerCase().trim(), newAccount: true },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    const appUrl = process.env.APP_URL || 'https://drm.everythingshul.com';
+    const setupUrl = `${appUrl}/new-account?token=${inviteToken}`;
+
+    const signupEmail = process.env.SIGNUP_SMTP_EMAIL;
+    const signupPass = process.env.SIGNUP_SMTP_PASSWORD;
+    let emailSent = false;
+
+    if (signupEmail && signupPass) {
+      try {
+        const nodemailer = require('nodemailer');
+        const transporter = nodemailer.createTransport({
+          host: 'smtp.gmail.com', port: 587, secure: false,
+          auth: { user: signupEmail, pass: signupPass }
+        });
+        await transporter.sendMail({
+          from: `"DRM – Everything Shul" <${signupEmail}>`,
+          to: email,
+          subject: 'Your DRM Account Invitation',
+          html: `
+            <div style="font-family:Inter,sans-serif;max-width:520px;margin:0 auto;color:#1a1a2e">
+              <img src="${appUrl}/img/logo.png" alt="Everything Shul" style="height:52px;margin-bottom:20px">
+              <h2 style="color:#1a3a6b;margin-top:0">You're invited to DRM</h2>
+              <p>You've been invited to create an account on <strong>DRM – Donor Relationship Manager</strong>, powered by Everything Shul.</p>
+              <p>Click the button below to set up your organization and admin account. This link is valid for 7 days.</p>
+              <div style="margin:28px 0">
+                <a href="${setupUrl}" style="background:#1a3a6b;color:white;padding:13px 26px;border-radius:6px;text-decoration:none;font-weight:600;display:inline-block;font-size:15px">
+                  Set Up My Account →
+                </a>
+              </div>
+              <p style="color:#6b7280;font-size:13px">If the button doesn't work, copy this link into your browser:<br>
+              <a href="${setupUrl}" style="color:#2d8dc4;word-break:break-all">${setupUrl}</a></p>
+              <hr style="border:none;border-top:1px solid #eee;margin:24px 0">
+              <p style="color:#9ca3af;font-size:12px">DRM – Powered by Everything Shul &nbsp;·&nbsp; drm.everythingshul.com</p>
+            </div>
+          `
+        });
+        emailSent = true;
+      } catch (e) {
+        console.error('Invite email failed:', e.message);
+      }
+    }
+
+    res.json({ success: true, emailSent, setupUrl: emailSent ? null : setupUrl });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Complete new account setup from invite link (creates user + org in one shot)
+router.post('/new-account', async (req, res) => {
+  try {
+    const { token, full_name, password, org_name } = req.body;
+    if (!token || !full_name || !password || !org_name) return res.status(400).json({ error: 'All fields required' });
+    if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+
+    const jwt = require('jsonwebtoken');
+    const { JWT_SECRET } = require('../middleware/auth');
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch (e) {
+      return res.status(400).json({ error: 'This invite link has expired or is invalid. Ask for a new invite.' });
+    }
+    if (!decoded.newAccount || !decoded.inviteEmail) return res.status(400).json({ error: 'Invalid invite token' });
+
+    // Make sure email not already taken (link reuse)
+    const existing = get('SELECT id FROM users WHERE email = ?', [decoded.inviteEmail]);
+    if (existing) return res.status(400).json({ error: 'An account with this email already exists. Please log in.' });
+
+    const hash = await bcrypt.hash(password, 12);
+    const userId = uuidv4();
+    run('INSERT INTO users (id, email, password_hash, full_name, role) VALUES (?, ?, ?, ?, ?)',
+      [userId, decoded.inviteEmail, hash, full_name, 'admin']);
+
+    const slug = org_name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') + '-' + Date.now().toString(36);
+    const orgId = uuidv4();
+    run('INSERT INTO organizations (id, name, slug) VALUES (?, ?, ?)', [orgId, org_name, slug]);
+    run('INSERT INTO org_users (id, org_id, user_id, role) VALUES (?, ?, ?, ?)', [uuidv4(), orgId, userId, 'admin']);
+    run('INSERT INTO email_settings (id, org_id) VALUES (?, ?)', [uuidv4(), orgId]);
+    run('INSERT INTO kvitel_settings (id, org_id) VALUES (?, ?)', [uuidv4(), orgId]);
+
+    res.json({ success: true, message: 'Account created! Please log in.' });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Server error' });

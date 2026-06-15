@@ -1,4 +1,7 @@
 // public/js/api.js - API client
+// Pages registry - declared here so page files can register before app.js loads
+const Pages = {};
+
 const API = {
   orgId: null,
 

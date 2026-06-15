@@ -100,8 +100,8 @@ app.post('/api/orgs/:orgId/import/donors',
   }
 );
 
-// Serve SPA
-app.get('*', (req, res) => {
+// Serve SPA (including invite paths)
+app.get(['/new-account', '/complete-setup', '*'], (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 

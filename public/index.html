@@ -25,8 +25,9 @@
       <input type="password" id="setup-password" placeholder="Choose a strong password" required>
       <label>Organization Name</label>
       <input type="text" id="setup-org" placeholder="My Synagogue" required>
-      <button type="submit" class="btn btn-primary btn-full">Create Admin Account</button>
+      <button type="submit" class="btn btn-primary btn-full" style="margin-top:20px">Create Admin Account</button>
     </form>
+    <p id="setup-error" class="error-msg" style="display:none;margin-top:10px"></p>
   </div>
 </div>
 
@@ -39,12 +40,12 @@
     <p class="powered">powered by <strong>Everything Shul</strong></p>
     <form id="login-form">
       <label>Email</label>
-      <input type="email" id="login-email" placeholder="your@email.com" required>
+      <input type="email" id="login-email" placeholder="your@email.com" required autocomplete="email">
       <label>Password</label>
-      <input type="password" id="login-password" placeholder="Password" required>
-      <button type="submit" class="btn btn-primary btn-full">Sign In</button>
+      <input type="password" id="login-password" placeholder="Password" required autocomplete="current-password">
+      <button type="submit" class="btn btn-primary btn-full" style="margin-top:20px">Sign In</button>
     </form>
-    <p id="login-error" class="error-msg" style="display:none"></p>
+    <p id="login-error" class="error-msg" style="display:none;margin-top:10px"></p>
   </div>
 </div>
 
@@ -52,56 +53,60 @@
 <div id="app" style="display:none">
 
   <!-- Sidebar -->
-  <aside id="sidebar">
-    <div class="sidebar-logo">
-      <img src="/img/logo.png" alt="DRM">
+  <aside id="sidebar" class="sidebar-expanded">
+    <div class="sidebar-top">
+      <div class="sidebar-logo">
+        <img src="/img/logo.png" alt="DRM" id="sidebar-logo-img">
+        <span class="sidebar-logo-text">DRM</span>
+      </div>
+      <button id="sidebar-toggle" class="sidebar-toggle-btn" title="Collapse sidebar">&#9776;</button>
     </div>
 
     <!-- Org Switcher -->
-    <div class="org-switcher">
+    <div class="org-switcher" id="org-switcher-wrap">
       <select id="org-select"></select>
-      <button id="add-org-btn" class="btn-icon" title="New Organization">+</button>
+      <button id="add-org-btn" class="btn-icon sidebar-icon-btn" title="New Organization">+</button>
     </div>
 
     <nav class="sidebar-nav">
       <a href="#dashboard" class="nav-item active" data-page="dashboard">
-        <span class="nav-icon">📊</span> Dashboard
+        <span class="nav-icon">📊</span><span class="nav-label">Dashboard</span>
       </a>
       <a href="#donors" class="nav-item" data-page="donors">
-        <span class="nav-icon">👥</span> Donors
+        <span class="nav-icon">👥</span><span class="nav-label">Donors</span>
       </a>
       <a href="#donations" class="nav-item" data-page="donations">
-        <span class="nav-icon">💳</span> Donations
+        <span class="nav-icon">💳</span><span class="nav-label">Donations</span>
       </a>
       <a href="#verification" class="nav-item" data-page="verification">
-        <span class="nav-icon">✅</span> Info Check
+        <span class="nav-icon">✅</span><span class="nav-label">Info Check</span>
         <span id="verify-badge" class="badge" style="display:none"></span>
       </a>
       <a href="#failures" class="nav-item" data-page="failures">
-        <span class="nav-icon">❌</span> Failed Charges
+        <span class="nav-icon">❌</span><span class="nav-label">Failed Charges</span>
         <span id="fail-badge" class="badge red" style="display:none"></span>
       </a>
       <a href="#bank" class="nav-item" data-page="bank">
-        <span class="nav-icon">🏦</span> Bank
+        <span class="nav-icon">🏦</span><span class="nav-label">Bank</span>
       </a>
       <a href="#emails" class="nav-item" data-page="emails">
-        <span class="nav-icon">📧</span> Emails
+        <span class="nav-icon">📧</span><span class="nav-label">Emails</span>
       </a>
       <a href="#kvitel" class="nav-item" data-page="kvitel">
-        <span class="nav-icon">📜</span> Kvitel
+        <span class="nav-icon">📜</span><span class="nav-label">Kvitel</span>
       </a>
       <a href="#reports" class="nav-item" data-page="reports">
-        <span class="nav-icon">📈</span> Reports
+        <span class="nav-icon">📈</span><span class="nav-label">Reports</span>
       </a>
       <a href="#settings" class="nav-item" data-page="settings">
-        <span class="nav-icon">⚙️</span> Settings
+        <span class="nav-icon">⚙️</span><span class="nav-label">Settings</span>
       </a>
     </nav>
 
     <div class="sidebar-footer">
       <div class="user-info">
-        <span id="user-name-display"></span>
-        <button id="logout-btn" class="btn-link">Sign Out</button>
+        <span id="user-name-display" class="nav-label"></span>
+        <button id="logout-btn" class="btn-link nav-label">Sign Out</button>
       </div>
     </div>
   </aside>

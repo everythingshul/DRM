@@ -737,9 +737,12 @@ Pages.Settings = {
         <!-- USERS -->
         <div id="st-users" class="tab-content active">
           <div class="card">
-            <div style="display:flex;justify-content:space-between;margin-bottom:16px">
+            <div style="display:flex;justify-content:space-between;margin-bottom:16px;align-items:center">
               <strong>Organization Users</strong>
-              <button class="btn btn-primary btn-sm" onclick="Pages.Settings.addUser()">+ Add User</button>
+              <div class="btn-group">
+                ${currentUser?.is_super_admin ? `<button class="btn btn-outline btn-sm" onclick="Pages.Settings.inviteAccount()">+ Invite New Account</button>` : ''}
+                <button class="btn btn-primary btn-sm" onclick="Pages.Settings.addUser()">+ Invite User</button>
+              </div>
             </div>
             <table>
               <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Last Login</th><th>Actions</th></tr></thead>
@@ -838,29 +841,76 @@ Pages.Settings = {
     } catch (e) { el.innerHTML = `<div class="alert alert-danger">${e.message}</div>`; }
   },
 
-  addUser() {
-    Modal.open('Add User', `
-      <label>Full Name</label><input id="nu-name" placeholder="Full Name">
-      <label>Email</label><input id="nu-email" type="email" placeholder="user@email.com">
-      <label>Password</label><input id="nu-pass" type="password" placeholder="Temporary password">
-      <label>Role</label>
-      <select id="nu-role"><option value="staff">Staff</option><option value="admin">Admin</option></select>
+  inviteAccount() {
+    Modal.open('Invite New Account', `
+      <p style="color:var(--gray-500);margin-bottom:16px">
+        Enter the email address of the person who will run the new organization.
+        They'll receive a setup link to create their org name, admin account, and password themselves.
+      </p>
+      <label>Email Address *</label>
+      <input id="ia-email" type="email" placeholder="rabbi@newshul.org" autocomplete="off">
+      <div id="ia-result" style="display:none;margin-top:14px"></div>
       <div style="margin-top:16px">
-        <button class="btn btn-primary" onclick="Pages.Settings.doAddUser()">Add User</button>
+        <button class="btn btn-primary" onclick="Pages.Settings.doInviteAccount()">Send Invite</button>
         <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
       </div>
     `, { small: true });
   },
 
-  async doAddUser() {
+  async doInviteAccount() {
+    const email = document.getElementById('ia-email')?.value?.trim();
+    if (!email) { toast('Email required', 'error'); return; }
     try {
-      await API.post(API.org.users(), {
-        full_name: document.getElementById('nu-name')?.value,
-        email: document.getElementById('nu-email')?.value,
-        password: document.getElementById('nu-pass')?.value,
-        role: document.getElementById('nu-role')?.value
-      });
-      toast('User added'); Modal.close();
+      const res = await API.post('/auth/invite-account', { email });
+      const resultEl = document.getElementById('ia-result');
+      if (res.emailSent) {
+        resultEl.innerHTML = `<div class="alert alert-success">✓ Invite sent to <strong>${email}</strong>. They'll get an email with a setup link valid for 7 days.</div>`;
+      } else {
+        resultEl.innerHTML = `<div class="alert alert-warning">
+          <strong>Email not sent</strong> — add SIGNUP_SMTP_EMAIL and SIGNUP_SMTP_PASSWORD to your Render env vars to enable invite emails.<br><br>
+          In the meantime, share this link manually:<br>
+          <a href="${res.setupUrl}" target="_blank" style="word-break:break-all;font-size:12px;color:var(--blue)">${res.setupUrl}</a>
+        </div>`;
+      }
+      resultEl.style.display = 'block';
+    } catch (e) { toast(e.message, 'error'); }
+  },
+
+  addUser() {
+    Modal.open('Invite User', `
+      <p style="color:var(--gray-500);margin-bottom:16px">Enter their email address. They'll receive a setup link to create their own password.</p>
+      <label>Email Address *</label>
+      <input id="nu-email" type="email" placeholder="user@example.com" autocomplete="off">
+      <label>Role</label>
+      <select id="nu-role">
+        <option value="staff">Staff</option>
+        <option value="admin">Admin</option>
+      </select>
+      <div id="invite-result" style="display:none;margin-top:12px"></div>
+      <div style="margin-top:16px">
+        <button class="btn btn-primary" onclick="Pages.Settings.doInvite()">Send Invite Email</button>
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+      </div>
+    `, { small: true });
+  },
+
+  async doInvite() {
+    const email = document.getElementById('nu-email')?.value?.trim();
+    const role = document.getElementById('nu-role')?.value;
+    if (!email) { toast('Email required', 'error'); return; }
+    try {
+      const res = await API.post(`/api/orgs/${API.orgId}/users/invite`, { email, role });
+      const resultEl = document.getElementById('invite-result');
+      if (res.emailSent) {
+        resultEl.innerHTML = `<div class="alert alert-success">✓ Invite sent to <strong>${email}</strong>. They'll get an email with a setup link.</div>`;
+      } else {
+        resultEl.innerHTML = `<div class="alert alert-warning">
+          <strong>Email not sent</strong> — SIGNUP_SMTP_EMAIL not configured.<br>
+          Share this setup link manually:<br>
+          <a href="${res.setupUrl}" target="_blank" style="word-break:break-all;font-size:12px">${res.setupUrl}</a>
+        </div>`;
+      }
+      resultEl.style.display = 'block';
       this.render(document.getElementById('page-settings'));
     } catch (e) { toast(e.message, 'error'); }
   },
