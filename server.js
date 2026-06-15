@@ -48,6 +48,7 @@ const upload = multer({
 
 // API
 app.use('/api/auth', authRouter);
+app.use('/api', authRouter);  // also mount here for /api/orgs/:orgId/users etc.
 app.use('/api/orgs/:orgId/donors', donorsRouter);
 app.use('/api/orgs/:orgId', orgRouter);
 app.use('/api/orgs/:orgId/kvitel', kvitelRouter);

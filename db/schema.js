@@ -26,11 +26,12 @@ function createTables() {
   const sql = `
     CREATE TABLE IF NOT EXISTS organizations (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL,
-      plan TEXT DEFAULT 'starter', created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      plan TEXT DEFAULT 'starter', settings TEXT DEFAULT '{}',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
-      full_name TEXT NOT NULL, is_super_admin INTEGER DEFAULT 0,
+      full_name TEXT NOT NULL, role TEXT DEFAULT 'admin', is_super_admin INTEGER DEFAULT 0,
       last_login DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS org_users (
@@ -95,7 +96,8 @@ function createTables() {
       id TEXT PRIMARY KEY, org_id TEXT UNIQUE NOT NULL,
       smtp_email TEXT, smtp_password TEXT, smtp_host TEXT DEFAULT 'smtp.gmail.com',
       smtp_port INTEGER DEFAULT 587, from_name TEXT,
-      receipt_template TEXT DEFAULT '', donation_emails_paused INTEGER DEFAULT 0,
+      receipt_template TEXT DEFAULT '', marketing_template TEXT DEFAULT '',
+      donation_emails_paused INTEGER DEFAULT 0,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS scheduled_emails (
@@ -156,6 +158,9 @@ function runMigrations() {
     `ALTER TABLE donations ADD COLUMN refund_notes TEXT`,
     `ALTER TABLE donations ADD COLUMN is_recurring INTEGER DEFAULT 0`,
     `ALTER TABLE payment_methods ADD COLUMN sola_token TEXT`,
+    `ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'admin'`,
+    `ALTER TABLE email_settings ADD COLUMN marketing_template TEXT DEFAULT ''`,
+    `ALTER TABLE organizations ADD COLUMN settings TEXT DEFAULT '{}'`,
     `ALTER TABLE kvitel_settings ADD COLUMN header_text TEXT DEFAULT ''`,
     `ALTER TABLE kvitel_settings ADD COLUMN header_font TEXT DEFAULT 'Frank Ruhl Libre'`,
     `ALTER TABLE kvitel_settings ADD COLUMN header_size REAL DEFAULT 18`,

@@ -270,18 +270,22 @@ router.get('/:id/donations', (req, res) => {
 
 router.post('/:id/donations', (req, res) => {
   try {
-    const { amount, method, payment_method_id, transaction_id, donation_date, notes, scheduled_date } = req.body;
+    const { amount, method, payment_method_id, transaction_id, donation_date, notes, check_number } = req.body;
     if (!amount || !method) return res.status(400).json({ error: 'Amount and method required' });
+    if (method === 'check' && !check_number) return res.status(400).json({ error: 'Check number required for check payments' });
 
     const donor = get('SELECT * FROM donors WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!donor) return res.status(404).json({ error: 'Donor not found' });
 
     const id = uuidv4();
-    const status = scheduled_date ? 'scheduled' : 'completed';
-    run(`INSERT INTO donations (id, org_id, donor_id, amount, method, payment_method_id, transaction_id, donation_date, scheduled_date, notes, status, is_manual, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
-      [id, req.orgId, req.params.id, amount, method, payment_method_id || null, transaction_id || null,
-       donation_date || new Date().toISOString(), scheduled_date || null, notes || null, status, req.user.id]);
+    // Auto-generate ES transaction ID for manual donations if none provided
+    const autoTxId = transaction_id || ('ES' + String(Math.floor(Math.random() * 1000000000)).padStart(9, '0'));
+    const finalNotes = check_number ? `Check #${check_number}${notes ? ' — ' + notes : ''}` : (notes || null);
+
+    run(`INSERT INTO donations (id, org_id, donor_id, amount, method, payment_method_id, transaction_id, donation_date, notes, status, is_manual, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', 1, ?)`,
+      [id, req.orgId, req.params.id, amount, method, payment_method_id || null, autoTxId,
+       donation_date || new Date().toISOString(), finalNotes, req.user.id]);
 
     res.json({ success: true, donation: get('SELECT * FROM donations WHERE id = ?', [id]) });
   } catch (e) {

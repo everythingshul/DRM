@@ -367,3 +367,57 @@ router.put('/kvitel-settings', (req, res) => {
 });
 
 module.exports = router;
+
+// ── Scheduled emails: edit ─────────────────────────────────────────────────────
+router.put('/scheduled-emails/:id', (req, res) => {
+  const { subject, html_body, scheduled_for } = req.body;
+  const ex = get('SELECT id FROM scheduled_emails WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
+  if (!ex) return res.status(404).json({ error: 'Email not found' });
+  run('UPDATE scheduled_emails SET subject=?, html_body=?, scheduled_for=? WHERE id=? AND org_id=?',
+    [subject, html_body, scheduled_for, req.params.id, req.orgId]);
+  res.json({ success: true });
+});
+
+// ── Scheduled emails: send test immediately ────────────────────────────────────
+router.post('/scheduled-emails/:id/test', requireOrgAdmin, async (req, res) => {
+  try {
+    const { to } = req.body;
+    const email = get('SELECT * FROM scheduled_emails WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
+    if (!email) return res.status(404).json({ error: 'Email not found' });
+
+    const settings = get('SELECT * FROM email_settings WHERE org_id=?', [req.orgId]);
+    if (!settings?.smtp_email) return res.status(400).json({ error: 'Email not configured' });
+
+    const nodemailer = require('nodemailer');
+    const transporter = nodemailer.createTransport({
+      host: settings.smtp_host || 'smtp.gmail.com',
+      port: settings.smtp_port || 587,
+      secure: false,
+      auth: { user: settings.smtp_email, pass: settings.smtp_password }
+    });
+
+    await transporter.sendMail({
+      from: `"${settings.from_name || 'DRM'}" <${settings.smtp_email}>`,
+      to: to || settings.smtp_email,
+      subject: '[TEST] ' + email.subject,
+      html: email.html_body
+    });
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Org timezone setting ───────────────────────────────────────────────────────
+router.get('/timezone', (req, res) => {
+  const s = get('SELECT settings FROM organizations WHERE id=?', [req.orgId]);
+  const parsed = (() => { try { return JSON.parse(s?.settings || '{}'); } catch { return {}; } })();
+  res.json({ timezone: parsed.timezone || 'America/New_York' });
+});
+
+router.put('/timezone', requireOrgAdmin, (req, res) => {
+  const { timezone } = req.body;
+  const org = get('SELECT settings FROM organizations WHERE id=?', [req.orgId]);
+  const current = (() => { try { return JSON.parse(org?.settings || '{}'); } catch { return {}; } })();
+  current.timezone = timezone;
+  run('UPDATE organizations SET settings=? WHERE id=?', [JSON.stringify(current), req.orgId]);
+  res.json({ success: true });
+});

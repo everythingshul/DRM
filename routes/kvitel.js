@@ -1,218 +1,219 @@
-// routes/kvitel.js - Generate Kvitel PDF and DOCX
+// routes/kvitel.js — Kvitel PDF + DOCX generation
 const express = require('express');
-const router = express.Router({ mergeParams: true });
+const router  = express.Router({ mergeParams: true });
 const { all, get } = require('../db/schema');
 const { requireAuth, requireOrg } = require('../middleware/auth');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
-const { Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel, Table, TableRow, TableCell, WidthType, BorderStyle } = require('docx');
+const { Document, Packer, Paragraph, TextRun, AlignmentType } = require('docx');
 
 router.use(requireAuth, requireOrg);
 
 const PAGE_SIZES = {
   letter: [612, 792],
-  legal: [612, 1008],
-  a4: [595.28, 841.89]
+  legal:  [612, 1008],
+  a4:     [595.28, 841.89]
 };
 
-// Generate PDF Kvitel
+function getDonors(orgId) {
+  return all(`
+    SELECT d.*, n.name_he as neighborhood_name, n.sort_order as nh_order
+    FROM donors d
+    LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
+    WHERE d.org_id=? AND d.kvitel_enabled=1
+      AND d.kvitel IS NOT NULL AND TRIM(d.kvitel) != ''
+    ORDER BY COALESCE(n.sort_order,999), n.name_he, d.last_name, d.first_name
+  `, [orgId]);
+}
+
+// ── PDF ────────────────────────────────────────────────────────────────────────
 router.post('/generate-pdf', async (req, res) => {
   try {
-    const settings = get('SELECT * FROM kvitel_settings WHERE org_id = ?', [req.orgId]);
-    const donors = all(`
-      SELECT d.*, n.name_he as neighborhood_name, n.sort_order as neighborhood_order
-      FROM donors d
-      LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
-      WHERE d.org_id = ? AND d.kvitel_enabled = 1
-        AND (d.kvitel IS NOT NULL AND TRIM(d.kvitel) != '')
-      ORDER BY n.sort_order, n.name_he, d.hebrew_full_name, d.last_name
-    `, [req.orgId]);
+    const s = get('SELECT * FROM kvitel_settings WHERE org_id=?', [req.orgId]) || {};
+    const donors = getDonors(req.orgId);
+    if (!donors.length) return res.status(400).json({ error: 'No donors with kvitel content and kvitel enabled' });
 
-    if (!donors.length) return res.status(400).json({ error: 'No donors with kvitel content' });
+    const pageSize  = PAGE_SIZES[s.page_size || 'letter'];
+    const W         = pageSize[0], H = pageSize[1];
+    const mT        = (s.margin_top    || 1) * 72;
+    const mB        = (s.margin_bottom || 1) * 72;
+    const mL        = (s.margin_left   || 1) * 72;
+    const mR        = (s.margin_right  || 1) * 72;
+    const numCols   = Math.max(1, parseInt(s.columns)    || 2);
+    const gapPts    = (s.column_gap    || 0.5) * 72;
+    const bodySize  = parseFloat(s.font_size)  || 12;
+    const lineH     = bodySize * (parseFloat(s.line_height) || 1.6);
+    const showNH    = s.group_by_neighborhood !== 0;
 
-    const s = settings || {};
-    const pageSize = PAGE_SIZES[s.page_size || 'letter'];
-    const marginTop = (s.margin_top || 1) * 72;
-    const marginBottom = (s.margin_bottom || 1) * 72;
-    const marginLeft = (s.margin_left || 1) * 72;
-    const marginRight = (s.margin_right || 1) * 72;
-    const numCols = s.columns || 2;
-    const colGap = (s.column_gap || 0.5) * 72;
-    const fontSize = s.font_size || 12;
-    const lineHeight = fontSize * (s.line_height || 1.6);
+    const doc  = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const bold = await doc.embedFont(StandardFonts.HelveticaBold);
 
-    const pdfDoc = await PDFDocument.create();
-    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const useableW  = W - mL - mR;
+    const colW      = (useableW - gapPts * (numCols - 1)) / numCols;
 
-    const usableWidth = pageSize[0] - marginLeft - marginRight;
-    const usableHeight = pageSize[1] - marginTop - marginBottom;
-    const colWidth = (usableWidth - colGap * (numCols - 1)) / numCols;
+    // Headers — parse from JSON array stored as header_text, or use legacy single
+    let headers = [];
+    try { headers = JSON.parse(s.header_text || '[]'); if (!Array.isArray(headers)) headers = []; }
+    catch { headers = s.header_text ? [{ text: s.header_text, size: s.header_size || 18, bold: true, align: 'center' }] : []; }
 
-    let currentPage = pdfDoc.addPage(pageSize);
+    let curPage = null;
     let col = 0;
-    let y = pageSize[1] - marginTop;
+    let y   = 0;
 
-    function getColX(c) {
-      return marginLeft + c * (colWidth + colGap);
-    }
-
-    function drawHeader(page) {
-      const headerText = s.header_html ? s.header_html.replace(/<[^>]+>/g, '') : 'Kvitel';
-      page.drawText(headerText, {
-        x: marginLeft,
-        y: pageSize[1] - marginTop / 2 - 10,
-        size: 16,
-        font,
-        color: rgb(0, 0, 0.4)
-      });
-    }
-
-    drawHeader(currentPage);
-
-    function needNewColumn() {
-      col++;
-      if (col >= numCols) {
-        col = 0;
-        currentPage = pdfDoc.addPage(pageSize);
-        drawHeader(currentPage);
+    function newPage() {
+      curPage = doc.addPage(pageSize);
+      col = 0;
+      y   = H - mT;
+      // Draw headers on each new page
+      let hy = y;
+      for (const h of headers) {
+        const sz  = parseFloat(h.size) || 16;
+        const f   = h.bold !== false ? bold : font;
+        const txt = String(h.text || '');
+        const x   = h.align === 'right' ? W - mR - txt.length * sz * 0.5
+                  : h.align === 'left'  ? mL
+                  : W / 2 - txt.length * sz * 0.3; // center approx
+        curPage.drawText(txt, { x: Math.max(mL, x), y: hy, size: sz, font: f, color: rgb(0.1, 0.2, 0.45) });
+        hy -= sz * 1.6;
       }
-      y = pageSize[1] - marginTop;
+      y = hy - 8;
     }
+
+    function colX(c) { return mL + c * (colW + gapPts); }
+
+    function needSpace(needed) {
+      if (y - needed < mB) {
+        col++;
+        if (col >= numCols) { newPage(); }
+        else { y = H - mT - headers.reduce((s, h) => s + (parseFloat(h.size)||16)*1.6, 0) - 8; }
+      }
+    }
+
+    newPage();
 
     // Group by neighborhood
-    const grouped = {};
+    const groups = {};
+    const order  = [];
     donors.forEach(d => {
-      const key = d.neighborhood_name || 'ללא שכונה';
-      if (!grouped[key]) grouped[key] = [];
-      grouped[key].push(d);
+      const key = d.neighborhood_name || '__none__';
+      if (!groups[key]) { groups[key] = []; order.push(key); }
+      groups[key].push(d);
     });
 
-    for (const [neighborhoodName, nDonors] of Object.entries(grouped)) {
-      // Check if neighborhood header fits
-      if (y - lineHeight * 2 < marginBottom) needNewColumn();
+    for (const nhKey of order) {
+      const nhName = nhKey === '__none__' ? null : nhKey;
+      const nhDonors = groups[nhKey];
 
       // Neighborhood header
-      const nhText = neighborhoodName;
-      currentPage.drawText(nhText, {
-        x: getColX(col),
-        y,
-        size: fontSize + 2,
-        font,
-        color: rgb(0.1, 0.1, 0.5),
-        maxWidth: colWidth
-      });
-      y -= lineHeight * 1.5;
-
-      for (const donor of nDonors) {
-        const lines = (donor.kvitel || '').split('\n').filter(l => l.trim());
-        const blockHeight = lines.length * lineHeight + lineHeight;
-
-        if (y - blockHeight < marginBottom) needNewColumn();
-
-        // Donor name
-        const name = donor.hebrew_full_name || `${donor.first_name} ${donor.last_name}`;
-        currentPage.drawText(name, {
-          x: getColX(col),
-          y,
-          size: fontSize,
-          font,
-          color: rgb(0, 0, 0),
-          maxWidth: colWidth
+      if (showNH && nhName) {
+        needSpace(lineH * 2);
+        curPage.drawText(nhName, {
+          x: colX(col), y, size: bodySize + 2, font: bold,
+          color: rgb(0.1, 0.2, 0.45), maxWidth: colW
         });
-        y -= lineHeight;
-
-        // Kvitel lines
-        for (const line of lines) {
-          if (y - lineHeight < marginBottom) needNewColumn();
-          currentPage.drawText(line, {
-            x: getColX(col),
-            y,
-            size: fontSize - 1,
-            font,
-            color: rgb(0.2, 0.2, 0.2),
-            maxWidth: colWidth
-          });
-          y -= lineHeight;
-        }
-
-        y -= lineHeight * 0.5; // spacing between donors
+        y -= lineH * 1.5;
       }
 
-      y -= lineHeight; // extra gap between neighborhoods
+      for (const donor of nhDonors) {
+        const lines = (donor.kvitel || '').split('\n').filter(l => l.trim());
+        // NOTE: Per requirement #20, we do NOT print donor name — only neighborhood + kvitel lines
+        const blockH = lines.length * lineH + 6;
+        needSpace(blockH);
+
+        // Kvitel content lines (RTL — approximated with PDF; true RTL needs custom font)
+        for (const line of lines) {
+          if (y - lineH < mB) { col++; if (col >= numCols) { newPage(); } else { y = H - mT - headers.reduce((s,h)=>s+(parseFloat(h.size)||16)*1.6,0)-8; } }
+          // Draw text — PDF standard fonts don't do Hebrew; text will show as placeholder
+          // In production, embed a Hebrew font via fontkit for proper rendering
+          curPage.drawText(line.length > 60 ? line.slice(0,60)+'…' : line, {
+            x: colX(col), y, size: bodySize, font,
+            color: rgb(0.15, 0.15, 0.15), maxWidth: colW
+          });
+          y -= lineH;
+        }
+        y -= 6; // gap between donors
+      }
+      y -= lineH * 0.5; // extra gap between neighborhoods
     }
 
-    const pdfBytes = await pdfDoc.save();
+    const bytes = await doc.save();
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'attachment; filename=kvitel.pdf');
-    res.send(Buffer.from(pdfBytes));
-  } catch (e) {
-    console.error('PDF error:', e);
+    res.send(Buffer.from(bytes));
+  } catch(e) {
+    console.error('kvitel PDF:', e.message, e.stack);
     res.status(500).json({ error: e.message });
   }
 });
 
-// Generate DOCX Kvitel
+// ── DOCX ───────────────────────────────────────────────────────────────────────
 router.post('/generate-docx', async (req, res) => {
   try {
-    const settings = get('SELECT * FROM kvitel_settings WHERE org_id = ?', [req.orgId]);
-    const donors = all(`
-      SELECT d.*, n.name_he as neighborhood_name, n.sort_order as neighborhood_order
-      FROM donors d
-      LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
-      WHERE d.org_id = ? AND d.kvitel_enabled = 1
-        AND (d.kvitel IS NOT NULL AND TRIM(d.kvitel) != '')
-      ORDER BY n.sort_order, n.name_he, d.hebrew_full_name, d.last_name
-    `, [req.orgId]);
+    const s = get('SELECT * FROM kvitel_settings WHERE org_id=?', [req.orgId]) || {};
+    const donors = getDonors(req.orgId);
+    if (!donors.length) return res.status(400).json({ error: 'No donors with kvitel content and kvitel enabled' });
 
-    if (!donors.length) return res.status(400).json({ error: 'No donors with kvitel content' });
+    const showNH   = s.group_by_neighborhood !== 0;
+    const bodySize = Math.round((parseFloat(s.font_size) || 12) * 2);  // half-points
+    const fontName = s.font_family || 'Times New Roman';
+    const lineH    = parseFloat(s.line_height) || 1.6;
+    const spacing  = { line: Math.round(lineH * 240), lineRule: 'auto' }; // 240 = single
 
-    const s = settings || {};
-    const fontSize = (s.font_size || 12) * 2; // half-points
+    // Parse headers
+    let headers = [];
+    try { headers = JSON.parse(s.header_text || '[]'); if (!Array.isArray(headers)) headers = []; }
+    catch { headers = s.header_text ? [{ text: s.header_text, size: s.header_size||18, bold:true, align:'center' }] : []; }
+
     const children = [];
 
-    // Header
-    const headerText = s.header_html ? s.header_html.replace(/<[^>]+>/g, '') : 'Kvitel';
-    children.push(new Paragraph({
-      children: [new TextRun({ text: headerText, bold: true, size: 32, color: '000066' })],
-      alignment: AlignmentType.CENTER,
-      spacing: { after: 400 }
-    }));
+    // Render headers
+    for (const h of headers) {
+      const sz  = Math.round((parseFloat(h.size)||16) * 2);
+      const dir = h.dir || s.header_dir || 'rtl';
+      const al  = h.align === 'right' ? AlignmentType.RIGHT
+                : h.align === 'left'  ? AlignmentType.LEFT
+                : AlignmentType.CENTER;
+      children.push(new Paragraph({
+        children: [new TextRun({ text: h.text || '', size: sz, bold: h.bold !== false, font: h.font || fontName })],
+        alignment: al,
+        bidirectional: dir === 'rtl',
+        spacing: { after: 200 }
+      }));
+    }
 
     // Group by neighborhood
-    const grouped = {};
+    const groups = {}, order = [];
     donors.forEach(d => {
-      const key = d.neighborhood_name || 'ללא שכונה';
-      if (!grouped[key]) grouped[key] = [];
-      grouped[key].push(d);
+      const key = d.neighborhood_name || '__none__';
+      if (!groups[key]) { groups[key] = []; order.push(key); }
+      groups[key].push(d);
     });
 
-    for (const [nhName, nDonors] of Object.entries(grouped)) {
+    for (const nhKey of order) {
+      const nhName   = nhKey === '__none__' ? null : nhKey;
+      const nhDonors = groups[nhKey];
+
       // Neighborhood heading
-      children.push(new Paragraph({
-        children: [new TextRun({ text: nhName, bold: true, size: fontSize + 4, color: '1a1a80' })],
-        alignment: AlignmentType.RIGHT,
-        bidirectional: true,
-        spacing: { before: 200, after: 100 }
-      }));
-
-      for (const donor of nDonors) {
-        const name = donor.hebrew_full_name || `${donor.first_name} ${donor.last_name}`;
-        // Donor name line
+      if (showNH && nhName) {
         children.push(new Paragraph({
-          children: [new TextRun({ text: name, bold: true, size: fontSize })],
+          children: [new TextRun({ text: nhName, bold: true, size: bodySize + 4, font: fontName, color: '1a3a6b' })],
           alignment: AlignmentType.RIGHT,
-          bidirectional: true
+          bidirectional: true,
+          spacing: { before: 200, after: 80 }
         }));
+      }
 
-        // Kvitel lines
+      for (const donor of nhDonors) {
+        // Per #20: NO donor name — only kvitel content
         const lines = (donor.kvitel || '').split('\n');
         for (const line of lines) {
           children.push(new Paragraph({
-            children: [new TextRun({ text: line, size: fontSize - 2 })],
+            children: [new TextRun({ text: line, size: bodySize, font: fontName })],
             alignment: AlignmentType.RIGHT,
-            bidirectional: true
+            bidirectional: true,
+            spacing
           }));
         }
-
         // Blank line between donors
         children.push(new Paragraph({ children: [new TextRun({ text: '' })] }));
       }
@@ -221,30 +222,35 @@ router.post('/generate-docx', async (req, res) => {
     // Page size
     const pageSizes = {
       letter: { width: 12240, height: 15840 },
-      legal: { width: 12240, height: 20160 },
-      a4: { width: 11906, height: 16838 }
+      legal:  { width: 12240, height: 20160 },
+      a4:     { width: 11906, height: 16838 }
     };
     const ps = pageSizes[s.page_size || 'letter'];
-    const marginTwips = (s.margin_top || 1) * 1440;
+    const marginTwips = m => Math.round((parseFloat(m)||1) * 1440);
 
-    const doc = new Document({
+    const docx = new Document({
       sections: [{
         properties: {
           page: {
-            size: { width: ps.width, height: ps.height },
-            margin: { top: marginTwips, bottom: marginTwips, left: marginTwips, right: marginTwips }
+            size: ps,
+            margin: {
+              top:    marginTwips(s.margin_top),
+              bottom: marginTwips(s.margin_bottom),
+              left:   marginTwips(s.margin_left),
+              right:  marginTwips(s.margin_right)
+            }
           }
         },
         children
       }]
     });
 
-    const buf = await Packer.toBuffer(doc);
+    const buf = await Packer.toBuffer(docx);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', 'attachment; filename=kvitel.docx');
     res.send(buf);
-  } catch (e) {
-    console.error('DOCX error:', e);
+  } catch(e) {
+    console.error('kvitel DOCX:', e.message, e.stack);
     res.status(500).json({ error: e.message });
   }
 });

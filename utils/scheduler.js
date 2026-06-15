@@ -30,10 +30,20 @@ async function sendReceiptEmail(donor, donation, org) {
     if (!transporter) return;
 
     const template = settings.receipt_template || `
-      <p>Dear {title} {first_name} {last_name},</p>
-      <p>Thank you for your generous donation of <strong>{amount}</strong> on {date}.</p>
-      <p>Transaction ID: {transaction_id}</p>
-      <p>May your donation be a blessing.</p>
+      <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto">
+        <p>Dear {title} {first_name} {last_name},</p>
+        <p>Thank you for your generous donation of <strong>{amount}</strong> on {date}.</p>
+        <table style="width:100%;border-collapse:collapse;margin:12px 0">
+          <tr><td style="padding:6px 0;color:#666">Amount:</td><td style="padding:6px 0;font-weight:bold">{amount}</td></tr>
+          <tr><td style="padding:6px 0;color:#666">Date:</td><td style="padding:6px 0">{date}</td></tr>
+          <tr><td style="padding:6px 0;color:#666">Method:</td><td style="padding:6px 0">{method}</td></tr>
+          <tr><td style="padding:6px 0;color:#666">Transaction ID:</td><td style="padding:6px 0">{transaction_id}</td></tr>
+        </table>
+        <p style="font-size:12px;color:#888;border-top:1px solid #eee;padding-top:10px">
+          Tax ID: 11-6076986 &nbsp;|&nbsp; {org_name}<br>
+          No goods or services were provided in exchange for this donation.
+        </p>
+      </div>
     `;
 
     const pm = donation.payment_method_id ? get('SELECT * FROM payment_methods WHERE id = ?', [donation.payment_method_id]) : null;

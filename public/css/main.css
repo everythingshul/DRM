@@ -246,7 +246,10 @@ th.sa::after{content:' ▲';font-size:9px}th.sd::after{content:' ▼';font-size:
   display:flex;align-items:flex-start;justify-content:center;padding:32px 14px;overflow-y:auto}
 .modal-box{background:var(--white);border-radius:12px;width:100%;max-width:660px;
   box-shadow:var(--shadow-md);margin:auto}
-.modal-box.lg{max-width:920px}.modal-box.sm{max-width:440px}
+.modal-box.lg{max-width:920px}.modal-box.sm{max-width:440px}.modal-box.tall{min-height:80vh}
+/* Logo — transparent PNG, no filter needed */
+.auth-logo{height:72px;object-fit:contain;margin-bottom:18px;display:block;margin-left:auto;margin-right:auto}
+#sb-logo-img{width:36px;height:36px;object-fit:contain;flex-shrink:0;border-radius:4px}
 .modal-hdr{display:flex;align-items:center;justify-content:space-between;
   padding:16px 20px 12px;border-bottom:1px solid var(--gray-1)}
 .modal-hdr h2{font-size:16px;font-weight:700;color:var(--navy)}
@@ -329,3 +332,8 @@ th.sa::after{content:' ▲';font-size:9px}th.sd::after{content:' ▼';font-size:
   .stat-grid{grid-template-columns:1fr}
   .auth-card{padding:28px 18px}
 }
+
+/* Donor detail modal - no scroll on header tabs */
+.modal-box.tall .modal-hdr { position:sticky;top:0;background:var(--white);z-index:10;border-radius:10px 10px 0 0 }
+.modal-box.tall { overflow-y:auto;max-height:92vh }
+.modal-box.tall #modal-body { padding:0 }

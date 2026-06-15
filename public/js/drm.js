@@ -103,7 +103,7 @@ const Modal = {
     $('modal-title').textContent = title;
     $('modal-body').innerHTML = html;
     const box = $('modal-box');
-    box.className = 'modal-box' + (opts.lg ? ' lg' : '') + (opts.sm ? ' sm' : '');
+    box.className = 'modal-box' + (opts.lg ? ' lg' : '') + (opts.sm ? ' sm' : '') + (opts.tall ? ' tall' : '');
     $('modal-overlay').style.display = 'flex';
     if (opts.cb) setTimeout(opts.cb, 0);
   },
@@ -327,7 +327,10 @@ function showApp() {
       <button class="btn btn-primary btn-sm" onclick="createOrg()">Create</button>
       <button class="btn btn-ghost btn-sm" onclick="Modal.close()">Cancel</button>
     </div>`, { sm: true });
-  navigateTo('dashboard');
+  // Navigate to hash if present, else dashboard
+  const initPage = location.hash.replace('#','') || 'dashboard';
+  const validPages = ['dashboard','donors','donations','verification','failures','bank','emails','kvitel','reports','settings'];
+  navigateTo(validPages.includes(initPage) ? initPage : 'dashboard');
   loadBadges();
   setInterval(loadBadges, 60000);
 }
@@ -342,12 +345,19 @@ async function createOrg() {
 
 function navigateTo(page) {
   _currentPage = page;
+  // Update URL hash so each page has its own link
+  if (location.hash !== '#' + page) history.pushState(null, '', '#' + page);
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  const el = $(`page-${page}`);
+  const el = $('page-' + page);
   if (el) { el.classList.add('active'); renderPage(page, el); }
 }
+window.addEventListener('popstate', () => {
+  const page = location.hash.replace('#','') || 'dashboard';
+  const valid = ['dashboard','donors','donations','verification','failures','bank','emails','kvitel','reports','settings'];
+  if (valid.includes(page)) navigateTo(page);
+});
 
 function renderPage(page, el) {
   const map = {
@@ -670,7 +680,7 @@ const Donors = {
 const DonorDetail = {
   data: null,
   async open(id) {
-    Modal.open('Loading…', '<div class="spinner"></div>', { lg: true });
+    Modal.open('Loading…', '<div class="spinner"></div>', { lg: true, tall: true });
     try {
       this.data = await API.get(API.o.donor(id));
       this.data.recurring = await API.get(`/api/orgs/${API.orgId}/donors/${id}/recurring`).catch(()=>[]);
@@ -921,33 +931,82 @@ const DonorDetail = {
   manual(did) {
     const now = new Date().toISOString().slice(0,16);
     Modal.open('Manual Donation', `
-      <div class="r2"><div><label>Amount ($) *</label><input type="number" id="md-amt" step="0.01" placeholder="0.00"></div><div><label>Method *</label>
-        <select id="md-meth"><option value="check">Check</option><option value="cash">Cash</option><option value="daf">DAF</option><option value="wire">Wire</option><option value="other">Other</option></select></div></div>
-      <div class="r2"><div><label>Date *</label><input type="datetime-local" id="md-date" value="${now}"></div><div><label>Trans ID</label><input id="md-tx" autocomplete="off"></div></div>
+      <div class="r2">
+        <div><label>Amount ($) *</label><input type="number" id="md-amt" step="0.01" placeholder="0.00"></div>
+        <div><label>Method *</label>
+          <select id="md-meth" onchange="DonorDetail._manualMethodChange()">
+            <option value="check">Check</option><option value="cash">Cash</option>
+            <option value="daf">DAF</option><option value="wire">Wire</option><option value="other">Other</option>
+          </select>
+        </div>
+      </div>
+      <div id="check-num-row"><label>Check Number *</label><input id="md-chknum" placeholder="e.g. 1042" autocomplete="off"></div>
+      <div id="daf-row" style="display:none">
+        <label>DAF Provider</label>
+        <select id="md-dafprov"><option value="Matbia">Matbia</option><option value="OJC">OJC</option><option value="Pledger">Pledger</option><option value="DonorsFund">DonorsFund</option><option value="iMasser">iMasser</option><option value="Other">Other</option></select>
+        <label>DAF Card Number (optional — charges via Sola)</label>
+        <input id="md-dafcard" placeholder="Enter card number to charge via Sola, or leave blank to record manually" autocomplete="off">
+      </div>
+      <div class="r2">
+        <div><label>Date *</label><input type="datetime-local" id="md-date" value="${now}"></div>
+        <div><label>Trans ID (auto-assigned if blank)</label><input id="md-tx" autocomplete="off" placeholder="ES…"></div>
+      </div>
       <label>Notes</label><input id="md-notes" autocomplete="off">
       <div class="bg mt">
         <button class="btn btn-primary" onclick="DonorDetail._saveManual('${did}')">Record</button>
         <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
       </div>`, { sm: true });
   },
+  _manualMethodChange() {
+    const m = val('md-meth');
+    const checkRow = $('check-num-row'), dafRow = $('daf-row');
+    if (checkRow) checkRow.style.display = m==='check' ? '' : 'none';
+    if (dafRow)   dafRow.style.display   = m==='daf'   ? '' : 'none';
+  },
   async _saveManual(did) {
     const amt = parseFloat(val('md-amt')); if (!amt||amt<=0) { toast('Amount required','err'); return; }
-    try { await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations`, {amount:amt,method:val('md-meth'),donation_date:val('md-date')||new Date().toISOString(),transaction_id:val('md-tx')||null,notes:val('md-notes')||null,status:'completed'}); toast('Recorded'); Modal.close(); this.open(did); }
-    catch(e) { toast(e.message,'err'); }
+    const method = val('md-meth');
+    // DAF with card number — charge via Sola
+    if (method === 'daf' && val('md-dafcard').trim()) {
+      try {
+        const r = await API.post(`/api/orgs/${API.orgId}/payments/daf-grant`, {
+          donor_id: did, daf_card_num: val('md-dafcard'), daf_provider: val('md-dafprov'),
+          amount: amt, notes: val('md-notes')
+        });
+        toast(`DAF grant submitted · Trans: ${r.transaction_id}`); Modal.close(); this.open(did);
+      } catch(e) { toast(e.message, 'err'); }
+      return;
+    }
+    try {
+      await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations`, {
+        amount: amt, method,
+        check_number: method==='check' ? val('md-chknum') : undefined,
+        donation_date: val('md-date') || new Date().toISOString(),
+        transaction_id: val('md-tx') || null,
+        notes: val('md-notes') || null
+      });
+      toast('Recorded'); Modal.close(); this.open(did);
+    } catch(e) { toast(e.message, 'err'); }
   },
 
   addDonNote(did, donId) { Modal.open('Add Note to Donation', `<textarea id="dn-txt" style="min-height:80px;width:100%" placeholder="Note…"></textarea><div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveDonNote('${did}','${donId}')">Add</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, {sm:true}); },
   async _saveDonNote(did, donId) { const txt=val('dn-txt').trim(); if(!txt)return; try{await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations/${donId}/notes`,{text:txt}); toast('Added'); Modal.close(); this.open(did);}catch(e){toast(e.message,'err');} },
 
   refund(did, donId, amt, txId) { Modal.open('Refund', `<p style="margin-bottom:10px;font-size:13px;color:var(--gray-5)">Original: ${fmt$(amt)}</p><label>Refund Amount ($)</label><input type="number" id="rf-amt" step="0.01" max="${amt}" value="${amt}"><label>Reason</label><input id="rf-rsn" autocomplete="off">${txId?`<div class="alert alert-info" style="margin-top:10px;font-size:12px">Sola Ref: ${txId}</div>`:''}<div class="bg mt"><button class="btn btn-red" onclick="DonorDetail._doRefund('${did}','${donId}','${txId}')">Refund</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, {sm:true}); },
-  async _doRefund(did, donId, txId) { const amt=parseFloat(val('rf-amt')); if(!amt||amt<=0){toast('Enter amount','err');return;} try{await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations/${donId}/refund`,{amount:amt,notes:val('rf-rsn'),ref_num:txId||undefined}); toast(`Refund of ${fmt$(amt)} processed`); Modal.close(); this.open(did);}catch(e){toast(e.message,'err');} },
+  async _doRefund(did, donId, txId) {
+    const amt = parseFloat(val('rf-amt')); if (!amt||amt<=0) { toast('Enter amount','err'); return; }
+    try {
+      await API.post(`/api/orgs/${API.orgId}/payments/refund`, {donation_id:donId, donor_id:did, amount:amt, notes:val('rf-rsn')});
+      toast(`Refund of ${fmt$(amt)} processed`); Modal.close(); this.open(did);
+    } catch(e) { toast(e.message,'err'); }
+  },
 
   addRecurring(did) {
     const pms = this.data?.paymentMethods||[];
     if (!pms.length) { toast('Add a payment method first','err'); return; }
     Modal.open('Add Recurring Schedule', `
       <label>Payment Method</label>
-      <select id="rec-pm">${pms.map(p=>`<option value="${p.id}">${fmtMethod(p.type)} ${p.last_four?'••'+p.last_four:''} ${p.label?'('+p.label+')':''}</option>`).join('')}</select>
+      <select id="rec-pm">${pms.map(p=>`<option value="${p.id}">${p.type==='credit_card'?((p.card_brand||'Card')+' ••'+(p.last_four||'??')):fmtMethod(p.type)} ${p.label?'('+p.label+')':''}</option>`).join('')}</select>
       <div class="r2"><div><label>Amount ($) *</label><input type="number" id="rec-amt" step="0.01" placeholder="0.00"></div><div><label>Frequency *</label>
         <select id="rec-freq"><option value="weekly">Weekly</option><option value="biweekly">Bi-Weekly</option><option value="monthly" selected>Monthly</option><option value="quarterly">Quarterly</option><option value="yearly">Yearly</option><option value="once">One-Time</option></select></div></div>
       <div class="r2"><div><label>Start Date *</label><input type="date" id="rec-start" value="${new Date().toISOString().slice(0,10)}"></div><div><label>End Date (optional)</label><input type="date" id="rec-end"></div></div>
@@ -982,13 +1041,30 @@ async function renderDonations(el) {
           </div>
         </div>
         <div class="tw"><table>
-          <thead><tr><th>Date</th><th>Donor</th><th>Amount</th><th>Method</th><th>Trans ID</th><th>Status</th></tr></thead>
+          <thead><tr><th>Date</th><th>Donor</th><th>Amount</th><th>Method</th><th>Trans ID</th><th>Status</th><th></th></tr></thead>
           <tbody id="don-tb">${_donRows(rows)}</tbody>
         </table></div>
       </div>`;
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
-function _donRows(rows) { if(!rows.length)return'<tr><td colspan="6"><div class="empty">No donations</div></td></tr>'; return rows.map(d=>`<tr><td style="font-size:12px">${fmtD(d.donation_date)}</td><td><strong>${d.first_name} ${d.last_name}</strong></td><td style="font-weight:600">${fmt$(d.amount)}</td><td style="font-size:12px">${fmtMethod(d.method)}${d.last_four?` ••${d.last_four}`:''}</td><td style="font-size:11px;color:var(--gray-5)">${d.transaction_id||'—'}</td><td>${sbadge(d.status)}</td></tr>`).join(''); }
+function _donRows(rows) {
+  if (!rows.length) return '<tr><td colspan="8"><div class="empty">No donations</div></td></tr>';
+  return rows.map(d => `<tr>
+    <td style="font-size:12px;white-space:nowrap">${fmtD(d.donation_date)}</td>
+    <td><a href="#" onclick="DonorDetail.open('${d.donor_id}');return false;" style="font-weight:600;color:var(--navy);text-decoration:none">${d.first_name} ${d.last_name}</a></td>
+    <td style="font-weight:600">${fmt$(d.amount)}${d.refund_amount>0?`<br><span style="font-size:11px;color:var(--red)">−${fmt$(d.refund_amount)}</span>`:''}</td>
+    <td style="font-size:12px">${fmtMethod(d.method)}${d.last_four?` ••${d.last_four}`:''}</td>
+    <td style="font-size:11px;color:var(--gray-5);max-width:100px;word-break:break-all">${d.transaction_id||'—'}</td>
+    <td>${sbadge(d.status)}</td>
+    <td><div class="actions">
+      <button class="btn btn-icon" title="Add note" onclick="_addDonationNote('${d.donor_id}','${d.id}')">&#9997;</button>
+      <a class="btn btn-ghost btn-sm" href="/api/orgs/${API.orgId}/payments/receipt/${d.id}" download="receipt-${d.transaction_id||d.id}.pdf" title="Download receipt">&#8681; Receipt</a>
+      ${(d.status==='completed'||d.status==='partial_refund')?`<button class="btn btn-icon" title="Refund" onclick="_refundFromList('${d.donor_id}','${d.id}','${d.amount}','${d.transaction_id||''}')">&#8617;</button>`:''}
+    </div></td>
+  </tr>`).join('');
+}
+function _addDonationNote(did, donId) { Modal.open('Add Note', `<textarea id="dn-txt" style="min-height:80px;width:100%" placeholder="Note…"></textarea><div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveDonNote('${did}','${donId}')">Add</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true}); }
+function _refundFromList(did, donId, amt, txId) { DonorDetail.refund(did, donId, amt, txId); }
 function _filterDon() { const s=val('don-s').toLowerCase(),m=val('don-meth'),st=val('don-stat'); const f=(window._donAll||[]).filter(d=>(!s||`${d.first_name} ${d.last_name} ${d.transaction_id||''}`.toLowerCase().includes(s))&&(!m||d.method===m)&&(!st||d.status===st)); const tb=$('don-tb'); if(tb)tb.innerHTML=_donRows(f); }
 
 async function renderVerification(el) {
@@ -1115,7 +1191,32 @@ async function renderEmails(el) {
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
 async function _saveEmailCfg(){try{const d={smtp_email:val('em-email'),smtp_host:val('em-host'),smtp_port:parseInt(val('em-port')),from_name:val('em-name'),donation_emails_paused:$('em-pause')?.checked?1:0};if(val('em-pass'))d.smtp_password=val('em-pass');await API.put(API.o.email(),d);toast('Saved');}catch(e){toast(e.message,'err');}}
-function _testEmail(){Modal.open('Test Email',`<label>Send to</label><input id="te-to" type="email"><div class="bg mt"><button class="btn btn-primary" onclick="API.post('/api/orgs/${API.orgId}/email-settings/test',{to:val('te-to')}).then(()=>{toast('Sent');Modal.close()}).catch(e=>toast(e.message,'err'))">Send</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+function _testEmail(){Modal.open('Send Test Email',`
+  <p style="font-size:13px;color:var(--gray-5);margin-bottom:10px">Sends a test receipt email with placeholder data. Tax ID 11-6076986 will be included.</p>
+  <label>Send to</label><input id="te-to" type="email" placeholder="your@email.com">
+  <div class="bg mt">
+    <button class="btn btn-primary" onclick="API.post('/api/orgs/${API.orgId}/email-settings/test',{to:val('te-to')}).then(()=>{toast('Sent ✓');Modal.close()}).catch(e=>toast(e.message,'err'))">Send Test</button>
+    <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+  </div>`,{sm:true});}
+function _editSchedEmail(id, subject, scheduledFor) {
+  Modal.open('Edit Scheduled Email', `
+    <label>Subject</label><input id="ese-subj" value="${subject}">
+    <label>Body (HTML)</label><textarea id="ese-body" style="min-height:140px;font-size:12px"></textarea>
+    <label>Send At</label><input type="datetime-local" id="ese-at" value="${toLocalDT(scheduledFor)}">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="API.put(API.o.schedEmails()+'/'+id,{subject:val('ese-subj'),html_body:val('ese-body'),scheduled_for:val('ese-at')}).then(()=>{toast('Updated');Modal.close();renderEmails($('page-emails'))}).catch(e=>toast(e.message,'err'))">Save</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+function _testSchedEmail(id) {
+  Modal.open('Test Send', `
+    <p style="font-size:13px;color:var(--gray-5);margin-bottom:10px">Send this email now as a test.</p>
+    <label>Send to</label><input id="tse-to" type="email" placeholder="your@email.com">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="API.post(API.o.schedEmails()+'/'+id+'/test',{to:val('tse-to')}).then(()=>{toast('Test sent!');Modal.close()}).catch(e=>toast(e.message,'err'))">Send Test</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
 function _schedEmail(){const now=new Date();now.setHours(now.getHours()+1);Modal.open('Schedule Email',`<label>Subject</label><input id="se-subj"><label>Body (HTML)</label><textarea id="se-body" style="min-height:140px;font-size:12px"></textarea><label>Send At</label><input type="datetime-local" id="se-at" value="${toLocalDT(now.toISOString())}"><div class="bg mt"><button class="btn btn-primary" onclick="API.post(API.o.schedEmails(),{subject:val('se-subj'),html_body:val('se-body'),scheduled_for:val('se-at')}).then(()=>{toast('Scheduled');Modal.close();renderEmails($('page-emails'))}).catch(e=>toast(e.message,'err'))">Schedule</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
 
 async function renderKvitel(el) {
@@ -1196,7 +1297,7 @@ async function renderReports(el) {
     </div>
     <div id="rp-out"></div>`;
 }
-async function _runReport(){const p=new URLSearchParams({from:val('rp-from'),to:val('rp-to'),method:val('rp-meth'),status:val('rp-stat')});const out=$('rp-out');out.innerHTML='<div class="spinner"></div>';try{const rows=await API.get(`/api/orgs/${API.orgId}/reports/donations?${p}`);const tot=rows.reduce((s,r)=>s+(r.amount||0),0);out.innerHTML=`<div class="card" style="padding:0;overflow:hidden"><div style="padding:10px 14px;border-bottom:1px solid var(--gray-1)"><strong>${rows.length} donations · Total: ${fmt$(tot)}</strong></div><div class="tw"><table><thead><tr><th>Date</th><th>Donor</th><th>Amount</th><th>Method</th><th>Trans ID</th><th>Status</th></tr></thead><tbody>${rows.map(d=>`<tr><td style="font-size:12px">${fmtD(d.donation_date)}</td><td><strong>${d.first_name} ${d.last_name}</strong></td><td style="font-weight:600">${fmt$(d.amount)}</td><td style="font-size:12px">${fmtMethod(d.method)}</td><td style="font-size:11px;color:var(--gray-5)">${d.transaction_id||'—'}</td><td>${sbadge(d.status)}</td></tr>`).join('')||'<tr><td colspan="6"><div class="empty">No results</div></td></tr>'}</tbody></table></div></div>`;}catch(e){out.innerHTML=`<div class="alert alert-err">${e.message}</div>`;}}
+async function _runReport(){const p=new URLSearchParams({from:val('rp-from'),to:val('rp-to'),method:val('rp-meth'),status:val('rp-stat')});const out=$('rp-out');out.innerHTML='<div class="spinner"></div>';try{const rows=await API.get(`/api/orgs/${API.orgId}/reports/donations?${p}`);const tot=rows.reduce((s,r)=>s+(r.amount||0),0);out.innerHTML=`<div class="card" style="padding:0;overflow:hidden"><div style="padding:10px 14px;border-bottom:1px solid var(--gray-1)"><strong>${rows.length} donations · Total: ${fmt$(tot)}</strong></div><div class="tw"><table><thead><tr><th>Date</th><th>Donor</th><th>Amount</th><th>Method</th><th>Trans ID</th><th>Status</th><th></th></tr></thead><tbody>${rows.map(d=>`<tr><td style="font-size:12px">${fmtD(d.donation_date)}</td><td><strong>${d.first_name} ${d.last_name}</strong></td><td style="font-weight:600">${fmt$(d.amount)}</td><td style="font-size:12px">${fmtMethod(d.method)}</td><td style="font-size:11px;color:var(--gray-5)">${d.transaction_id||'—'}</td><td>${sbadge(d.status)}</td></tr>`).join('')||'<tr><td colspan="8"><div class="empty">No results</div></td></tr>'}</tbody></table></div></div>`;}catch(e){out.innerHTML=`<div class="alert alert-err">${e.message}</div>`;}}
 function _dlReport(){const p=new URLSearchParams({from:val('rp-from'),to:val('rp-to'),method:val('rp-meth'),status:val('rp-stat'),format:'xlsx'});API.dl(`/api/orgs/${API.orgId}/reports/donations?${p}`,'report.xlsx').catch(e=>toast(e.message,'err'));}
 
 async function renderSettings(el) {
