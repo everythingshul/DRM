@@ -1250,52 +1250,580 @@ function _labelTx(id){Modal.open('Label Transaction',`<label>Label</label><input
 async function renderEmails(el) {
   el.innerHTML = '<div class="spinner"></div>';
   try {
-    const [cfg, sched] = await Promise.all([API.get(API.o.email()), API.get(API.o.schedEmails())]);
+    const [cfg, templates] = await Promise.all([
+      API.get(API.o.email()),
+      API.get(`/api/orgs/${API.orgId}/email-templates`)
+    ]);
+
     el.innerHTML = `
-      <div class="ph"><div class="ph-title">Emails</div></div>
-      <div class="tabs"><div class="tab on" data-tc="em-smtp">SMTP</div><div class="tab" data-tc="em-tpl">Template</div><div class="tab" data-tc="em-sched">Scheduled</div></div>
-      <div id="em-smtp" class="tc on"><div class="card">
-        <div class="trow"><div>Pause all donation receipt emails</div><label class="tgl"><input type="checkbox" id="em-pause" ${cfg?.donation_emails_paused?'checked':''}><span class="tgl-s"></span></label></div>
+      <div class="ph">
+        <div><div class="ph-title">Email Designer</div>
+          <div class="ph-sub">Design templates, set a default receipt, schedule campaigns</div>
+        </div>
+        <div class="bg">
+          <button class="btn btn-primary btn-sm" onclick="_emailNewTemplate()">+ New Template</button>
+        </div>
+      </div>
+
+      <div class="tabs">
+        <div class="tab on" data-tc="em-templates">Templates</div>
+        <div class="tab" data-tc="em-smtp">SMTP Settings</div>
+        <div class="tab" data-tc="em-sched">Scheduled Sends</div>
+      </div>
+
+      <div id="em-templates" class="tc on">
+        ${!templates.length ? `
+          <div class="card" style="text-align:center;padding:48px">
+            <div style="font-size:48px;margin-bottom:12px">✉️</div>
+            <h3 style="color:var(--navy);margin-bottom:8px">No email templates yet</h3>
+            <p style="color:var(--gray-5);margin-bottom:20px">Create beautiful HTML emails with drag-and-drop blocks. Set one as your default donation receipt.</p>
+            <button class="btn btn-primary" onclick="_emailNewTemplate()">+ Create First Template</button>
+          </div>` : `
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">
+            ${templates.map(t => `
+              <div class="card" style="cursor:default">
+                <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px">
+                  <div>
+                    <div style="font-weight:700;font-size:14px;color:var(--navy)">${t.name}</div>
+                    ${t.description?`<div style="font-size:12px;color:var(--gray-5);margin-top:2px">${t.description}</div>`:''}
+                  </div>
+                  ${t.is_default_receipt?`<span class="pill pill-green" style="font-size:10px;flex-shrink:0;margin-left:8px">Default Receipt</span>`:''}
+                </div>
+                <div style="font-size:12px;color:var(--gray-5);margin-bottom:12px">
+                  Subject: <em>${t.subject}</em>
+                </div>
+                <div class="bg" style="flex-wrap:wrap">
+                  <button class="btn btn-primary btn-sm" onclick="_emailEdit('${t.id}')">&#9998; Edit</button>
+                  <button class="btn btn-ghost btn-sm" onclick="_emailPreview('${t.id}')">&#128065; Preview</button>
+                  <button class="btn btn-ghost btn-sm" onclick="_emailTestSend('${t.id}')">&#9993; Test</button>
+                  ${!t.is_default_receipt?`<button class="btn btn-ghost btn-sm" onclick="_emailSetDefault('${t.id}')">&#9733; Set Default</button>`:`<button class="btn btn-ghost btn-sm" onclick="_emailClearDefault()">&#9734; Unset</button>`}
+                  <button class="btn btn-icon" style="color:var(--red)" onclick="_emailDelete('${t.id}','${t.name.replace(/'/g,"\\'")}')">&#10005;</button>
+                </div>
+              </div>`).join('')}
+          </div>`}
+      </div>
+
+      <div id="em-smtp" class="tc"><div class="card">
+        <div class="trow"><div>Pause all donation receipt emails</div>
+          <label class="tgl"><input type="checkbox" id="em-pause" ${cfg?.donation_emails_paused?'checked':''}>
+          <span class="tgl-s"></span></label></div>
         <hr class="divider">
-        <div class="r2"><div><label>SMTP Email</label><input id="em-email" value="${cfg?.smtp_email||''}" autocomplete="email"></div><div><label>From Name</label><input id="em-name" value="${cfg?.from_name||''}"></div></div>
-        <div class="r2"><div><label>SMTP Host</label><input id="em-host" value="${cfg?.smtp_host||'smtp.gmail.com'}"></div><div><label>Port</label><input id="em-port" type="number" value="${cfg?.smtp_port||587}"></div></div>
-        <label>App Password <span style="font-size:11px;color:var(--gray-5)">(blank = keep existing)</span></label>
-        <input id="em-pass" type="password" placeholder="Paste app password here">
-        <small style="color:var(--gray-5)">Gmail: Google Account → Security → App Passwords</small>
+        <div class="r2">
+          <div><label>SMTP Email (Gmail address)</label><input id="em-email" type="email" value="${cfg?.smtp_email||''}" autocomplete="email"></div>
+          <div><label>From Name</label><input id="em-name" value="${cfg?.from_name||''}"></div>
+        </div>
+        <div class="r2">
+          <div><label>SMTP Host</label><input id="em-host" value="${cfg?.smtp_host||'smtp.gmail.com'}"></div>
+          <div><label>Port</label><input id="em-port" type="number" value="${cfg?.smtp_port||587}"></div>
+        </div>
+        <label>App Password <span style="font-size:11px;color:var(--gray-5)">(leave blank to keep existing)</span></label>
+        <input id="em-pass" type="password" placeholder="Gmail App Password">
+        <small style="color:var(--gray-5);font-size:11px">Gmail → Google Account → Security → 2-Step Verification → App Passwords</small>
         <div class="bg mt">
-          <button class="btn btn-primary" onclick="_saveEmailCfg()">Save</button>
-          <button class="btn btn-ghost btn-sm" onclick="_testEmail()">Send Test</button>
+          <button class="btn btn-primary" onclick="_saveEmailSettings()">Save</button>
+          <button class="btn btn-ghost btn-sm" onclick="_testEmail()">Send Test Email</button>
         </div>
       </div></div>
-      <div id="em-tpl" class="tc"><div class="card">
-        <p style="color:var(--gray-5);font-size:12px;margin-bottom:10px">Variables: {first_name} {last_name} {title} {amount} {date} {transaction_id} {method} {org_name}</p>
-        <label>Donation Receipt Template (HTML)</label>
-        <textarea id="em-tpl-txt" style="min-height:240px;font-size:12px;font-family:monospace">${cfg?.receipt_template||''}</textarea>
-        <div class="bg mt"><button class="btn btn-primary" onclick="API.put(API.o.email(),{receipt_template:val('em-tpl-txt')}).then(()=>toast('Saved')).catch(e=>toast(e.message||'Unknown error','err'))">Save Template</button></div>
-      </div></div>
-      <div id="em-sched" class="tc"><div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-          <strong>Scheduled Emails</strong>
-          <button class="btn btn-primary btn-sm" onclick="_schedEmail()">+ Schedule</button>
-        </div>
+
+      <div id="em-sched" class="tc">
+        <div id="em-sched-list"><div class="spinner"></div></div>
+      </div>`;
+
+    tabsInit('#page-emails');
+
+    // Load scheduled emails on tab click
+    document.querySelector('#page-emails .tab[data-tc="em-sched"]').addEventListener('click', _loadSchedEmails);
+  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message||'Error'}</div>`; }
+}
+
+async function _loadSchedEmails() {
+  const c = $('em-sched-list'); if(!c) return;
+  c.innerHTML = '<div class="spinner"></div>';
+  try {
+    const sched = await API.get(API.o.schedEmails());
+    c.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <strong>Scheduled Emails</strong>
+        <button class="btn btn-primary btn-sm" onclick="_schedEmail()">+ Schedule</button>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden">
         <div class="tw"><table>
-          <thead><tr><th>Subject</th><th>Scheduled</th><th>Status</th><th></th></tr></thead>
-          <tbody>${sched.map(e=>`<tr>
+          <thead><tr><th>Subject</th><th>Scheduled For</th><th>Status</th><th></th></tr></thead>
+          <tbody>${sched.length ? sched.map(e=>`<tr>
             <td style="max-width:180px;font-size:13px">${e.subject}</td>
             <td style="font-size:12px;white-space:nowrap">${fmtDT(e.scheduled_for)}</td>
             <td>${sbadge(e.status)}</td>
             <td><div class="actions">
               ${e.status==='pending'?`<button class="btn btn-ghost btn-sm" onclick="_editSchedEmail('${e.id}')">Edit</button>`:''}
               <button class="btn btn-ghost btn-sm" onclick="_testSchedEmail('${e.id}')">Test</button>
-              ${e.status==='pending'?`<button class="btn btn-icon" style="color:var(--red)" onclick="API.del('/api/orgs/${API.orgId}/scheduled-emails/${e.id}').then(()=>{toast('Cancelled');renderEmails($('page-emails'))}).catch(e=>toast(e.message||'Unknown error','err'))">&#10005;</button>`:''}
+              ${e.status==='pending'?`<button class="btn btn-icon" style="color:var(--red)" onclick="API.del('/api/orgs/${API.orgId}/scheduled-emails/${e.id}').then(()=>{toast('Cancelled');_loadSchedEmails()}).catch(e=>toast(e.message||'Error','err'))">&#10005;</button>`:''}
             </div></td>
-          </tr>`).join('')||'<tr><td colspan="4"><div class="empty">No scheduled emails</div></td></tr>'}</tbody>
+          </tr>`).join('') : '<tr><td colspan="4"><div class="empty">No scheduled emails</div></td></tr>'}</tbody>
         </table></div>
-      </div></div>`;
-    tabsInit('#page-emails');
-  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+      </div>`;
+  } catch(e) { c.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
-async function _saveEmailCfg(){try{const d={smtp_email:val('em-email'),smtp_host:val('em-host'),smtp_port:parseInt(val('em-port')),from_name:val('em-name'),donation_emails_paused:$('em-pause')?.checked?1:0};if(val('em-pass'))d.smtp_password=val('em-pass');await API.put(API.o.email(),d);toast('Saved');}catch(e){toast(e.message||'Unknown error','err');}}
+
+// Template list actions
+async function _emailSetDefault(id) {
+  await API.post(`/api/orgs/${API.orgId}/email-templates/${id}/set-default-receipt`, {}).catch(e=>toast(e.message||'Error','err'));
+  toast('Set as default receipt ✓'); renderEmails($('page-emails'));
+}
+async function _emailClearDefault() {
+  await API.post(`/api/orgs/${API.orgId}/email-templates/clear-default-receipt`, {}).catch(e=>toast(e.message||'Error','err'));
+  toast('Default cleared'); renderEmails($('page-emails'));
+}
+async function _emailDelete(id, name) {
+  window.confirm2(`Delete template "${name}"?`, async () => {
+    await API.del(`/api/orgs/${API.orgId}/email-templates/${id}`);
+    toast('Deleted'); renderEmails($('page-emails'));
+  });
+}
+async function _emailTestSend(id) {
+  Modal.open('Send Test Email', `
+    <p style="font-size:13px;color:var(--gray-5);margin-bottom:10px">Send this template with sample data to verify it looks correct.</p>
+    <label>Send to *</label>
+    <input id="et-to" type="email" placeholder="your@email.com">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="API.post('/api/orgs/${API.orgId}/email-templates/${id}/test-send',{to:val('et-to')}).then(()=>{toast('Test sent ✓');Modal.close()}).catch(e=>toast(e.message||'Error','err'))">Send Test</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+async function _emailPreview(id) {
+  const r = await API.post(`/api/orgs/${API.orgId}/email-templates/${id}/preview`, {}).catch(e=>{toast(e.message||'Error','err');return null;});
+  if (!r) return;
+  Modal.open('Preview', `
+    <div style="border:1px solid var(--gray-1);border-radius:6px;overflow:hidden">
+      <iframe srcdoc="${r.html.replace(/"/g,'&quot;')}" style="width:100%;height:520px;border:none"></iframe>
+    </div>
+    <div class="bg mt">
+      <button class="btn btn-ghost" onclick="Modal.close()">Close</button>
+    </div>`, {lg:true});
+}
+
+// ─── EMAIL DESIGNER ────────────────────────────────────────────────────────────
+function _emailNewTemplate() {
+  // Start with the donation receipt template pre-built
+  const defaultBlocks = [
+    { type:'header', text:'Thank you for your donation!', bg:'#1a3a6b', color:'#ffffff', size:26, dir:'ltr', align:'center', padding:'28px 32px' },
+    { type:'text', text:'Dear {{title}} {{first_name}} {{last_name}},', size:15, color:'#333', dir:'ltr', align:'left', padding:'20px 32px 4px' },
+    { type:'text', text:'We are grateful for your generous support. Your contribution makes a real difference.', size:15, color:'#333', dir:'ltr', align:'left', padding:'4px 32px 16px' },
+    { type:'donation_details', title:'Donation Details', headerBg:'#f0f4ff', headerColor:'#1a3a6b', size:14, padding:'0 32px' },
+    { type:'divider', color:'#e5e7eb', padding:'16px 32px' },
+    { type:'tax_footer', text:'Tax ID: 11-6076986 | {{org_name}}<br>No goods or services were provided in exchange for this contribution.', size:12, color:'#6b7280', bg:'#f9fafb', padding:'16px 32px' },
+  ];
+  _emailOpenDesigner(null, 'New Donation Receipt', 'Thank you for your donation — {{org_name}}', defaultBlocks);
+}
+
+async function _emailEdit(id) {
+  const t = await API.get(`/api/orgs/${API.orgId}/email-templates/${id}`).catch(e=>{toast(e.message||'Error','err');return null;});
+  if (!t) return;
+  const blocks = (() => { try { return JSON.parse(t.blocks||'[]'); } catch { return []; } })();
+  _emailOpenDesigner(id, t.name, t.subject, blocks);
+}
+
+function _emailOpenDesigner(id, name, subject, blocks) {
+  // Store state globally
+  window._edId = id;
+  window._edBlocks = JSON.parse(JSON.stringify(blocks)); // deep copy
+  window._edSelected = null;
+
+  Modal.open(id ? 'Edit Template' : 'New Template', '', {lg:true, tall:true, cb: () => {
+    $('modal-body').innerHTML = _edRenderShell(name, subject);
+    _edRenderCanvas();
+    _edRenderProps();
+  }});
+}
+
+function _edRenderShell(name, subject) {
+  return `
+    <div style="display:grid;grid-template-columns:200px 1fr 260px;height:80vh;gap:0;margin:-20px">
+
+      <!-- Left: Block palette -->
+      <div style="background:var(--gray-05);border-right:1px solid var(--gray-1);overflow-y:auto;padding:12px 10px">
+        <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Add Block</div>
+        ${[
+          ['header',         '◼', 'Header'],
+          ['text',           '¶',  'Text'],
+          ['image',          '🖼', 'Image'],
+          ['image_text',     '⊞',  'Image + Text'],
+          ['donation_details','$', 'Donation Info'],
+          ['button',         '▶',  'Button'],
+          ['columns',        '⊟',  'Columns'],
+          ['divider',        '—',  'Divider'],
+          ['spacer',         '↕',  'Spacer'],
+          ['tax_footer',     '©',  'Tax Footer'],
+        ].map(([type,icon,label]) => `
+          <div class="ed-block-pill" onclick="_edAddBlock('${type}')"
+            style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:4px;
+            background:#fff;border:1px solid var(--gray-1);border-radius:6px;cursor:pointer;
+            font-size:13px;transition:all .15s"
+            onmouseover="this.style.background='var(--blue-pale)';this.style.borderColor='var(--blue)'"
+            onmouseout="this.style.background='#fff';this.style.borderColor='var(--gray-1)'">
+            <span style="font-size:16px;width:20px;text-align:center">${icon}</span>
+            <span>${label}</span>
+          </div>`).join('')}
+
+        <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;letter-spacing:.5px;margin:16px 0 8px">Merge Tags</div>
+        ${['{{first_name}}','{{last_name}}','{{title}}','{{hebrew_name}}','{{amount}}','{{date}}','{{transaction_id}}','{{method}}','{{org_name}}'].map(tag =>
+          `<div onclick="navigator.clipboard.writeText('${tag}').then(()=>toast('Copied'))"
+            style="font-size:11px;font-family:monospace;background:#fff;border:1px solid var(--gray-1);
+            border-radius:4px;padding:4px 8px;margin-bottom:3px;cursor:pointer;color:var(--blue)"
+            title="Click to copy">${tag}</div>`
+        ).join('')}
+      </div>
+
+      <!-- Center: Canvas -->
+      <div style="overflow-y:auto;background:#e5e7eb;padding:16px" id="ed-canvas-wrap">
+        <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input id="ed-name" value="${name||''}" placeholder="Template name *"
+            style="flex:1;min-width:140px;font-size:13px;padding:6px 10px;border:1.5px solid var(--gray-3);border-radius:5px">
+          <input id="ed-subject" value="${subject||''}" placeholder="Email subject *"
+            style="flex:2;min-width:200px;font-size:13px;padding:6px 10px;border:1.5px solid var(--gray-3);border-radius:5px">
+          <button class="btn btn-primary btn-sm" onclick="_edSave()">Save</button>
+          <button class="btn btn-ghost btn-sm" onclick="_edPreviewModal()">Preview</button>
+          <button class="btn btn-ghost btn-sm" onclick="Modal.close()">Cancel</button>
+        </div>
+        <div id="ed-canvas" style="background:#fff;max-width:600px;margin:0 auto;
+          box-shadow:0 2px 12px rgba(0,0,0,.15);border-radius:6px;overflow:hidden;min-height:300px">
+          <!-- blocks rendered here -->
+        </div>
+        <p style="text-align:center;font-size:11px;color:#999;margin-top:8px">Click a block to select · Drag to reorder</p>
+      </div>
+
+      <!-- Right: Properties panel -->
+      <div style="background:var(--white);border-left:1px solid var(--gray-1);overflow-y:auto;padding:14px" id="ed-props">
+        <div style="color:var(--gray-5);font-size:13px;text-align:center;margin-top:40px">
+          ← Click a block to edit its properties
+        </div>
+      </div>
+    </div>`;
+}
+
+// Block rendering for canvas (simplified HTML preview)
+function _edBlockHtml(b, idx, selected) {
+  const sel = selected === idx;
+  const ring = sel ? 'outline:2px solid var(--blue);outline-offset:-2px;' : '';
+  const dir  = b.dir || 'ltr';
+  const align= b.align || (dir==='rtl'?'right':'left');
+  const ff   = b.fontFamily || (dir==='rtl'?'Noto Sans Hebrew, Arial':'Arial, sans-serif');
+
+  const controls = `
+    <div class="ed-block-ctrl" style="position:absolute;top:4px;right:4px;display:flex;gap:3px;z-index:10">
+      ${idx > 0 ? `<button onclick="event.stopPropagation();_edMoveBlock(${idx},-1)" title="Move up"
+        style="background:var(--navy);color:#fff;border:none;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:11px">▲</button>`:''}
+      ${idx < window._edBlocks.length-1 ? `<button onclick="event.stopPropagation();_edMoveBlock(${idx},1)" title="Move down"
+        style="background:var(--navy);color:#fff;border:none;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:11px">▼</button>`:''}
+      <button onclick="event.stopPropagation();_edDupBlock(${idx})" title="Duplicate"
+        style="background:var(--blue);color:#fff;border:none;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:11px">⧉</button>
+      <button onclick="event.stopPropagation();_edDelBlock(${idx})" title="Delete"
+        style="background:var(--red);color:#fff;border:none;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:11px">✕</button>
+    </div>`;
+
+  let inner = '';
+  switch(b.type) {
+    case 'header':
+      inner = `<div style="background:${b.bg||'#1a3a6b'};padding:${b.padding||'28px 32px'};direction:${dir};text-align:${align};font-family:${ff}">
+        <div style="font-size:${b.size||26}px;font-weight:${b.bold!==false?'bold':'normal'};color:${b.color||'#fff'}">${b.text||'Header text'}</div>
+      </div>`; break;
+    case 'text':
+      inner = `<div style="padding:${b.padding||'12px 32px'};direction:${dir};text-align:${align};font-family:${ff};font-size:${b.size||15}px;color:${b.color||'#333'};line-height:${b.lineHeight||1.7}">${b.text||'Text block'}</div>`; break;
+    case 'image':
+      inner = `<div style="padding:${b.padding||'0'};text-align:${b.align||'center'}">
+        ${b.url?`<img src="${b.url}" style="max-width:${b.maxWidth||'100%'};height:auto;display:block;${b.align==='center'?'margin:0 auto':''}">`
+        :`<div style="background:#e5e7eb;height:120px;display:flex;align-items:center;justify-content:center;color:#999;font-size:13px">Click to set image URL</div>`}
+      </div>`; break;
+    case 'image_text':
+      inner = `<div style="display:flex;align-items:center;gap:0">
+        ${b.imgSide!=='right'?`<div style="width:${b.imgWidth||'40%'};flex-shrink:0">${b.url?`<img src="${b.url}" style="width:100%;height:auto">` : `<div style="background:#e5e7eb;height:100px;display:flex;align-items:center;justify-content:center;color:#999;font-size:12px">Image</div>`}</div>`:'' }
+        <div style="flex:1;padding:${b.padding||'16px 24px'};direction:${dir};text-align:${align};font-family:${ff};font-size:${b.size||15}px;color:${b.color||'#333'}">${b.text||'Text alongside image'}</div>
+        ${b.imgSide==='right'?`<div style="width:${b.imgWidth||'40%'};flex-shrink:0">${b.url?`<img src="${b.url}" style="width:100%;height:auto">` : `<div style="background:#e5e7eb;height:100px;display:flex;align-items:center;justify-content:center;color:#999;font-size:12px">Image</div>`}</div>`:'' }
+      </div>`; break;
+    case 'donation_details':
+      inner = `<div style="padding:${b.padding||'0 32px'}">
+        <table style="width:100%;border-collapse:collapse;font-size:${b.size||14}px">
+          <tr style="background:${b.headerBg||'#f3f4f6'}"><td colspan="2" style="padding:10px 14px;font-weight:bold;color:${b.headerColor||'#1a3a6b'}">${b.title||'Donation Details'}</td></tr>
+          ${[['Amount','{{amount}}'],['Date','{{date}}'],['Method','{{method}}'],['Trans ID','{{transaction_id}}']].map(([l,v],i)=>`<tr style="background:${i%2?'#f9fafb':'#fff'}"><td style="padding:8px 14px;color:#666;border-bottom:1px solid #eee;width:38%">${l}</td><td style="padding:8px 14px;font-weight:600;border-bottom:1px solid #eee">${v}</td></tr>`).join('')}
+        </table>
+      </div>`; break;
+    case 'button':
+      inner = `<div style="padding:${b.padding||'16px 32px'};text-align:${b.align||'center'}">
+        <span style="display:inline-block;background:${b.bg||'#1a3a6b'};color:${b.color||'#fff'};padding:${b.btnPadding||'12px 28px'};border-radius:${b.radius||6}px;font-size:${b.size||15}px;font-weight:bold;font-family:${ff}">${b.text||'Click Here'}</span>
+      </div>`; break;
+    case 'columns':
+      inner = `<div style="display:flex;padding:${b.padding||'8px 32px'}">
+        ${(b.columns||[{text:'Column 1'},{text:'Column 2'}]).map(c=>`<div style="flex:1;padding:8px;font-size:${c.size||14}px;direction:${c.dir||dir};text-align:${c.align||(c.dir==='rtl'?'right':'left')};color:${c.color||'#333'}">${c.text||'Column text'}</div>`).join('')}
+      </div>`; break;
+    case 'divider':
+      inner = `<div style="padding:${b.padding||'8px 32px'}"><hr style="border:none;border-top:${b.thickness||1}px solid ${b.color||'#e5e7eb'};margin:0"></div>`; break;
+    case 'spacer':
+      inner = `<div style="height:${b.height||24}px;background:repeating-linear-gradient(45deg,#f9fafb,#f9fafb 5px,#f0f0f0 5px,#f0f0f0 10px)"></div>`; break;
+    case 'tax_footer':
+      inner = `<div style="padding:${b.padding||'16px 32px'};background:${b.bg||'#f9fafb'};border-top:1px solid #e5e7eb;direction:${dir};text-align:${align};font-family:${ff};font-size:${b.size||12}px;color:${b.color||'#6b7280'}">${b.text||'Tax ID: 11-6076986 | {{org_name}}<br>No goods or services were provided.'}</div>`; break;
+  }
+
+  return `<div data-idx="${idx}" onclick="_edSelectBlock(${idx})"
+    style="position:relative;cursor:pointer;${ring};border-bottom:1px solid #f0f0f0"
+    title="Click to edit">
+    ${controls}
+    ${inner}
+  </div>`;
+}
+
+function _edRenderCanvas() {
+  const c = $('ed-canvas'); if(!c) return;
+  if (!window._edBlocks.length) {
+    c.innerHTML = `<div style="padding:40px;text-align:center;color:#aaa;font-size:13px">
+      ← Add blocks from the left panel</div>`;
+    return;
+  }
+  c.innerHTML = window._edBlocks.map((b,i) => _edBlockHtml(b, i, window._edSelected)).join('');
+}
+
+function _edSelectBlock(idx) {
+  window._edSelected = idx;
+  _edRenderCanvas();
+  _edRenderProps();
+}
+
+function _edRenderProps() {
+  const c = $('ed-props'); if(!c) return;
+  const idx = window._edSelected;
+  if (idx === null || idx === undefined || !window._edBlocks[idx]) {
+    c.innerHTML = '<div style="color:var(--gray-5);font-size:13px;text-align:center;margin-top:40px">← Click a block to edit</div>';
+    return;
+  }
+  const b = window._edBlocks[idx];
+  const ff = ['Arial, sans-serif','Noto Sans Hebrew, Arial, sans-serif','Frank Ruhl Libre, serif','Heebo, sans-serif','Georgia, serif','Times New Roman, serif'];
+  const ffLabels = ['Arial (Latin)','Noto Sans Hebrew (עברית)','Frank Ruhl Libre (עברית)','Heebo (עברית)','Georgia (Serif)','Times New Roman'];
+
+  const field = (label, key, type='text', extra='') =>
+    `<label style="font-size:12px;font-weight:500;color:var(--gray-7);margin-top:10px;display:block">${label}</label>
+     <input type="${type}" value="${(b[key]||'').toString().replace(/"/g,'&quot;')}" ${extra}
+       oninput="window._edBlocks[${idx}]['${key}']=this.value;_edRenderCanvas()"
+       style="width:100%;padding:5px 8px;border:1.5px solid var(--gray-3);border-radius:4px;font-size:12px">`;
+
+  const select = (label, key, options) =>
+    `<label style="font-size:12px;font-weight:500;color:var(--gray-7);margin-top:10px;display:block">${label}</label>
+     <select oninput="window._edBlocks[${idx}]['${key}']=this.value;_edRenderCanvas()"
+       style="width:100%;padding:5px 8px;border:1.5px solid var(--gray-3);border-radius:4px;font-size:12px">
+       ${options.map(([v,l])=>`<option value="${v}" ${b[key]===v?'selected':''}>${l}</option>`).join('')}
+     </select>`;
+
+  const color = (label, key, def) =>
+    `<label style="font-size:12px;font-weight:500;color:var(--gray-7);margin-top:10px;display:block">${label}</label>
+     <div style="display:flex;gap:6px;align-items:center">
+       <input type="color" value="${b[key]||def}" oninput="window._edBlocks[${idx}]['${key}']=this.value;_edRenderCanvas()"
+         style="width:36px;height:28px;padding:0;border:none;cursor:pointer;border-radius:3px">
+       <input type="text" value="${b[key]||def}" oninput="window._edBlocks[${idx}]['${key}']=this.value;_edRenderCanvas()"
+         style="flex:1;padding:5px 8px;border:1.5px solid var(--gray-3);border-radius:4px;font-size:12px">
+     </div>`;
+
+  const check = (label, key) =>
+    `<label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;font-weight:500;color:var(--gray-7);cursor:pointer">
+       <input type="checkbox" ${b[key]!==false?'checked':''} onchange="window._edBlocks[${idx}]['${key}']=this.checked;_edRenderCanvas()">
+       ${label}
+     </label>`;
+
+  const textarea = (label, key) =>
+    `<label style="font-size:12px;font-weight:500;color:var(--gray-7);margin-top:10px;display:block">${label}</label>
+     <textarea oninput="window._edBlocks[${idx}]['${key}']=this.value;_edRenderCanvas()"
+       style="width:100%;padding:5px 8px;border:1.5px solid var(--gray-3);border-radius:4px;font-size:12px;min-height:70px;resize:vertical">${b[key]||''}</textarea>`;
+
+  const fontSel = (label, key) =>
+    `<label style="font-size:12px;font-weight:500;color:var(--gray-7);margin-top:10px;display:block">${label}</label>
+     <select oninput="window._edBlocks[${idx}]['${key}']=this.value;_edRenderCanvas()"
+       style="width:100%;padding:5px 8px;border:1.5px solid var(--gray-3);border-radius:4px;font-size:12px">
+       ${ff.map((v,i)=>`<option value="${v}" ${(b[key]||ff[0])===v?'selected':''}>${ffLabels[i]}</option>`).join('')}
+     </select>`;
+
+  const dirSel = (label, key='dir') =>
+    select(label, key, [['ltr','LTR (English →)'],['rtl','RTL (← עברית)']]);
+
+  const alignSel = (label, key='align') =>
+    select(label, key, [['left','Left'],['center','Center'],['right','Right']]);
+
+  let props = `<div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:12px;
+    padding-bottom:8px;border-bottom:1px solid var(--gray-1)">
+    ${b.type.replace('_',' ').replace(/\b\w/g,c=>c.toUpperCase())} Block</div>`;
+
+  switch (b.type) {
+    case 'header':
+      props += textarea('Header Text (HTML allowed)', 'text');
+      props += color('Background', 'bg', '#1a3a6b');
+      props += color('Text Color', 'color', '#ffffff');
+      props += field('Font Size (px)', 'size', 'number');
+      props += check('Bold', 'bold');
+      props += dirSel('Direction');
+      props += alignSel('Alignment');
+      props += fontSel('Font Family', 'fontFamily');
+      props += field('Padding', 'padding');
+      break;
+    case 'text':
+      props += textarea('Text (HTML allowed)', 'text');
+      props += color('Text Color', 'color', '#333333');
+      props += field('Font Size (px)', 'size', 'number');
+      props += field('Line Height', 'lineHeight', 'number');
+      props += dirSel('Direction');
+      props += alignSel('Alignment');
+      props += fontSel('Font Family', 'fontFamily');
+      props += field('Padding', 'padding');
+      break;
+    case 'image':
+      props += field('Image URL', 'url');
+      props += field('Alt Text', 'alt');
+      props += field('Max Width (e.g. 100% or 300px)', 'maxWidth');
+      props += alignSel('Alignment');
+      props += field('Padding', 'padding');
+      break;
+    case 'image_text':
+      props += field('Image URL', 'url');
+      props += select('Image Side', 'imgSide', [['left','Left'],['right','Right']]);
+      props += field('Image Width (e.g. 40%)', 'imgWidth');
+      props += textarea('Text (HTML allowed)', 'text');
+      props += color('Text Color', 'color', '#333333');
+      props += field('Font Size (px)', 'size', 'number');
+      props += dirSel('Text Direction');
+      props += fontSel('Font Family', 'fontFamily');
+      props += field('Text Padding', 'padding');
+      break;
+    case 'donation_details':
+      props += field('Section Title', 'title');
+      props += color('Header Background', 'headerBg', '#f3f4f6');
+      props += color('Header Text Color', 'headerColor', '#1a3a6b');
+      props += field('Font Size (px)', 'size', 'number');
+      props += dirSel('Direction');
+      props += field('Padding', 'padding');
+      break;
+    case 'button':
+      props += field('Button Text', 'text');
+      props += field('Link URL', 'url');
+      props += color('Background', 'bg', '#1a3a6b');
+      props += color('Text Color', 'color', '#ffffff');
+      props += field('Font Size (px)', 'size', 'number');
+      props += field('Border Radius (px)', 'radius', 'number');
+      props += field('Button Padding', 'btnPadding');
+      props += alignSel('Alignment');
+      props += fontSel('Font Family', 'fontFamily');
+      break;
+    case 'columns':
+      props += `<p style="font-size:12px;color:var(--gray-5);margin-top:8px">Edit each column's content:</p>`;
+      (b.columns||[]).forEach((col,ci) => {
+        props += `<div style="border:1px solid var(--gray-1);border-radius:5px;padding:8px;margin-top:8px">
+          <div style="font-size:11px;font-weight:700;color:var(--navy);margin-bottom:6px">Column ${ci+1}</div>
+          <label style="font-size:12px">Text (HTML)</label>
+          <textarea oninput="window._edBlocks[${idx}].columns[${ci}].text=this.value;_edRenderCanvas()"
+            style="width:100%;padding:4px;border:1px solid var(--gray-3);border-radius:3px;font-size:12px;min-height:50px">${col.text||''}</textarea>
+          <label style="font-size:12px;display:block;margin-top:4px">Direction</label>
+          <select onchange="window._edBlocks[${idx}].columns[${ci}].dir=this.value;_edRenderCanvas()"
+            style="width:100%;padding:4px;border:1px solid var(--gray-3);border-radius:3px;font-size:12px">
+            <option value="ltr" ${(col.dir||'ltr')==='ltr'?'selected':''}>LTR</option>
+            <option value="rtl" ${col.dir==='rtl'?'selected':''}>RTL</option>
+          </select>
+        </div>`;
+      });
+      props += `<button class="btn btn-ghost btn-sm" style="margin-top:8px;width:100%"
+        onclick="window._edBlocks[${idx}].columns=window._edBlocks[${idx}].columns||[];
+        window._edBlocks[${idx}].columns.push({text:'New column',dir:'ltr'});_edRenderCanvas();_edRenderProps()">
+        + Add Column</button>`;
+      break;
+    case 'divider':
+      props += color('Line Color', 'color', '#e5e7eb');
+      props += field('Thickness (px)', 'thickness', 'number');
+      props += field('Padding', 'padding');
+      break;
+    case 'spacer':
+      props += field('Height (px)', 'height', 'number');
+      break;
+    case 'tax_footer':
+      props += textarea('Footer Text (HTML allowed)', 'text');
+      props += color('Background', 'bg', '#f9fafb');
+      props += color('Text Color', 'color', '#6b7280');
+      props += field('Font Size (px)', 'size', 'number');
+      props += dirSel('Direction');
+      props += fontSel('Font Family', 'fontFamily');
+      props += field('Padding', 'padding');
+      break;
+  }
+
+  c.innerHTML = props;
+}
+
+function _edAddBlock(type) {
+  const defaults = {
+    header:           { type:'header', text:'Your Header Here', bg:'#1a3a6b', color:'#ffffff', size:26, bold:true, dir:'ltr', align:'center', padding:'28px 32px' },
+    text:             { type:'text', text:'Your text here. Use merge tags like {{first_name}}.', size:15, color:'#333333', dir:'ltr', align:'left', lineHeight:1.7, padding:'12px 32px' },
+    image:            { type:'image', url:'', alt:'', maxWidth:'100%', align:'center', padding:'0' },
+    image_text:       { type:'image_text', url:'', text:'Text alongside your image.', imgSide:'left', imgWidth:'40%', size:15, color:'#333', dir:'ltr', padding:'16px 24px' },
+    donation_details: { type:'donation_details', title:'Donation Details', headerBg:'#f0f4ff', headerColor:'#1a3a6b', size:14, padding:'0 32px' },
+    button:           { type:'button', text:'Click Here', url:'#', bg:'#1a3a6b', color:'#ffffff', size:15, radius:6, btnPadding:'12px 28px', align:'center' },
+    columns:          { type:'columns', columns:[{text:'Column 1',dir:'ltr'},{text:'עמודה 2',dir:'rtl'}], padding:'8px 32px' },
+    divider:          { type:'divider', color:'#e5e7eb', thickness:1, padding:'8px 32px' },
+    spacer:           { type:'spacer', height:24 },
+    tax_footer:       { type:'tax_footer', text:'Tax ID: 11-6076986 | {{org_name}}<br>No goods or services were provided in exchange for this contribution.', bg:'#f9fafb', color:'#6b7280', size:12, dir:'ltr', padding:'16px 32px' },
+  };
+  const block = defaults[type] || { type };
+  // Insert after selected, or at end
+  const at = window._edSelected !== null ? window._edSelected + 1 : window._edBlocks.length;
+  window._edBlocks.splice(at, 0, block);
+  window._edSelected = at;
+  _edRenderCanvas();
+  _edRenderProps();
+}
+function _edMoveBlock(idx, dir) {
+  const b = window._edBlocks;
+  const ni = idx + dir;
+  if (ni<0||ni>=b.length) return;
+  [b[idx], b[ni]] = [b[ni], b[idx]];
+  window._edSelected = ni;
+  _edRenderCanvas();
+  _edRenderProps();
+}
+function _edDupBlock(idx) {
+  const copy = JSON.parse(JSON.stringify(window._edBlocks[idx]));
+  window._edBlocks.splice(idx+1,0,copy);
+  window._edSelected = idx+1;
+  _edRenderCanvas();
+  _edRenderProps();
+}
+function _edDelBlock(idx) {
+  window._edBlocks.splice(idx,1);
+  window._edSelected = null;
+  _edRenderCanvas();
+  _edRenderProps();
+}
+async function _edSave() {
+  const name    = document.getElementById('ed-name')?.value?.trim();
+  const subject = document.getElementById('ed-subject')?.value?.trim();
+  if (!name || !subject) { toast('Name and subject required','err'); return; }
+  try {
+    if (window._edId) {
+      await API.put(`/api/orgs/${API.orgId}/email-templates/${window._edId}`, { name, subject, blocks: window._edBlocks });
+      toast('Template saved ✓');
+    } else {
+      const r = await API.post(`/api/orgs/${API.orgId}/email-templates`, { name, subject, blocks: window._edBlocks });
+      window._edId = r.template.id;
+      toast('Template created ✓');
+    }
+    Modal.close();
+    renderEmails($('page-emails'));
+  } catch(e) { toast(e.message||'Save failed','err'); }
+}
+async function _edPreviewModal() {
+  if (!window._edId) { toast('Save first, then preview','err'); return; }
+  const r = await API.post(`/api/orgs/${API.orgId}/email-templates/${window._edId}/preview`, {}).catch(e=>{toast(e.message,'err');return null;});
+  if (!r) return;
+  window.open().document.write(r.html);
+}
+
+// Alias for confirm used elsewhere
+window.confirm2 = (msg, yes) => {
+  Modal.open('Confirm', `<p style="margin-bottom:14px;color:var(--gray-7)">${msg}</p>
+    <div class="bg"><button class="btn btn-red btn-sm" onclick="Modal.close();(${yes.toString()})()">Confirm</button>
+    <button class="btn btn-ghost btn-sm" onclick="Modal.close()">Cancel</button></div>`, {sm:true});
+};
+
+
 function _testEmail(){Modal.open('Send Test Email',`
   <p style="font-size:13px;color:var(--gray-5);margin-bottom:10px">Sends a test receipt email with placeholder data. Tax ID 11-6076986 will be included.</p>
   <label>Send to</label><input id="te-to" type="email" placeholder="your@email.com">

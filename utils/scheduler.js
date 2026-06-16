@@ -17,7 +17,9 @@ function getTransporter(settings) {
 }
 
 function interpolateTemplate(template, vars) {
-  return template.replace(/\{(\w+)\}/g, (_, key) => vars[key] || '');
+  return template
+    .replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] || '')  // {{var}} format
+    .replace(/\{(\w+)\}/g,     (_, key) => vars[key] || ''); // {var} legacy format
 }
 
 async function sendReceiptEmail(donor, donation, org) {
@@ -29,42 +31,53 @@ async function sendReceiptEmail(donor, donation, org) {
     const transporter = getTransporter(settings);
     if (!transporter) return;
 
-    const template = settings.receipt_template || `
-      <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto">
-        <p>Dear {title} {first_name} {last_name},</p>
-        <p>Thank you for your generous donation of <strong>{amount}</strong> on {date}.</p>
-        <table style="width:100%;border-collapse:collapse;margin:12px 0">
-          <tr><td style="padding:6px 0;color:#666">Amount:</td><td style="padding:6px 0;font-weight:bold">{amount}</td></tr>
-          <tr><td style="padding:6px 0;color:#666">Date:</td><td style="padding:6px 0">{date}</td></tr>
-          <tr><td style="padding:6px 0;color:#666">Method:</td><td style="padding:6px 0">{method}</td></tr>
-          <tr><td style="padding:6px 0;color:#666">Transaction ID:</td><td style="padding:6px 0">{transaction_id}</td></tr>
-        </table>
-        <p style="font-size:12px;color:#888;border-top:1px solid #eee;padding-top:10px">
-          Tax ID: 11-6076986 &nbsp;|&nbsp; {org_name}<br>
-          No goods or services were provided in exchange for this donation.
-        </p>
-      </div>
-    `;
-
+    // Use default receipt template from designer if set, else fall back to plain
+    const defaultTpl = get('SELECT * FROM email_templates WHERE org_id=? AND is_default_receipt=1', [org.id]);
     const pm = donation.payment_method_id ? get('SELECT * FROM payment_methods WHERE id = ?', [donation.payment_method_id]) : null;
-    const html = interpolateTemplate(template, {
-      title: donor.title || '',
-      first_name: donor.first_name,
-      last_name: donor.last_name,
-      hebrew_name: donor.hebrew_full_name || '',
-      amount: `$${parseFloat(donation.amount).toFixed(2)}`,
-      date: new Date(donation.donation_date).toLocaleDateString(),
+
+    const vars = {
+      title:          donor.title || '',
+      first_name:     donor.first_name,
+      last_name:      donor.last_name,
+      hebrew_name:    donor.hebrew_full_name || '',
+      amount:         `$${parseFloat(donation.amount).toFixed(2)}`,
+      date:           new Date(donation.donation_date).toLocaleDateString(),
       transaction_id: donation.transaction_id || 'N/A',
-      method: donation.method,
-      last_four: pm?.last_four || '',
-      org_name: org.name
-    });
+      method:         (donation.method||'').replace('_',' ').replace(/\b\w/g,c=>c.toUpperCase()),
+      last_four:      pm?.last_four || '',
+      org_name:       org.name
+    };
+
+    let html, subject;
+    if (defaultTpl) {
+      const { renderBlocks } = require('./routes/email-templates');
+      const blocks = (() => { try { return JSON.parse(defaultTpl.blocks||'[]'); } catch { return []; } })();
+      html    = renderBlocks(blocks, vars);
+      subject = defaultTpl.subject.replace(/\{\{(\w+)\}\}/g, (_,k)=>vars[k]||'');
+    } else {
+      subject = `Donation Receipt - ${org.name}`;
+      html = interpolateTemplate(settings.receipt_template || `
+        <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto">
+          <p>Dear {{title}} {{first_name}} {{last_name}},</p>
+          <p>Thank you for your generous donation of <strong>{{amount}}</strong> on {{date}}.</p>
+          <table style="width:100%;border-collapse:collapse;margin:12px 0">
+            <tr><td style="padding:6px 0;color:#666">Amount:</td><td style="padding:6px 0;font-weight:bold">{{amount}}</td></tr>
+            <tr><td style="padding:6px 0;color:#666">Date:</td><td style="padding:6px 0">{{date}}</td></tr>
+            <tr><td style="padding:6px 0;color:#666">Method:</td><td style="padding:6px 0">{{method}}</td></tr>
+            <tr><td style="padding:6px 0;color:#666">Transaction ID:</td><td style="padding:6px 0">{{transaction_id}}</td></tr>
+          </table>
+          <p style="font-size:12px;color:#888;border-top:1px solid #eee;padding-top:10px">
+            Tax ID: 11-6076986 &nbsp;|&nbsp; {{org_name}}<br>
+            No goods or services were provided in exchange for this donation.
+          </p>
+        </div>`, vars);
+    }
 
     if (donor.email) {
       await transporter.sendMail({
         from: `"${settings.from_name || org.name}" <${settings.smtp_email}>`,
         to: donor.email,
-        subject: `Donation Receipt - ${org.name}`,
+        subject,
         html
       });
       run('UPDATE donations SET receipt_sent = 1 WHERE id = ?', [donation.id]);
