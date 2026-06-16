@@ -155,11 +155,12 @@ router.get('/stats', (req, res) => {
     SELECT COUNT(*) as n FROM donors WHERE org_id = ?
     AND (info_verified_at IS NULL OR julianday('now') - julianday(info_verified_at) > 180)
   `, [req.orgId])?.n || 0;
+  const totalExpenses = get(`SELECT COALESCE(SUM(amount),0) as n FROM expenses WHERE org_id=?`, [req.orgId])?.n || 0;
 
   res.json({
     totalDonors, activeDonors, totalAmount, totalDonations, avgDonation,
     byMonth, byMethod, byNeighborhood, topDonors, autopayStats,
-    failedCharges, needsVerification
+    failedCharges, needsVerification, totalExpenses
   });
 });
 
@@ -372,6 +373,192 @@ router.put('/kvitel-settings', (req, res) => {
   res.json({ success: true, settings: get('SELECT * FROM kvitel_settings WHERE org_id = ?', [req.orgId]) });
 });
 
+// ── Full dashboard export — all data in one XLSX, multiple tabs ───────────────
+router.get('/reports/full-export', (req, res) => {
+  try {
+    const org = get('SELECT * FROM organizations WHERE id=?', [req.orgId]);
+    const orgName = (org?.name || 'DRM').replace(/[^a-zA-Z0-9 ]/g, '').trim();
+    const now = new Date();
+    const dateStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+
+    const wb = XLSX.utils.book_new();
+
+    // ── Tab 1: Summary ────────────────────────────────────────────────────────
+    const totalDonations  = get(`SELECT COALESCE(SUM(amount),0) as n FROM donations WHERE org_id=? AND status='completed'`, [req.orgId])?.n || 0;
+    const totalDonors     = get(`SELECT COUNT(*) as n FROM donors WHERE org_id=?`, [req.orgId])?.n || 0;
+    const totalExpenses   = get(`SELECT COALESCE(SUM(amount),0) as n FROM expenses WHERE org_id=?`, [req.orgId])?.n || 0;
+    const totalRecurring  = get(`SELECT COUNT(*) as n FROM recurring_schedules WHERE org_id=? AND status='active'`, [req.orgId])?.n || 0;
+    const totalFailed     = get(`SELECT COUNT(*) as n FROM charge_failures WHERE org_id=? AND acknowledged=0`, [req.orgId])?.n || 0;
+    const byMethod = all(`SELECT method, COALESCE(SUM(amount),0) as total, COUNT(*) as count FROM donations WHERE org_id=? AND status='completed' GROUP BY method`, [req.orgId]);
+
+    const summaryRows = [
+      { Metric: 'Organization',           Value: org?.name || '' },
+      { Metric: 'Export Date',            Value: dateStr },
+      { Metric: '',                        Value: '' },
+      { Metric: 'Total Donors',           Value: totalDonors },
+      { Metric: 'Total Donations Raised', Value: `$${parseFloat(totalDonations).toFixed(2)}` },
+      { Metric: 'Total Expenses',         Value: `$${parseFloat(totalExpenses).toFixed(2)}` },
+      { Metric: 'Net (Donations – Expenses)', Value: `$${(parseFloat(totalDonations) - parseFloat(totalExpenses)).toFixed(2)}` },
+      { Metric: 'Active Recurring Schedules', Value: totalRecurring },
+      { Metric: 'Unacknowledged Charge Failures', Value: totalFailed },
+      { Metric: '',                        Value: '' },
+      { Metric: 'Donations by Method',    Value: '' },
+      ...byMethod.map(r => ({ Metric: `  ${r.method.replace('_',' ').replace(/\b\w/g,c=>c.toUpperCase())}`, Value: `$${parseFloat(r.total).toFixed(2)} (${r.count} gifts)` })),
+    ];
+    const wsSummary = XLSX.utils.json_to_sheet(summaryRows, { skipHeader: false });
+    wsSummary['!cols'] = [{ wch: 32 }, { wch: 28 }];
+    XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
+
+    // ── Tab 2: Donors ─────────────────────────────────────────────────────────
+    const donors = all(`
+      SELECT d.title, d.first_name, d.last_name, d.hebrew_title, d.hebrew_full_name,
+             d.cell, d.home_phone, d.email,
+             n.name_he as neighborhood,
+             d.street, d.apt, d.city, d.state, d.zip,
+             d.labels, d.autopay_enabled, d.autopay_paused,
+             COALESCE(SUM(don.amount),0) as total_donated,
+             COUNT(don.id) as donation_count,
+             MAX(don.donation_date) as last_donation,
+             d.created_at
+      FROM donors d
+      LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
+      LEFT JOIN donations don ON don.donor_id = d.id AND don.status='completed'
+      WHERE d.org_id=?
+      GROUP BY d.id
+      ORDER BY d.last_name, d.first_name
+    `, [req.orgId]);
+    const wsDonors = XLSX.utils.json_to_sheet(donors.map(d => ({
+      'Title':           d.title || '',
+      'First Name':      d.first_name,
+      'Last Name':       d.last_name,
+      'Hebrew Title':    d.hebrew_title || '',
+      'Hebrew Name':     d.hebrew_full_name || '',
+      'Cell':            d.cell || '',
+      'Home Phone':      d.home_phone || '',
+      'Email':           d.email || '',
+      'Neighborhood':    d.neighborhood || '',
+      'Street':          d.street || '',
+      'Apt':             d.apt || '',
+      'City':            d.city || '',
+      'State':           d.state || '',
+      'ZIP':             d.zip || '',
+      'Labels':          (() => { try { return JSON.parse(d.labels||'[]').join(', '); } catch { return ''; } })(),
+      'AutoPay':         d.autopay_enabled ? (d.autopay_paused ? 'Paused' : 'Active') : 'Off',
+      'Total Donated':   parseFloat(d.total_donated || 0).toFixed(2),
+      'Gifts':           d.donation_count || 0,
+      'Last Donation':   d.last_donation ? d.last_donation.slice(0,10) : '',
+      'Donor Since':     d.created_at ? d.created_at.slice(0,10) : '',
+    })));
+    wsDonors['!cols'] = [6,10,10,10,16,12,12,22,14,18,5,12,5,8,14,8,12,6,12,12].map(w=>({wch:w}));
+    XLSX.utils.book_append_sheet(wb, wsDonors, 'Donors');
+
+    // ── Tab 3: Donations ──────────────────────────────────────────────────────
+    const donations = all(`
+      SELECT don.donation_date, d.first_name, d.last_name,
+             don.amount, don.method, don.transaction_id, don.status,
+             don.refund_amount, don.refund_notes, don.notes,
+             pm.card_brand, pm.last_four
+      FROM donations don
+      LEFT JOIN donors d ON don.donor_id = d.id
+      LEFT JOIN payment_methods pm ON don.payment_method_id = pm.id
+      WHERE don.org_id=?
+      ORDER BY don.donation_date DESC
+    `, [req.orgId]);
+    const wsDonations = XLSX.utils.json_to_sheet(donations.map(d => ({
+      'Date':            d.donation_date ? d.donation_date.slice(0,10) : '',
+      'Donor':           d.first_name ? `${d.first_name} ${d.last_name}` : '(Unlinked)',
+      'Amount':          parseFloat(d.amount || 0).toFixed(2),
+      'Method':          (d.method||'').replace('_',' ').replace(/\b\w/g,c=>c.toUpperCase()),
+      'Card':            d.card_brand ? `${d.card_brand} ••${d.last_four||''}` : '',
+      'Transaction ID':  d.transaction_id || '',
+      'Status':          d.status || '',
+      'Refunded':        d.refund_amount > 0 ? parseFloat(d.refund_amount).toFixed(2) : '',
+      'Refund Notes':    d.refund_notes || '',
+      'Notes':           d.notes || '',
+    })));
+    wsDonations['!cols'] = [12,20,10,12,14,18,12,10,20,24].map(w=>({wch:w}));
+    XLSX.utils.book_append_sheet(wb, wsDonations, 'Donations');
+
+    // ── Tab 4: Expenses ───────────────────────────────────────────────────────
+    const expenses = all(`
+      SELECT e.expense_date, e.category, e.description, e.amount, e.created_at
+      FROM expenses e
+      WHERE e.org_id=?
+      ORDER BY e.expense_date DESC
+    `, [req.orgId]);
+    const wsExpenses = XLSX.utils.json_to_sheet(expenses.length ? expenses.map(e => ({
+      'Date':        e.expense_date || '',
+      'Category':    e.category || '',
+      'Description': e.description || '',
+      'Amount':      parseFloat(e.amount || 0).toFixed(2),
+      'Recorded':    e.created_at ? e.created_at.slice(0,10) : '',
+    })) : [{ 'Date':'', 'Category':'', 'Description':'No expenses recorded', 'Amount':'', 'Recorded':'' }]);
+    wsExpenses['!cols'] = [12,14,28,10,12].map(w=>({wch:w}));
+    XLSX.utils.book_append_sheet(wb, wsExpenses, 'Expenses');
+
+    // ── Tab 5: Recurring Schedules ────────────────────────────────────────────
+    const recurring = all(`
+      SELECT rs.*, d.first_name, d.last_name,
+             pm.type as pm_type, pm.card_brand, pm.last_four, pm.daf_name
+      FROM recurring_schedules rs
+      JOIN donors d ON rs.donor_id = d.id
+      LEFT JOIN payment_methods pm ON rs.payment_method_id = pm.id
+      WHERE rs.org_id=?
+      ORDER BY d.last_name, d.first_name
+    `, [req.orgId]);
+    const wsRecurring = XLSX.utils.json_to_sheet(recurring.length ? recurring.map(r => ({
+      'Donor':         `${r.first_name} ${r.last_name}`,
+      'Amount':        parseFloat(r.amount || 0).toFixed(2),
+      'Frequency':     r.frequency ? r.frequency.charAt(0).toUpperCase()+r.frequency.slice(1) : '',
+      'Status':        r.status ? r.status.charAt(0).toUpperCase()+r.status.slice(1) : '',
+      'Next Run':      r.next_run ? r.next_run.slice(0,10) : '',
+      'Payment':       r.pm_type === 'credit_card' ? `${r.card_brand||'Card'} ••${r.last_four||''}` : (r.daf_name || r.pm_type || ''),
+      'Charges Made':  r.occurrences_count || 0,
+      'Charge Limit':  r.occurrences_limit || 'Unlimited',
+      'Last Run':      r.last_run ? r.last_run.slice(0,10) : 'Never',
+      'Last Failure':  r.last_failure || '',
+      'Notes':         r.notes || '',
+    })) : [{ 'Donor':'', 'Amount':'', 'Frequency':'No recurring schedules', 'Status':'', 'Next Run':'', 'Payment':'', 'Charges Made':'', 'Charge Limit':'', 'Last Run':'', 'Last Failure':'', 'Notes':'' }]);
+    wsRecurring['!cols'] = [20,10,12,10,12,16,12,12,12,28,20].map(w=>({wch:w}));
+    XLSX.utils.book_append_sheet(wb, wsRecurring, 'Recurring Schedules');
+
+    // ── Tab 6: Failed Charges ─────────────────────────────────────────────────
+    const failures = all(`
+      SELECT cf.occurred_at, d.first_name, d.last_name, d.email,
+             cf.amount, cf.failure_reason,
+             cf.acknowledged, cf.acknowledged_at,
+             pm.type as pm_type, pm.card_brand, pm.last_four
+      FROM charge_failures cf
+      JOIN donors d ON cf.donor_id = d.id
+      LEFT JOIN payment_methods pm ON cf.payment_method_id = pm.id
+      WHERE cf.org_id=?
+      ORDER BY cf.occurred_at DESC
+    `, [req.orgId]);
+    const wsFailures = XLSX.utils.json_to_sheet(failures.length ? failures.map(f => ({
+      'Date':          f.occurred_at ? f.occurred_at.slice(0,10) : '',
+      'Donor':         `${f.first_name} ${f.last_name}`,
+      'Email':         f.email || '',
+      'Amount':        parseFloat(f.amount || 0).toFixed(2),
+      'Payment':       f.pm_type === 'credit_card' ? `${f.card_brand||'Card'} ••${f.last_four||''}` : (f.pm_type || ''),
+      'Failure Reason': f.failure_reason || '',
+      'Acknowledged':  f.acknowledged ? 'Yes' : 'No',
+      'Acked At':      f.acknowledged_at ? f.acknowledged_at.slice(0,10) : '',
+    })) : [{ 'Date':'', 'Donor':'', 'Email':'', 'Amount':'', 'Payment':'', 'Failure Reason':'No charge failures', 'Acknowledged':'', 'Acked At':'' }]);
+    wsFailures['!cols'] = [12,20,24,10,16,32,12,12].map(w=>({wch:w}));
+    XLSX.utils.book_append_sheet(wb, wsFailures, 'Failed Charges');
+
+    // ── Write and send ─────────────────────────────────────────────────────────
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const filename = `${orgName} - Full Report ${dateStr}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(buf);
+  } catch(e) {
+    console.error('full-export:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;
 
 // ── Scheduled emails: edit ─────────────────────────────────────────────────────
@@ -484,4 +671,44 @@ router.post('/upload-logo', requireOrgAdmin, (req, res) => {
   const logoUrl = `/org-logos/${filename}`;
   run("UPDATE organizations SET settings=json_set(COALESCE(settings,'{}'),'$.logo_url',?) WHERE id=?", [logoUrl, req.orgId]);
   res.json({ success: true, logo_url: logoUrl });
+});
+
+// ── Expenses (Issue 23) ───────────────────────────────────────────────────────
+router.get('/expenses', (req, res) => {
+  const expenses = all('SELECT * FROM expenses WHERE org_id=? ORDER BY expense_date DESC', [req.orgId]);
+  res.json(expenses);
+});
+
+router.post('/expenses', (req, res) => {
+  try {
+    const { amount, category, description, expense_date } = req.body;
+    if (!amount || !expense_date) return res.status(400).json({ error: 'amount and expense_date required' });
+    const id = require('uuid').v4();
+    run('INSERT INTO expenses (id,org_id,amount,category,description,expense_date,created_by) VALUES (?,?,?,?,?,?,?)',
+      [id, req.orgId, parseFloat(amount), category||'Other', description||'', expense_date, req.user.id]);
+    res.json({ success: true, expense: get('SELECT * FROM expenses WHERE id=?', [id]) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/expenses/:id', (req, res) => {
+  run('DELETE FROM expenses WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
+  res.json({ success: true });
+});
+
+// ── Unlinked donations (Issue 24) ─────────────────────────────────────────────
+router.post('/donations/unlinked', (req, res) => {
+  try {
+    const { amount, method, donor_name, donation_date, transaction_id, notes } = req.body;
+    if (!amount || !method) return res.status(400).json({ error: 'amount and method required' });
+    const id = require('uuid').v4();
+    const txId = transaction_id || ('ES' + String(Math.floor(Math.random()*1000000000)).padStart(9,'0'));
+    run(`INSERT INTO donations (id,org_id,donor_id,amount,method,transaction_id,donation_date,status,notes,is_manual,created_by)
+         VALUES (?,?,NULL,?,?,?,?,?,?,1,?)`,
+      [id, req.orgId, parseFloat(amount), method, txId,
+       donation_date || new Date().toISOString(),
+       'completed',
+       donor_name ? `Unlinked: ${donor_name}${notes?' — '+notes:''}` : (notes||null),
+       req.user.id]);
+    res.json({ success: true, donation: get('SELECT * FROM donations WHERE id=?', [id]) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });

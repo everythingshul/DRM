@@ -67,7 +67,7 @@ function createTables() {
       is_default INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS donations (
-      id TEXT PRIMARY KEY, org_id TEXT NOT NULL, donor_id TEXT NOT NULL,
+      id TEXT PRIMARY KEY, org_id TEXT NOT NULL, donor_id TEXT,
       amount REAL NOT NULL, method TEXT NOT NULL, payment_method_id TEXT,
       transaction_id TEXT, status TEXT DEFAULT 'completed',
       donation_date DATETIME NOT NULL, notes TEXT,
@@ -118,15 +118,16 @@ function createTables() {
     );
     CREATE TABLE IF NOT EXISTS kvitel_settings (
       id TEXT PRIMARY KEY, org_id TEXT UNIQUE NOT NULL,
-      header_text TEXT DEFAULT '', header_font TEXT DEFAULT 'Frank Ruhl Libre',
-      header_size REAL DEFAULT 18, header_bold INTEGER DEFAULT 1,
-      header_align TEXT DEFAULT 'center', header_dir TEXT DEFAULT 'rtl',
-      page_size TEXT DEFAULT 'letter', columns INTEGER DEFAULT 2,
+      header_text TEXT DEFAULT '[]',
+      page_size TEXT DEFAULT 'letter', columns INTEGER DEFAULT 1,
       column_gap REAL DEFAULT 0.5, font_family TEXT DEFAULT 'Noto Sans Hebrew',
       font_size REAL DEFAULT 12, line_height REAL DEFAULT 1.6,
       margin_top REAL DEFAULT 1, margin_bottom REAL DEFAULT 1,
       margin_left REAL DEFAULT 1, margin_right REAL DEFAULT 1,
-      group_by_neighborhood INTEGER DEFAULT 1, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      group_by_neighborhood INTEGER DEFAULT 1,
+      neighborhood_font TEXT DEFAULT 'Frank Ruhl Libre',
+      neighborhood_size REAL DEFAULT 14, neighborhood_bold INTEGER DEFAULT 1,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS charge_failures (
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL, donor_id TEXT NOT NULL,
@@ -134,6 +135,12 @@ function createTables() {
       failure_reason TEXT, payment_method_id TEXT,
       occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       acknowledged INTEGER DEFAULT 0, acknowledged_at DATETIME, acknowledged_by TEXT
+    );
+    CREATE TABLE IF NOT EXISTS expenses (
+      id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
+      amount REAL NOT NULL, category TEXT, description TEXT,
+      expense_date DATE NOT NULL, created_by TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS bank_connections (
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL, bank_name TEXT DEFAULT 'Chase',
@@ -162,6 +169,9 @@ function runMigrations() {
     `ALTER TABLE email_settings ADD COLUMN marketing_template TEXT DEFAULT ''`,
     `ALTER TABLE organizations ADD COLUMN settings TEXT DEFAULT '{}'`,
     `ALTER TABLE donors ADD COLUMN autopay_minute INTEGER DEFAULT 0`,
+    `ALTER TABLE kvitel_settings ADD COLUMN neighborhood_font TEXT DEFAULT 'Frank Ruhl Libre'`,
+    `ALTER TABLE kvitel_settings ADD COLUMN neighborhood_size REAL DEFAULT 14`,
+    `ALTER TABLE kvitel_settings ADD COLUMN neighborhood_bold INTEGER DEFAULT 1`,
     `ALTER TABLE kvitel_settings ADD COLUMN header_text TEXT DEFAULT ''`,
     `ALTER TABLE kvitel_settings ADD COLUMN header_font TEXT DEFAULT 'Frank Ruhl Libre'`,
     `ALTER TABLE kvitel_settings ADD COLUMN header_size REAL DEFAULT 18`,

@@ -382,11 +382,36 @@ router.put('/:id/recurring/:sid', (req, res) => {
   const { amount, frequency, next_run, end_date, occurrences_limit, status, notes } = req.body;
   const existing = get('SELECT * FROM recurring_schedules WHERE id = ? AND donor_id = ?', [req.params.sid, req.params.id]);
   if (!existing) return res.status(404).json({ error: 'Schedule not found' });
+
+  // When resuming, recalculate next_run from today's date using frequency
+  let resolvedNextRun = next_run ?? existing.next_run;
+  if (status === 'active' && existing.status === 'paused') {
+    const freq = frequency ?? existing.frequency;
+    const now = new Date();
+    const next = new Date(now);
+    switch(freq) {
+      case 'weekly':     next.setDate(now.getDate() + 7); break;
+      case 'biweekly':   next.setDate(now.getDate() + 14); break;
+      case 'monthly':    next.setMonth(now.getMonth() + 1); break;
+      case 'quarterly':  next.setMonth(now.getMonth() + 3); break;
+      case 'yearly':     next.setFullYear(now.getFullYear() + 1); break;
+      default:           next.setMonth(now.getMonth() + 1);
+    }
+    // If next_run is today or in the past, keep today so UI shows "Due today"
+    const existingNext = existing.next_run ? new Date(existing.next_run) : null;
+    const todayMidnight = new Date(); todayMidnight.setHours(0,0,0,0);
+    if (existingNext && existingNext <= todayMidnight) {
+      resolvedNextRun = now.toISOString().slice(0,10); // today
+    } else {
+      resolvedNextRun = next.toISOString().slice(0,10);
+    }
+  }
+
   run(`UPDATE recurring_schedules SET
        amount = ?, frequency = ?, next_run = ?, end_date = ?,
        occurrences_limit = ?, status = ?, notes = ?
        WHERE id = ?`,
-    [amount ?? existing.amount, frequency ?? existing.frequency, next_run ?? existing.next_run,
+    [amount ?? existing.amount, frequency ?? existing.frequency, resolvedNextRun,
      end_date ?? existing.end_date, occurrences_limit ?? existing.occurrences_limit,
      status ?? existing.status, notes ?? existing.notes, req.params.sid]);
   res.json({ success: true });

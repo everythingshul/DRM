@@ -295,6 +295,12 @@ async function processRecurringSchedules() {
         txId = result.refNum;
       }
 
+      // Fix #12: If this was a CC charge, txId MUST exist (Sola confirmed)
+      // For other methods (check, cash, wire), donation is recorded without txId (manual collection needed)
+      if (pm.type === 'credit_card' && !txId) {
+        throw new Error('Sola did not confirm charge — no transaction ID returned');
+      }
+
       const donId = uuidv4();
       run(`INSERT INTO donations (id, org_id, donor_id, amount, method, payment_method_id, transaction_id, donation_date, status, is_recurring, notes, created_by)
            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'completed', 1, ?, 'system')`,
@@ -318,14 +324,22 @@ async function processRecurringSchedules() {
       await sendChargeNotificationToOwner(org, donor, donation, true, null);
 
     } catch (e) {
-      run(`UPDATE recurring_schedules SET last_failure = ?, status = 'active' WHERE id = ?`,
-        [e.message, sched.id]);
+      // Advance next_run to the NEXT occurrence date — this failed occurrence is skipped,
+      // not retried. Status stays 'active' so future scheduled dates still run.
+      // One failure email is sent now; the next occurrence will try again fresh.
+      const nextRun = calcNextRun(sched.next_run, sched.frequency);
+      const limitHit = sched.occurrences_limit && (sched.occurrences_count || 0) >= sched.occurrences_limit;
+      const endHit   = sched.end_date && new Date(nextRun) > new Date(sched.end_date);
+
+      run(`UPDATE recurring_schedules SET last_failure = ?, next_run = ?, status = ? WHERE id = ?`,
+        [e.message, nextRun, (limitHit || endHit) ? 'completed' : 'active', sched.id]);
 
       run(`INSERT INTO charge_failures (id, org_id, donor_id, amount, failure_reason, payment_method_id)
            VALUES (?, ?, ?, ?, ?, ?)`,
         [uuidv4(), sched.org_id, sched.donor_id, sched.amount, e.message, sched.payment_method_id]);
 
-      await sendChargeNotificationToOwner(org, donor, { amount: sched.amount }, false, e.message);
+      // Send exactly one notification for this failed occurrence
+      await sendChargeNotificationToOwner(org, donor, { amount: sched.amount }, false, e.message).catch(()=>{});
     }
   }
 }

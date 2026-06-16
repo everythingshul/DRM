@@ -40,10 +40,10 @@ const API = {
     const ct = res.headers.get('content-type') || '';
     if (!ct.includes('json')) {
       const txt = await res.text();
-      throw new Error('Server error (non-JSON): ' + txt.slice(0, 80));
+      throw new Error(txt.slice(0, 200) || 'Server error');
     }
     const json = await res.json();
-    if (!res.ok) throw new Error(json.error || 'Request failed');
+    if (!res.ok) throw new Error(json.error || json.message || (typeof json==='string'?json:'') || 'Request failed ('+res.status+')');
     return json;
   },
 
@@ -72,7 +72,7 @@ const API = {
     donor:       (id) => `/api/orgs/${API.orgId}/donors/${id}`,
     stats:       ()   => `/api/orgs/${API.orgId}/stats`,
     email:       ()   => `/api/orgs/${API.orgId}/email-settings`,
-    kvitel:      ()   => `/api/orgs/${API.orgId}/kvitel-settings`,
+    kvitel:      ()   => `/api/orgs/${API.orgId}/kvitel/settings`,  // routed through kvitel.js
     hoods:       ()   => `/api/orgs/${API.orgId}/donors/meta/neighborhoods`,
     labels:      ()   => `/api/orgs/${API.orgId}/donors/meta/labels`,
     failures:    ()   => `/api/orgs/${API.orgId}/charge-failures`,
@@ -93,9 +93,10 @@ function toast(msg, type='ok') {
   if (!c) return;
   const t = document.createElement('div');
   t.className = 'toast ' + type;
-  t.textContent = msg;
+  t.textContent = String(msg||'Unknown error');
   c.appendChild(t);
-  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 350); }, 3200);
+  const dur = type==='err' ? 5000 : 3200;
+  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 350); }, dur);
 }
 
 const Modal = {
@@ -107,7 +108,7 @@ const Modal = {
     $('modal-overlay').style.display = 'flex';
     if (opts.cb) setTimeout(opts.cb, 0);
   },
-  close() { $('modal-overlay').style.display = 'none'; $('modal-body').innerHTML = ''; },
+  close() { $('modal-overlay').style.display = 'none'; $('modal-body').innerHTML = ''; window._donorDetailId = null; },
   body(h) { $('modal-body').innerHTML = h; },
   title(t) { $('modal-title').textContent = t; }
 };
@@ -122,7 +123,16 @@ function confirmDlg(msg, yes) {
 }
 
 function fmt$(n) { return '$' + parseFloat(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
-function fmtD(d) { if (!d) return '—'; try { return new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }); } catch { return d; } }
+function fmtD(d) {
+  if (!d) return '—';
+  try {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+      const [y,m,day]=d.split('-').map(Number);
+      return new Date(y,m-1,day).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});
+    }
+    return new Date(d).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});
+  } catch { return d; }
+}
 function fmtDT(d) { if (!d) return '—'; try { return new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch { return d; } }
 function age(m) { if (!m && m !== 0) return '—'; const mo = parseInt(m); if (mo < 12) return mo + 'mo'; const y = Math.floor(mo / 12), r = mo % 12; return r ? `${y}y ${r}mo` : `${y}y`; }
 function fmtMethod(m) { return { credit_card: 'Credit Card', daf: 'DAF', check: 'Check', cash: 'Cash', wire: 'Wire', other: 'Other' }[m] || m; }
@@ -343,26 +353,21 @@ async function createOrg() {
   } catch(e) { toast(e.message, 'err'); }
 }
 
-function navigateTo(page, force=false) {
-  const wasOnPage = _currentPage === page;
+function navigateTo(page) {
   _currentPage = page;
   if (location.hash !== '#' + page) history.pushState(null, '', '#' + page);
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   const el = $('page-' + page);
-  if (el) {
-    el.classList.add('active');
-    // Don't re-render if already on same page and not forced (preserves scroll/state)
-    if (!wasOnPage || force || !el.innerHTML.trim()) renderPage(page, el);
-  }
+  if (el) { el.classList.add('active'); renderPage(page, el); } // always re-render on nav
 }
 // Re-render current page (call after mutations)
 function reloadPage() { const el = $('page-' + _currentPage); if(el) renderPage(_currentPage, el); }
 window.addEventListener('popstate', () => {
   const page = location.hash.replace('#','') || 'dashboard';
   const valid = ['dashboard','donors','donations','verification','failures','bank','emails','kvitel','reports','settings'];
-  if (valid.includes(page)) navigateTo(page);
+  if (valid.includes(page)) { const el=$('page-'+page); if(el) el.innerHTML=''; navigateTo(page); }
 });
 
 function renderPage(page, el) {
@@ -404,6 +409,8 @@ async function renderDashboard(el) {
       <div class="ph">
         <div><div class="ph-title">Dashboard</div></div>
         <div class="bg">
+          <button class="btn btn-ghost btn-sm" onclick="_addExpense()">+ Expense</button>
+          <button class="btn btn-ghost btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/reports/full-export','full-report.xlsx').catch(e=>toast(e.message||'Export failed','err'))">&#8681; Export All</button>
           ${s.failedCharges > 0 ? `<button class="btn btn-red btn-sm" onclick="navigateTo('failures')">! ${s.failedCharges} Failed</button>` : ''}
           ${s.needsVerification > 0 ? `<button class="btn btn-outline btn-sm" onclick="navigateTo('verification')">${s.needsVerification} Need Verification</button>` : ''}
         </div>
@@ -411,6 +418,7 @@ async function renderDashboard(el) {
       <div class="stat-grid">
         <div class="stat"><div class="stat-lbl">Total Donors</div><div class="stat-val">${(s.totalDonors||0).toLocaleString()}</div><div class="stat-sub">${s.activeDonors||0} active</div></div>
         <div class="stat g"><div class="stat-lbl">Total Raised</div><div class="stat-val">${fmt$(s.totalAmount)}</div><div class="stat-sub">${s.totalDonations||0} donations</div></div>
+        <div class="stat r"><div class="stat-lbl">Total Expenses</div><div class="stat-val">${fmt$(s.totalExpenses||0)}</div><div class="stat-sub">Net: ${fmt$((s.totalAmount||0)-(s.totalExpenses||0))}</div></div>
         <div class="stat o"><div class="stat-lbl">Avg Donation</div><div class="stat-val">${fmt$(s.avgDonation)}</div></div>
         <div class="stat"><div class="stat-lbl">AutoPay Active</div><div class="stat-val">${s.autopayStats?.active||0}</div><div class="stat-sub">${s.autopayStats?.paused||0} paused</div></div>
       </div>
@@ -677,7 +685,7 @@ const Donors = {
   async save(id) {
     const data = { title:val('df-title'), first_name:val('df-first'), last_name:val('df-last'), hebrew_title:val('df-htitle'), hebrew_full_name:val('df-hname'), neighborhood_id:val('df-nh')||null, cell:val('df-cell'), home_phone:val('df-home'), email:val('df-email'), street:val('df-street'), apt:val('df-apt'), city:val('df-city'), state:val('df-state'), zip:val('df-zip'), kvitel:val('df-kvitel'), kvitel_enabled:$('df-kvon')?.checked?1:0, labels:window._lwDonor?.get()||[] };
     if (!data.first_name || !data.last_name) { toast('First and last name required','err'); return; }
-    try { if(id) await API.put(API.o.donor(id),data); else await API.post(API.o.donors(),data); toast(id?'Saved':'Added'); Modal.close(); this.load(); this.loadMeta(); }
+    try { if(id) await API.put(API.o.donor(id),data); else await API.post(API.o.donors(),data); toast(id?'Saved':'Added'); Modal.close(); if(id){ DonorDetail.open(id); }else{ this.load(); this.loadMeta(); } }
     catch(e) { toast(e.message||'Unknown error','err'); }
   },
 };
@@ -686,6 +694,7 @@ const Donors = {
 const DonorDetail = {
   data: null,
   async open(id) {
+    window._donorDetailId = id;
     Modal.open('Loading…', '<div class="spinner"></div>', { lg: true, tall: true });
     try {
       this.data = await API.get(API.o.donor(id));
@@ -799,6 +808,7 @@ const DonorDetail = {
       </div>
       <div class="bg">
         ${pm.type==='credit_card'&&pm.sola_token?`<button class="btn btn-ghost btn-sm" onclick="DonorDetail.chargeCard('${did}','${pm.id}')">Charge</button>`:''}
+        ${pm.type==='daf'?`<button class="btn btn-ghost btn-sm" onclick="DonorDetail._chargeDaf('${did}','${pm.id}')">Process DAF</button>`:''}
         <button class="btn btn-icon" style="color:var(--red)" onclick="DonorDetail.delPM('${did}','${pm.id}')">&#10005;</button>
       </div>
     </div>`;
@@ -823,13 +833,21 @@ const DonorDetail = {
   recCard(s, did) {
     const pm = s.pm_label || (s.pm_type==='credit_card' ? `${s.card_brand||'Card'} ••${s.last_four||''}` : fmtMethod(s.pm_type));
     const lim = s.occurrences_limit ? `${s.occurrences_count||0}/${s.occurrences_limit}` : 'Unlimited';
-    return `<div class="sched-item">
+    // Check if next_run is today or past
+    const nextRunDate = s.next_run ? new Date(s.next_run) : null;
+    const today = new Date(); today.setHours(0,0,0,0);
+    const isDueToday = nextRunDate && nextRunDate <= today && s.status==='active';
+    const nextLabel = isDueToday
+      ? `<span style="color:var(--red);font-weight:600">Due today!</span>`
+      : `Next: ${fmtD(s.next_run)}`;
+    return `<div class="sched-item" style="${isDueToday?'border-color:var(--amber);background:var(--amber-l)':''}">
       <div>
         <div class="sched-main">${fmt$(s.amount)} / ${fmtFreq(s.frequency)} ${sbadge(s.status)}</div>
-        <div class="sched-sub">${pm} · Next: ${fmtD(s.next_run)} · ${lim}</div>
+        <div class="sched-sub">${pm} · ${nextLabel} · ${lim}</div>
         ${s.last_failure?`<div style="font-size:11px;color:var(--red);margin-top:2px">Last error: ${s.last_failure}</div>`:''}
       </div>
       <div class="bg">
+        ${isDueToday?`<button class="btn btn-primary btn-sm" onclick="DonorDetail._chargeRecurringNow('${did}','${s.id}','${s.payment_method_id||''}','${s.amount}')">Charge Now</button>`:''}
         ${s.status==='active'?`<button class="btn btn-ghost btn-sm" onclick="DonorDetail.toggleRec('${did}','${s.id}','paused')">Pause</button>`:`<button class="btn btn-ghost btn-sm" onclick="DonorDetail.toggleRec('${did}','${s.id}','active')">Resume</button>`}
         <button class="btn btn-ghost btn-sm" onclick="DonorDetail.editRec('${did}','${s.id}','${s.amount}','${s.frequency}','${s.next_run||''}')">Edit</button>
         <button class="btn btn-icon" style="color:var(--red)" onclick="DonorDetail.delRec('${did}','${s.id}')">&#10005;</button>
@@ -864,10 +882,10 @@ const DonorDetail = {
       </select>
       <div id="cc-f">
         <div class="alert alert-info" style="margin-top:10px;font-size:12px">Card tokenized via Sola — raw number never stored.</div>
-        <div class="r2"><div><label>Card Number</label><input id="pm-num" maxlength="19" autocomplete="cc-number"></div><div><label>Expiry (MMYY)</label><input id="pm-exp" maxlength="4" autocomplete="cc-exp" placeholder="0128"></div></div>
+        <div class="r2"><div><label>Card Number</label><input id="pm-num" maxlength="19" autocomplete="cc-number" oninput="DonorDetail._detectCardType(this.value)"></div><div><label>Expiry (MMYY)</label><input id="pm-exp" maxlength="4" autocomplete="cc-exp" placeholder="0128"></div></div>
         <div class="r2"><div><label>CVV</label><input id="pm-cvv" type="password" maxlength="4"></div><div><label>ZIP</label><input id="pm-zip" maxlength="5"></div></div>
         <label>Card Brand</label>
-        <select id="pm-brand"><option value="">— Select —</option><option>Visa</option><option>Mastercard</option><option>Amex</option><option>Discover</option></select>
+        <div class="bg" style="align-items:center"><select id="pm-brand" style="flex:1"><option value="">— Auto —</option><option>Visa</option><option>Mastercard</option><option>Amex</option><option>Discover</option></select><span id="pm-brand-icon" style="font-size:12px;font-weight:700;padding:0 8px;color:var(--blue);min-width:36px"></span></div>
       </div>
       <div id="daf-f" style="display:none">
         <div class="alert alert-info" style="font-size:12px;margin-top:8px">DAF donations are processed via Sola using the donor's DAF card. Sola auto-routes to the correct DAF provider (Matbia, OJC, Pledger, DonorsFund, iMasser).</div>
@@ -905,23 +923,26 @@ const DonorDetail = {
         toast(`Card ••${r.paymentMethod?.last_four||'??'} saved`);
       } else if (type === 'daf') {
         const dafCard = val('pm-daf');
+        const dafExp  = val('pm-dafexp');
         if (!dafCard) { toast('DAF card number required','err'); return; }
-        // Store DAF as payment method with card num in daf_name field for charging
+        if (!dafExp || dafExp.length < 4) { toast('DAF card expiry required (MMYY)','err'); return; }
+        // Store DAF: other_description = "cardNum|exp" (pipe-separated)
         await API.post(`/api/orgs/${API.orgId}/donors/${did}/payment-methods`, {
-          type:'daf', label:lbl||val('pm-dafprov')||'DAF',
-          daf_name: val('pm-dafprov'),
-          other_description: dafCard + '|' + val('pm-dafexp'), // card|exp stored here
-          is_default:def
+          type:'daf',
+          label: lbl || val('pm-dafprov') || 'DAF',
+          daf_name: val('pm-dafprov') || 'DAF',
+          other_description: dafCard.replace(/\s/g,'') + '|' + (val('pm-dafexp')||'1299'),
+          is_default: def
         });
         toast('DAF method added');
       } else {
         await API.post(`/api/orgs/${API.orgId}/donors/${did}/payment-methods`, {type, label:lbl||null, other_description:val('pm-oth')||null, is_default:def});
         toast('Added');
       }
-      Modal.close(); this.open(did);
+      this.open(did);
     } catch(e) { if(btn){btn.textContent='Save & Tokenize';btn.disabled=false;} toast(e.message||'Unknown error','err'); }
   },
-  async delPM(did, pmId) { confirmDlg('Remove payment method?', async()=>{ await API.del(`/api/orgs/${API.orgId}/donors/${did}/payment-methods/${pmId}`); toast('Removed'); DonorDetail.open(did); }); },
+  async delPM(did, pmId) { confirmDlg('Remove payment method?', async()=>{ try{await API.del(`/api/orgs/${API.orgId}/donors/${did}/payment-methods/${pmId}`); toast('Removed'); DonorDetail.open(did);}catch(e){toast(e.message,'err');} }); },
 
   chargeNow(did) {
     const pms = (this.data?.paymentMethods||[]).filter(p=>p.type==='credit_card'&&p.sola_token);
@@ -949,7 +970,7 @@ const DonorDetail = {
     const amt = parseFloat(val('cn-amt')); if (!amt||amt<=0) { toast('Enter amount','err'); return; }
     try {
       const r = await API.post(`/api/orgs/${API.orgId}/payments/charge`, {donor_id:did,payment_method_id:pmId||val('cn-pm'),amount:amt,notes:val('cn-notes')});
-      toast(`Charged ${fmt$(amt)} · Trans: ${r.transaction_id}`); Modal.close(); this.open(did);
+      toast(`Charged ${fmt$(amt)} · Trans: ${r.transaction_id}`); this.open(did);
     } catch(e) { toast(e.message||'Unknown error','err'); }
   },
 
@@ -1015,14 +1036,14 @@ const DonorDetail = {
   },
 
   addDonNote(did, donId) { Modal.open('Add Note to Donation', `<textarea id="dn-txt" style="min-height:80px;width:100%" placeholder="Note…"></textarea><div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveDonNote('${did}','${donId}')">Add</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, {sm:true}); },
-  async _saveDonNote(did, donId) { const txt=val('dn-txt').trim(); if(!txt)return; try{await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations/${donId}/notes`,{text:txt}); toast('Added'); Modal.close(); this.open(did);}catch(e){toast(e.message||'Unknown error','err');} },
+  async _saveDonNote(did, donId) { const txt=val('dn-txt').trim(); if(!txt)return; try{await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations/${donId}/notes`,{text:txt}); toast('Added'); this.open(did);}catch(e){toast(e.message||'Unknown error','err');} },
 
-  refund(did, donId, amt, txId) { Modal.open('Refund', `<p style="margin-bottom:10px;font-size:13px;color:var(--gray-5)">Original: ${fmt$(amt)}</p><label>Refund Amount ($)</label><input type="number" id="rf-amt" step="0.01" max="${amt}" value="${amt}"><label>Reason</label><input id="rf-rsn" autocomplete="off">${txId?`<div class="alert alert-info" style="margin-top:10px;font-size:12px">Sola Ref: ${txId}</div>`:''}<div class="bg mt"><button class="btn btn-red" onclick="DonorDetail._doRefund('${did}','${donId}','${txId}')">Refund</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, {sm:true}); },
+  refund(did, donId, amt, txId) { Modal.open('Refund', `<p style="margin-bottom:10px;font-size:13px;color:var(--gray-5)">Original: ${fmt$(amt)}</p><label>Refund Amount ($)</label><input type="number" id="rf-amt" step="0.01" max="${amt}" value="${amt}"><label>Reason</label><input id="rf-rsn" autocomplete="off">${txId?`<div class="alert alert-info" style="margin-top:10px;font-size:12px">Trans ID: ${txId}</div>`:''}<div class="bg mt"><button class="btn btn-red" onclick="DonorDetail._doRefund('${did}','${donId}','${txId}')">Refund</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, {sm:true}); },
   async _doRefund(did, donId, txId) {
     const amt = parseFloat(val('rf-amt')); if (!amt||amt<=0) { toast('Enter amount','err'); return; }
     try {
-      await API.post(`/api/orgs/${API.orgId}/payments/refund`, {donation_id:donId, donor_id:did, amount:amt, notes:val('rf-rsn')});
-      toast(`Refund of ${fmt$(amt)} processed`); Modal.close(); this.open(did);
+      const r = await API.post(`/api/orgs/${API.orgId}/payments/refund`, {donation_id:donId, donor_id:did, amount:amt, notes:val('rf-rsn')});
+      toast(`Refund of ${fmt$(amt)} processed (${r.method||'manual'})`); Modal.close(); DonorDetail.open(did);
     } catch(e) { toast(e.message||'Unknown error','err'); }
   },
 
@@ -1040,10 +1061,25 @@ const DonorDetail = {
       <label>Notes</label><input id="rec-notes" autocomplete="off">
       <div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveRec('${did}')">Save</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, {sm:true});
   },
-  async _saveRec(did) { const amt=parseFloat(val('rec-amt')); if(!amt||amt<=0){toast('Amount required','err');return;} try{await API.post(`/api/orgs/${API.orgId}/donors/${did}/recurring`,{payment_method_id:val('rec-pm'),amount:amt,frequency:val('rec-freq'),start_date:val('rec-start'),end_date:val('rec-end')||null,occurrences_limit:val('rec-lim')?parseInt(val('rec-lim')):null,notes:val('rec-notes')||null}); toast('Schedule created'); Modal.close(); this.open(did);}catch(e){toast(e.message||'Unknown error','err');} },
-  async toggleRec(did, sid, status) { await API.put(`/api/orgs/${API.orgId}/donors/${did}/recurring/${sid}`,{status}); toast(status==='paused'?'Paused':'Resumed'); this.open(did); },
+  async _saveRec(did) { const amt=parseFloat(val('rec-amt')); if(!amt||amt<=0){toast('Amount required','err');return;} try{await API.post(`/api/orgs/${API.orgId}/donors/${did}/recurring`,{payment_method_id:val('rec-pm'),amount:amt,frequency:val('rec-freq'),start_date:val('rec-start'),end_date:val('rec-end')||null,occurrences_limit:val('rec-lim')?parseInt(val('rec-lim')):null,notes:val('rec-notes')||null}); toast('Schedule created'); this.open(did);}catch(e){toast(e.message||'Unknown error','err');} },
+  async toggleRec(did, sid, status) {
+    try {
+      const body = { status };
+      if (status === 'active') {
+        // When resuming, set next_run to next upcoming date based on frequency
+        const sched = (this.data?.recurring||[]).find(r=>r.id===sid);
+        if (sched) {
+          const nextRun = _calcNextRunFromNow(sched);
+          body.next_run = nextRun;
+        }
+      }
+      await API.put(`/api/orgs/${API.orgId}/donors/${did}/recurring/${sid}`, body);
+      toast(status==='paused'?'Paused':'Resumed');
+      this.open(did);
+    } catch(e) { toast(e.message||'Error','err'); }
+  },
   editRec(did, sid, amt, freq, nextRun) { Modal.open('Edit Schedule', `<label>Amount ($)</label><input type="number" id="er-amt" value="${amt}" step="0.01"><label>Frequency</label><select id="er-freq">${['weekly','biweekly','monthly','quarterly','yearly','once'].map(f=>`<option value="${f}" ${f===freq?'selected':''}>${fmtFreq(f)}</option>`).join('')}</select><label>Next Run</label><input type="date" id="er-next" value="${nextRun?nextRun.slice(0,10):''}"><div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveEditRec('${did}','${sid}')">Save</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true}); },
-  async _saveEditRec(did, sid) { await API.put(`/api/orgs/${API.orgId}/donors/${did}/recurring/${sid}`,{amount:parseFloat(val('er-amt')),frequency:val('er-freq'),next_run:val('er-next')}); toast('Updated'); Modal.close(); this.open(did); },
+  async _saveEditRec(did, sid) { await API.put(`/api/orgs/${API.orgId}/donors/${did}/recurring/${sid}`,{amount:parseFloat(val('er-amt')),frequency:val('er-freq'),next_run:val('er-next')}); toast('Updated'); this.open(did); },
   async delRec(did, sid) { confirmDlg('Cancel this schedule?', async()=>{ await API.del(`/api/orgs/${API.orgId}/donors/${did}/recurring/${sid}`); toast('Cancelled'); DonorDetail.open(did); }); },
 };
 
@@ -1055,7 +1091,8 @@ async function renderDonations(el) {
     window._donAll = rows;
     el.innerHTML = `
       <div class="ph"><div><div class="ph-title">Donations</div><div class="ph-sub">${rows.length} records</div></div>
-        <button class="btn btn-ghost btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/reports/donations?format=xlsx','donations.xlsx').catch(e=>toast(e.message||'Unknown error','err'))">&#8681; XLSX</button>
+        <div class="bg"><button class="btn btn-primary btn-sm" onclick="_addUnlinkedDonation()">+ Add Donation</button>
+        <button class="btn btn-ghost btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/reports/donations?format=xlsx','donations.xlsx').catch(e=>toast(e.message||'Unknown error','err'))">&#8681; XLSX</button></div>
       </div>
       <div class="card" style="padding:0;overflow:hidden">
         <div style="padding:12px 14px;border-bottom:1px solid var(--gray-1)">
@@ -1076,7 +1113,7 @@ function _donRows(rows) {
   if (!rows.length) return '<tr><td colspan="8"><div class="empty">No donations</div></td></tr>';
   return rows.map(d => `<tr>
     <td style="font-size:12px;white-space:nowrap">${fmtD(d.donation_date)}</td>
-    <td><a href="#" onclick="DonorDetail.open('${d.donor_id}');return false;" style="font-weight:600;color:var(--navy);text-decoration:none">${d.first_name} ${d.last_name}</a></td>
+    <td>${d.donor_id&&d.donor_id!='null'?`<a href="#" onclick="event.preventDefault();DonorDetail.open('${d.donor_id}')" style="font-weight:600;color:var(--navy);text-decoration:none;cursor:pointer">${d.first_name||''} ${d.last_name||''}</a>`:`<span style="font-weight:600;color:var(--gray-5)">${d.notes||'Unlinked'}</span>`}</td>
     <td style="font-weight:600">${fmt$(d.amount)}${d.refund_amount>0?`<br><span style="font-size:11px;color:var(--red)">−${fmt$(d.refund_amount)}</span>`:''}</td>
     <td style="font-size:12px">${fmtMethod(d.method)}${d.last_four?` ••${d.last_four}`:''}</td>
     <td style="font-size:11px;color:var(--gray-5);max-width:100px;word-break:break-all">${d.transaction_id||'—'}</td>
@@ -1139,13 +1176,47 @@ async function renderFailures(el) {
             <td style="font-weight:600">${fmt$(f.amount)}</td>
             <td style="font-size:12px;color:var(--red)">${f.failure_reason||'Unknown'}</td>
             <td>${f.acknowledged?'<span class="pill pill-green">Acked</span>':'<span class="pill pill-red">New</span>'}</td>
-            <td><div class="actions"><button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${f.donor_id}')">View</button>${!f.acknowledged?`<button class="btn btn-ghost btn-sm" onclick="_ackOne('${f.id}')">Ack</button>`:''}</div></td>
+            <td><div class="actions">
+              <button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${f.donor_id}')">View</button>
+              ${!f.acknowledged
+                ?`<button class="btn btn-ghost btn-sm" onclick="_ackOne('${f.id}')">Ack</button>`
+                :`<button class="btn btn-ghost btn-sm" onclick="_unackOne('${f.id}',this)">Un-Ack</button>`}
+            </div></td>
           </tr>`).join('')}</tbody>
         </table></div></div>` :
         `<div class="card"><div class="empty"><h3>No failed charges</h3></div></div>`}`;
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
-async function _ackOne(id) { await API.post(`/api/orgs/${API.orgId}/charge-failures/${id}/acknowledge`,{}); toast('Acknowledged'); const r=$(`fr-${id}`); if(r){r.style.opacity=.6; const btn=r.querySelector('.btn-ghost'); if(btn&&btn.textContent==='Ack')btn.remove();} loadBadges(); }
+async function _ackOne(id) {
+  try {
+    await API.post(`/api/orgs/${API.orgId}/charge-failures/${id}/acknowledge`,{});
+    toast('Acknowledged');
+    const r=$('fr-'+id);
+    if(r){
+      r.style.opacity='.6';
+      // Replace Ack button with Un-Ack button instantly
+      const actions=r.querySelector('.actions');
+      if(actions){
+        const oldBtn=actions.querySelector('[onclick*="_ackOne"]');
+        if(oldBtn){ const nb=document.createElement('button'); nb.className='btn btn-ghost btn-sm'; nb.textContent='Un-Ack'; nb.onclick=()=>_unackOne(id,nb); oldBtn.replaceWith(nb); }
+      }
+    }
+    loadBadges();
+  } catch(e){toast(e.message||'Error','err');}
+}
+async function _unackOne(id, btn) {
+  try {
+    await API.post(`/api/orgs/${API.orgId}/charge-failures/${id}/unacknowledge`, {});
+    toast('Unacknowledged');
+    const row = $('fr-'+id);
+    if (row) {
+      row.style.opacity='1';
+      const pill=row.querySelector('.pill-green'); if(pill)pill.outerHTML='<span class="pill pill-red">New</span>';
+      if(btn){const nb=document.createElement('button');nb.className='btn btn-ghost btn-sm';nb.textContent='Ack';nb.onclick=()=>_ackOne(id);btn.replaceWith(nb);}
+    }
+    loadBadges();
+  } catch(e){toast(e.message||'Error','err');}
+}
 async function _ackAll() { confirmDlg('Acknowledge all?',async()=>{await API.post(`/api/orgs/${API.orgId}/charge-failures/acknowledge-all`,{}); toast('All acknowledged'); renderFailures($('page-failures')); loadBadges();}); }
 
 async function renderBank(el) {
@@ -1256,60 +1327,164 @@ function _schedEmail(){const now=new Date();now.setHours(now.getHours()+1);Modal
 async function renderKvitel(el) {
   el.innerHTML = '<div class="spinner"></div>';
   try {
-    const [s, donors] = await Promise.all([API.get(API.o.kvitel()), API.get(API.o.donors()+'?limit=200')]);
-    const c = s || {};
+    const [cfg, donors] = await Promise.all([
+      API.get(`/api/orgs/${API.orgId}/kvitel/settings`).catch(()=>({})),
+      API.get(API.o.donors()+'?limit=500')
+    ]);
+    const c = cfg || {};
     const fonts = ['Noto Sans Hebrew','Frank Ruhl Libre','Heebo','Narkisim','Times New Roman','Livvorn'];
+
+    // Parse stored headers JSON
+    let _kvHeaders = [];
+    try { _kvHeaders = JSON.parse(c.header_text||'[]'); if(!Array.isArray(_kvHeaders)) _kvHeaders=[]; } catch { _kvHeaders=[]; }
+    window._kvHeaders = _kvHeaders;
+
+    // Build donor preview (grouped by neighborhood, NO donor names)
+    const donorsWithKvitel = (donors.donors||[]).filter(d=>d.kvitel&&d.kvitel.trim());
+    const previewGroups = {};
+    donorsWithKvitel.forEach(d=>{
+      const nh = d.neighborhood_name||'';
+      if(!previewGroups[nh]) previewGroups[nh]=[];
+      previewGroups[nh].push(d);
+    });
+    const previewHtml = Object.entries(previewGroups).map(([nh,ds])=>`
+      ${nh?`<div style="font-size:${c.neighborhood_size||14}px;font-weight:bold;color:#1a3a6b;margin:10px 0 4px;direction:rtl;text-align:right">${nh}</div>`:''}
+      ${ds.map(d=>`<div style="font-size:${c.font_size||12}px;white-space:pre-line;direction:rtl;text-align:right;margin-bottom:8px">${d.kvitel}</div>`).join('')}
+    `).join('') || '<p style="color:var(--gray-5)">No donors with kvitel content</p>';
+
     el.innerHTML = `
-      <div class="ph"><div class="ph-title">Kvitel</div>
+      <div class="ph"><div><div class="ph-title">Kvitel Generator</div>
+        <div class="ph-sub">${donorsWithKvitel.length} donors with kvitel content</div></div>
         <div class="bg">
-          <button class="btn btn-outline btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/kvitel/generate-pdf','kvitel.pdf','POST',{}).catch(e=>toast(e.message||'Unknown error','err'))">&#8681; PDF</button>
-          <button class="btn btn-primary btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/kvitel/generate-docx','kvitel.docx','POST',{}).catch(e=>toast(e.message||'Unknown error','err'))">&#8681; DOCX</button>
+          <button class="btn btn-outline btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/kvitel/generate-pdf','kvitel.pdf','POST',{}).catch(e=>toast(e.message||'Unknown error','err'))">&#8681; Download PDF</button>
+          <button class="btn btn-primary btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/kvitel/generate-docx','kvitel.docx','POST',{}).catch(e=>toast(e.message||'Unknown error','err'))">&#8681; Download DOCX</button>
         </div>
       </div>
       <div class="g2">
         <div class="card">
-          <div class="card-title">Header</div>
-          <div class="r2"><div><label>Text</label><input id="kh-txt" value="${c.header_text||''}"></div><div><label>Font</label><select id="kh-font">${fonts.map(f=>`<option ${c.header_font===f?'selected':''}>${f}</option>`).join('')}</select></div></div>
-          <div class="r4">
-            <div><label>Size (pt)</label><input type="number" id="kh-sz" value="${c.header_size||18}" min="10" max="60"></div>
-            <div><label>Bold</label><br><label class="tgl" style="margin-top:6px"><input type="checkbox" id="kh-bold" ${c.header_bold!==0?'checked':''}><span class="tgl-s"></span></label></div>
-            <div><label>Align</label><select id="kh-align"><option value="center" ${c.header_align==='center'?'selected':''}>Center</option><option value="right" ${c.header_align==='right'?'selected':''}>Right</option><option value="left" ${c.header_align==='left'?'selected':''}>Left</option></select></div>
-            <div><label>Direction</label><select id="kh-dir"><option value="rtl" ${(c.header_dir||'rtl')==='rtl'?'selected':''}>RTL</option><option value="ltr" ${c.header_dir==='ltr'?'selected':''}>LTR</option></select></div>
+          <div class="tabs">
+            <div class="tab on" data-tc="kv-t-hdr">Headers</div>
+            <div class="tab" data-tc="kv-t-body">Body</div>
+            <div class="tab" data-tc="kv-t-nh">Neighborhood</div>
+            <div class="tab" data-tc="kv-t-pg">Page</div>
           </div>
-          <hr class="divider">
-          <div class="card-title">Body</div>
-          <div class="r2"><div><label>Font</label><select id="kb-font" onchange="$('kv-prev').style.fontFamily=this.value">${fonts.map(f=>`<option ${c.font_family===f?'selected':''}>${f}</option>`).join('')}</select></div><div><label>Size (pt)</label><input type="number" id="kb-sz" value="${c.font_size||12}" step="0.5" min="8" max="24"></div></div>
-          <div class="r2"><div><label>Line Height</label><input type="number" id="kb-lh" value="${c.line_height||1.6}" step="0.1" min="1" max="3"></div><div><label>Columns</label><select id="kb-cols">${[1,2,3,4].map(n=>`<option ${c.columns==n?'selected':''}>${n}</option>`).join('')}</select></div></div>
-          <div class="r2"><div><label>Column Gap (in)</label><input type="number" id="kb-gap" value="${c.column_gap||0.5}" step="0.1" min="0" max="2"></div><div><label>Page</label><select id="kb-page"><option value="letter" ${c.page_size==='letter'?'selected':''}>Letter 8.5×11</option><option value="legal" ${c.page_size==='legal'?'selected':''}>Legal 8.5×14</option><option value="a4" ${c.page_size==='a4'?'selected':''}>A4</option></select></div></div>
-          <div class="r4" style="margin-top:4px">${['top','bottom','left','right'].map(m=>`<div><label>Margin ${m} (in)</label><input type="number" id="km-${m}" value="${c['margin_'+m]||1}" step="0.25" min="0" max="3"></div>`).join('')}</div>
-          <div class="trow mt"><div>Group by Neighborhood</div><label class="tgl"><input type="checkbox" id="kb-nh" ${c.group_by_neighborhood!==0?'checked':''}><span class="tgl-s"></span></label></div>
-          <div class="bg mt"><button class="btn btn-primary" onclick="_saveKvitelCfg()">Save Settings</button></div>
+
+          <div id="kv-t-hdr" class="tc on">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+              <span style="font-size:12px;color:var(--gray-5)">Multiple headers allowed — each appears on every page</span>
+              <button class="btn btn-blue btn-sm" onclick="_kvAddHeader()">+ Header</button>
+            </div>
+            <div id="kv-hdr-list"></div>
+          </div>
+
+          <div id="kv-t-body" class="tc">
+            <label>Body Font</label>
+            <select id="kb-font">${fonts.map(f=>`<option ${(c.font_family||'Noto Sans Hebrew')===f?'selected':''}>${f}</option>`).join('')}</select>
+            <div class="r2 mt">
+              <div><label>Size (pt)</label><input type="number" id="kb-sz" value="${c.font_size||12}" step="0.5" min="8" max="36"></div>
+              <div><label>Line Height</label><input type="number" id="kb-lh" value="${c.line_height||1.6}" step="0.1" min="1" max="3"></div>
+            </div>
+          </div>
+
+          <div id="kv-t-nh" class="tc">
+            <div class="trow" style="margin-bottom:12px">
+              <div>Show Hebrew Neighborhood Heading</div>
+              <label class="tgl"><input type="checkbox" id="kb-nh" ${c.group_by_neighborhood!==0?'checked':''}><span class="tgl-s"></span></label>
+            </div>
+            <label>Neighborhood Font</label>
+            <select id="knh-font">${fonts.map(f=>`<option ${(c.neighborhood_font||'Frank Ruhl Libre')===f?'selected':''}>${f}</option>`).join('')}</select>
+            <div class="r2 mt">
+              <div><label>Size (pt)</label><input type="number" id="knh-sz" value="${c.neighborhood_size||14}" step="0.5" min="8" max="48"></div>
+              <div><label>Bold</label><br><label class="tgl" style="margin-top:6px"><input type="checkbox" id="knh-bold" ${c.neighborhood_bold!==0?'checked':''}><span class="tgl-s"></span></label></div>
+            </div>
+          </div>
+
+          <div id="kv-t-pg" class="tc">
+            <label>Page Size</label>
+            <select id="kb-page">
+              <option value="letter" ${(c.page_size||'letter')==='letter'?'selected':''}>Letter (8.5 × 11)</option>
+              <option value="legal" ${c.page_size==='legal'?'selected':''}>Legal (8.5 × 14)</option>
+              <option value="a4" ${c.page_size==='a4'?'selected':''}>A4</option>
+            </select>
+            <div class="r2 mt">
+              <div><label>Columns</label><select id="kb-cols">${[1,2,3].map(n=>`<option ${(c.columns||1)==n?'selected':''}>${n}</option>`).join('')}</select></div>
+              <div><label>Column Gap (in)</label><input type="number" id="kb-gap" value="${c.column_gap||0.5}" step="0.1" min="0" max="3"></div>
+            </div>
+            <div class="card-title mt">Margins (inches)</div>
+            <div class="r4">${['top','bottom','left','right'].map(m=>`<div><label>${m.charAt(0).toUpperCase()+m.slice(1)}</label><input type="number" id="km-${m}" value="${c['margin_'+m]||1}" step="0.25" min="0" max="4"></div>`).join('')}</div>
+          </div>
+
+          <div class="bg mt">
+            <button class="btn btn-primary" onclick="_saveKvitelCfg()">Save Settings</button>
+          </div>
         </div>
+
         <div class="card">
-          <div class="card-title">Preview <span style="font-size:11px;color:var(--gray-5)">(RTL always)</span></div>
-          <div id="kv-prev" class="kv-preview" style="font-family:${c.font_family||'Noto Sans Hebrew'}">
-            ${(donors.donors||[]).filter(d=>d.kvitel).slice(0,15).map(d=>`<div style="margin-bottom:14px"><strong>${d.hebrew_full_name||d.first_name+' '+d.last_name}</strong>${d.neighborhood_name?`<span style="font-size:11px;color:var(--gray-5)"> — ${d.neighborhood_name}</span>`:''}<div style="font-size:13px;white-space:pre-line;margin-top:3px">${d.kvitel}</div></div>`).join('<hr style="border:none;border-top:1px solid #eee;margin:8px 0">') || '<p style="color:var(--gray-5)">No donors with kvitel content</p>'}
+          <div class="card-title">Preview <span style="font-size:11px;color:var(--gray-5)">(RTL, no donor names)</span></div>
+          <div id="kv-prev" class="kv-preview" style="font-family:${c.font_family||'Noto Sans Hebrew'};direction:rtl;text-align:right">
+            ${previewHtml}
           </div>
-          <p style="font-size:12px;color:var(--gray-5);margin-top:8px">${(donors.donors||[]).filter(d=>d.kvitel).length} donors with kvitel</p>
         </div>
       </div>`;
-  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+
+    tabsInit('#page-kvitel');
+    _kvRenderHeaders();
+  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message||'Error loading kvitel'}</div>`; }
 }
-async function _saveKvitelCfg(){
-  try{
-    const ht=val('kh-txt'),hf=val('kh-font'),hs=parseFloat(val('kh-sz')),hb=$('kh-bold')?.checked,ha=val('kh-align'),hd=val('kh-dir');
-    await API.put(API.o.kvitel(),{
-      header_text:ht,header_font:hf,header_size:hs,header_bold:hb?1:0,header_align:ha,header_dir:hd,
-      header_html:`<p style="font-family:${hf};font-size:${hs}pt;font-weight:${hb?'bold':'normal'};text-align:${ha};direction:${hd}">${ht}</p>`,
-      font_family:val('kb-font'),font_size:parseFloat(val('kb-sz')),line_height:parseFloat(val('kb-lh')),
-      columns:parseInt(val('kb-cols')),column_gap:parseFloat(val('kb-gap')),page_size:val('kb-page'),
-      group_by_neighborhood:$('kb-nh')?.checked?1:0,
-      margin_top:parseFloat(val('km-top')),margin_bottom:parseFloat(val('km-bottom')),
-      margin_left:parseFloat(val('km-left')),margin_right:parseFloat(val('km-right')),
+
+function _kvRenderHeaders() {
+  const c = document.getElementById('kv-hdr-list'); if(!c) return;
+  const headers = window._kvHeaders || [];
+  if (!headers.length) {
+    c.innerHTML = '<p style="color:var(--gray-5);font-size:13px">No headers yet. Click "+ Header" to add one.</p>';
+    return;
+  }
+  const fonts = ['Noto Sans Hebrew','Frank Ruhl Libre','Heebo','Narkisim','Times New Roman','Livvorn'];
+  c.innerHTML = headers.map((h,i) => `
+    <div style="border:1px solid var(--gray-1);border-radius:6px;padding:12px;margin-bottom:8px;background:var(--gray-05)">
+      <label>Header Text</label>
+      <input style="direction:rtl;font-family:Noto Sans Hebrew" value="${(h.text||'').replace(/"/g,'&quot;')}" oninput="window._kvHeaders[${i}].text=this.value">
+      <div class="r2 mt">
+        <div><label>Font</label><select onchange="window._kvHeaders[${i}].font=this.value">${fonts.map(f=>`<option ${(h.font||'Frank Ruhl Libre')===f?'selected':''}>${f}</option>`).join('')}</select></div>
+        <div><label>Size (pt)</label><input type="number" value="${h.size||18}" min="8" max="72" oninput="window._kvHeaders[${i}].size=+this.value"></div>
+      </div>
+      <div class="r4 mt">
+        <div><label>Bold</label><br><label class="tgl" style="margin-top:6px"><input type="checkbox" ${h.bold!==false?'checked':''} onchange="window._kvHeaders[${i}].bold=this.checked"><span class="tgl-s"></span></label></div>
+        <div><label>Align</label><select onchange="window._kvHeaders[${i}].align=this.value"><option value="center" ${(h.align||'center')==='center'?'selected':''}>Center</option><option value="right" ${h.align==='right'?'selected':''}>Right</option><option value="left" ${h.align==='left'?'selected':''}>Left</option></select></div>
+        <div><label>Direction</label><select onchange="window._kvHeaders[${i}].dir=this.value"><option value="rtl" ${(h.dir||'rtl')==='rtl'?'selected':''}>RTL</option><option value="ltr" ${h.dir==='ltr'?'selected':''}>LTR</option></select></div>
+        <div style="display:flex;align-items:flex-end"><button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="window._kvHeaders.splice(${i},1);_kvRenderHeaders()">Remove</button></div>
+      </div>
+    </div>
+  `).join('');
+}
+function _kvAddHeader() {
+  if (!window._kvHeaders) window._kvHeaders = [];
+  window._kvHeaders.push({ text:'', font:'Frank Ruhl Libre', size:18, bold:true, align:'center', dir:'rtl' });
+  _kvRenderHeaders();
+}
+async function _saveKvitelCfg() {
+  try {
+    await API.put(`/api/orgs/${API.orgId}/kvitel/settings`, {
+      header_text:      JSON.stringify(window._kvHeaders || []),
+      font_family:      val('kb-font'),
+      font_size:        parseFloat(val('kb-sz')),
+      line_height:      parseFloat(val('kb-lh')),
+      page_size:        val('kb-page'),
+      columns:          parseInt(val('kb-cols')),
+      column_gap:       parseFloat(val('kb-gap')),
+      group_by_neighborhood: $('kb-nh')?.checked ? 1 : 0,
+      neighborhood_font:  val('knh-font'),
+      neighborhood_size:  parseFloat(val('knh-sz')),
+      neighborhood_bold:  $('knh-bold')?.checked ? 1 : 0,
+      margin_top:    parseFloat(val('km-top')),
+      margin_bottom: parseFloat(val('km-bottom')),
+      margin_left:   parseFloat(val('km-left')),
+      margin_right:  parseFloat(val('km-right')),
     });
-    toast('Settings saved');
-  }catch(e){toast(e.message||'Unknown error','err');}
+    toast('Kvitel settings saved');
+  } catch(e) { toast(e.message||'Save failed','err'); }
 }
+
 
 async function renderReports(el) {
   const today = new Date().toISOString().slice(0,10);
@@ -1337,11 +1512,12 @@ function _dlReport(){const p=new URLSearchParams({from:val('rp-from'),to:val('rp
 async function renderSettings(el) {
   el.innerHTML = '<div class="spinner"></div>';
   try {
-    const [users, log, hoods] = await Promise.all([API.get(API.o.users()), API.get(API.o.log()), API.get(API.o.hoods())]);
-    const daf = []; // DAF accounts are per-donor payment methods, not global settings
+    const [users, log, hoods, tzData] = await Promise.all([API.get(API.o.users()), API.get(API.o.log()), API.get(API.o.hoods()), API.get('/api/orgs/'+API.orgId+'/timezone').catch(()=>({timezone:'America/New_York'}))]);
+    window._orgTz = tzData.timezone || 'America/New_York';
+    
     el.innerHTML = `
       <div class="ph"><div class="ph-title">Settings</div></div>
-      <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-daf">DAF</div><div class="tab" data-tc="st-log">Login Log</div></div>
+      <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-tz">Timezone</div><div class="tab" data-tc="st-log">Login Log</div></div>
       <div id="st-users" class="tc on"><div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
           <strong>Users</strong>
@@ -1359,9 +1535,16 @@ async function renderSettings(el) {
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><strong>Neighborhoods</strong><button class="btn btn-primary btn-sm" onclick="_addHood()">+ Add</button></div>
         ${hoods.map(h=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--gray-1)"><span style="font-family:var(--font-he);font-size:15px">${h.name_he}</span><button class="btn btn-icon" style="color:var(--red)" onclick="API.del(API.o.hoods()+'/${h.id}').then(()=>{toast('Removed');renderSettings($('page-settings'))}).catch(e=>toast(e.message||'Unknown error','err'))">&#10005;</button></div>`).join('')||'<p style="color:var(--gray-5)">No neighborhoods yet</p>'}
       </div></div>
-      <div id="st-daf" class="tc"><div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><strong>DAF Accounts</strong><button class="btn btn-primary btn-sm" onclick="_addDaf()">+ Add DAF</button></div>
-        ${daf.map(d=>`<div class="sched-item"><div><div class="sched-main">${d.name}</div>${d.contact_email?`<div class="sched-sub">${d.contact_name||''} ${d.contact_email}</div>`:''}</div><button class="btn btn-icon" style="color:var(--red)" onclick="API.del(API.o.daf()+'/${d.id}').then(()=>{toast('Removed');renderSettings($('page-settings'))}).catch(e=>toast(e.message||'Unknown error','err'))">&#10005;</button></div>`).join('')||'<p style="color:var(--gray-5)">No DAF accounts</p>'}
+      <div id="st-tz" class="tc"><div class="card">
+        <div class="card-title">Timezone Settings</div>
+        <p style="font-size:13px;color:var(--gray-5);margin-bottom:14px">Set your organization's timezone for scheduled emails and recurring charges.</p>
+        <label>Timezone</label>
+        <select id="tz-select">
+          ${['America/New_York','America/Chicago','America/Denver','America/Los_Angeles','America/Phoenix','America/Anchorage','Pacific/Honolulu','Europe/London','Europe/Paris','Europe/Jerusalem','Asia/Jerusalem'].map(tz=>`<option value="${tz}" ${(_orgTz||'America/New_York')===tz?'selected':''}>${tz}</option>`).join('')}
+        </select>
+        <div class="bg mt">
+          <button class="btn btn-primary" onclick="_saveTz()">Save Timezone</button>
+        </div>
       </div></div>
       <div id="st-log" class="tc"><div class="card">
         <div class="card-title">Login Audit Log</div>
@@ -1399,8 +1582,14 @@ async function _doUploadLogo() {
   };
   reader.readAsDataURL(file);
 }
+async function _saveTz(){
+  try {
+    await API.put('/api/orgs/'+API.orgId+'/timezone',{timezone:val('tz-select')});
+    window._orgTz = val('tz-select');
+    toast('Timezone saved');
+  } catch(e){toast(e.message||'Error','err');}
+}
 function _addHood(){Modal.open('Add Neighborhood',`<label>Hebrew Name</label><input id="nh-he" dir="rtl" style="font-family:var(--font-he)" placeholder="שם השכונה"><label>English (optional)</label><input id="nh-en"><div class="bg mt"><button class="btn btn-primary" onclick="API.post(API.o.hoods(),{name_he:val('nh-he'),name_en:val('nh-en')}).then(()=>{toast('Added');Modal.close();renderSettings($('page-settings'))}).catch(e=>toast(e.message||'Unknown error','err'))">Add</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
-function _addDaf(){Modal.open('Add DAF Account',`<label>DAF Name *</label><input id="df-nm" placeholder="Fidelity Charitable"><label>Contact Name</label><input id="df-cn"><label>Contact Email</label><input id="df-ce" type="email"><div class="bg mt"><button class="btn btn-primary" onclick="API.post(API.o.daf(),{name:val('df-nm'),contact_name:val('df-cn'),contact_email:val('df-ce')}).then(()=>{toast('Added');Modal.close();renderSettings($('page-settings'))}).catch(e=>toast(e.message||'Unknown error','err'))">Add</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 // ── Outstanding Manual Charges ────────────────────────────────────────────────
@@ -1459,6 +1648,137 @@ function _doCollectCharge(chargeId) {
     if (row) { row.style.opacity='0'; row.style.transition='opacity .3s'; setTimeout(()=>row.remove(),320); }
     renderOutstanding($('page-outstanding'));
   }).catch(e => toast(e.message||'Error','err'));
+}
+
+
+// ── Card type detection (Fix 21) ─────────────────────────────────────────────
+DonorDetail._detectCardType = function(num) {
+  const n = num.replace(/\D/g,'');
+  let brand = '', icon = '';
+  if (/^4/.test(n))                               { brand='Visa';       icon='VISA'; }
+  else if (/^5[1-5]/.test(n)||/^2[2-7]/.test(n)) { brand='Mastercard'; icon='MC'; }
+  else if (/^3[47]/.test(n))                      { brand='Amex';       icon='AMEX'; }
+  else if (/^6011|^65|^64[4-9]|^622/.test(n))    { brand='Discover';   icon='DISC'; }
+  const iconEl = $('pm-brand-icon');
+  if (iconEl) iconEl.textContent = icon;
+  const brandEl = $('pm-brand');
+  if (brandEl) brandEl.value = brand;
+};
+
+// ── Calc next run from now for recurring resume (Fix 9, 10) ──────────────────
+function _calcNextRunFromNow(sched) {
+  const tz = window._orgTz || 'America/New_York';
+  const now = new Date();
+  // Use start_date as anchor to keep same day-of-month/week pattern
+  let anchor = sched.start_date ? new Date(sched.start_date) : new Date();
+  // Advance until anchor is in the future
+  while (anchor <= now) {
+    switch(sched.frequency) {
+      case 'weekly':    anchor.setDate(anchor.getDate()+7); break;
+      case 'biweekly':  anchor.setDate(anchor.getDate()+14); break;
+      case 'monthly':   anchor.setMonth(anchor.getMonth()+1); break;
+      case 'quarterly': anchor.setMonth(anchor.getMonth()+3); break;
+      case 'yearly':    anchor.setFullYear(anchor.getFullYear()+1); break;
+      default:          anchor.setMonth(anchor.getMonth()+1);
+    }
+  }
+  return anchor.toISOString().slice(0,10);
+}
+
+// ── Charge recurring now (Fix 9) ─────────────────────────────────────────────
+DonorDetail._chargeRecurringNow = async function(did, sid, pmId, amount) {
+  if (!pmId || !amount) { toast('Missing payment method or amount','err'); return; }
+  try {
+    const r = await API.post(`/api/orgs/${API.orgId}/payments/charge`, {
+      donor_id: did, payment_method_id: pmId, amount: parseFloat(amount),
+      notes: 'Manual recurring charge (due today)'
+    });
+    toast(`Charged ${fmt$(amount)} · Trans: ${r.transaction_id}`);
+    // Update next_run
+    const sched = DonorDetail.data?.recurring?.find(s=>s.id===sid);
+    if (sched) {
+      const nextRun = _calcNextRunFromNow({...sched, start_date: new Date().toISOString()});
+      await API.put(`/api/orgs/${API.orgId}/donors/${did}/recurring/${sid}`, {next_run: nextRun});
+    }
+    DonorDetail.open(did);
+  } catch(e) { toast(e.message||'Charge failed','err'); }
+};
+
+// ── Add expense (Fix 23) ─────────────────────────────────────────────────────
+function _addExpense() {
+  Modal.open('Record Expense', `
+    <label>Amount ($) *</label>
+    <input type="number" id="exp-amt" step="0.01" placeholder="0.00">
+    <label>Category</label>
+    <select id="exp-cat">
+      <option>Administrative</option><option>Facilities</option><option>Programs</option>
+      <option>Salaries</option><option>Supplies</option><option>Other</option>
+    </select>
+    <label>Description</label>
+    <input id="exp-desc" placeholder="Describe the expense" autocomplete="off">
+    <label>Date</label>
+    <input type="date" id="exp-date" value="${new Date().toISOString().slice(0,10)}">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_saveExpense()">Save</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+async function _saveExpense() {
+  const amt = parseFloat(val('exp-amt'));
+  if (!amt||amt<=0) { toast('Amount required','err'); return; }
+  try {
+    await API.post(`/api/orgs/${API.orgId}/expenses`, {
+      amount: amt, category: val('exp-cat'),
+      description: val('exp-desc'), expense_date: val('exp-date')
+    });
+    toast('Expense recorded');
+    Modal.close();
+    navigateTo('dashboard');
+  } catch(e) { toast(e.message||'Error','err'); }
+}
+
+// ── Unlinked donation (Fix 24) ────────────────────────────────────────────────
+function _addUnlinkedDonation() {
+  const now = new Date().toISOString().slice(0,16);
+  Modal.open('Add Donation (No Donor)', `
+    <div class="alert alert-info" style="font-size:12px">This donation will not be linked to any donor account.</div>
+    <label>Donor Name (for records)</label>
+    <input id="ul-name" placeholder="e.g. Anonymous or John Smith" autocomplete="off">
+    <div class="r2 mt">
+      <div><label>Amount ($) *</label><input type="number" id="ul-amt" step="0.01" placeholder="0.00"></div>
+      <div><label>Method *</label>
+        <select id="ul-meth">
+          <option value="check">Check</option><option value="cash">Cash</option>
+          <option value="daf">DAF</option><option value="wire">Wire</option><option value="other">Other</option>
+        </select>
+      </div>
+    </div>
+    <div class="r2">
+      <div><label>Date</label><input type="datetime-local" id="ul-date" value="${now}"></div>
+      <div><label>Trans ID (auto if blank)</label><input id="ul-tx" autocomplete="off"></div>
+    </div>
+    <label>Notes</label>
+    <input id="ul-notes" autocomplete="off">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_saveUnlinkedDonation()">Record</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+async function _saveUnlinkedDonation() {
+  const amt = parseFloat(val('ul-amt'));
+  if (!amt||amt<=0) { toast('Amount required','err'); return; }
+  try {
+    await API.post(`/api/orgs/${API.orgId}/donations/unlinked`, {
+      amount: amt, method: val('ul-meth'),
+      donor_name: val('ul-name') || 'Anonymous',
+      donation_date: val('ul-date') || new Date().toISOString(),
+      transaction_id: val('ul-tx') || null,
+      notes: val('ul-notes') || null
+    });
+    toast('Donation recorded');
+    Modal.close();
+    navigateTo('donations');
+  } catch(e) { toast(e.message||'Error','err'); }
 }
 
 document.addEventListener('DOMContentLoaded', init);
