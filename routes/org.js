@@ -201,8 +201,8 @@ router.get('/reports/donations', (req, res) => {
   const { from, to, method, donor_id, status, format = 'json' } = req.query;
   let sql = `
     SELECT don.id, don.donation_date, don.amount, don.method, don.status,
-           don.transaction_id, don.notes, don.label, don.is_manual, don.is_autopay,
-           don.donor_id,
+           don.transaction_id, don.notes, don.label, don.donation_notes,
+           don.is_manual, don.is_autopay, don.donor_id,
            d.first_name, d.last_name, d.email, d.cell,
            n.name_he as neighborhood,
            pm.label as payment_label, pm.last_four,
@@ -761,4 +761,19 @@ router.put('/label-lists', requireOrgAdmin, (req, res) => {
       [require('uuid').v4(), req.orgId, JSON.stringify(donor_labels||[]), JSON.stringify(donation_labels||[])]);
   }
   res.json({ success: true });
+});
+
+// ── Add note to any donation (linked or unlinked) ─────────────────────────────
+router.post('/donations/:donationId/notes', (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text) return res.status(400).json({ error: 'Text required' });
+    const don = get('SELECT * FROM donations WHERE id=? AND org_id=?', [req.params.donationId, req.orgId]);
+    if (!don) return res.status(404).json({ error: 'Donation not found' });
+    const notes = (() => { try { return JSON.parse(don.donation_notes || '[]'); } catch { return []; } })();
+    notes.push({ text, at: new Date().toISOString(), by: req.user?.full_name || '' });
+    run('UPDATE donations SET donation_notes=? WHERE id=? AND org_id=?',
+      [JSON.stringify(notes), req.params.donationId, req.orgId]);
+    res.json({ success: true, notes });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
