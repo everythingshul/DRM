@@ -777,3 +777,55 @@ router.post('/donations/:donationId/notes', (req, res) => {
     res.json({ success: true, notes });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+// ── Edit donation (method, date, notes, check_number — NOT amount) ────────────
+router.put('/donations/:donationId/edit', (req, res) => {
+  try {
+    const { method, donation_date, notes, check_number, transaction_id } = req.body;
+    const don = get('SELECT * FROM donations WHERE id=? AND org_id=?', [req.params.donationId, req.orgId]);
+    if (!don) return res.status(404).json({ error: 'Donation not found' });
+    const finalNotes = check_number ? `Check #${check_number}${notes ? ' — ' + notes : ''}` : (notes ?? don.notes);
+    run(`UPDATE donations SET method=?, donation_date=?, notes=?, transaction_id=? WHERE id=? AND org_id=?`,
+      [method ?? don.method, donation_date ?? don.donation_date, finalNotes, transaction_id ?? don.transaction_id, req.params.donationId, req.orgId]);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Delete donation ────────────────────────────────────────────────────────────
+router.delete('/donations/:donationId', (req, res) => {
+  const don = get('SELECT id FROM donations WHERE id=? AND org_id=?', [req.params.donationId, req.orgId]);
+  if (!don) return res.status(404).json({ error: 'Donation not found' });
+  run('DELETE FROM donations WHERE id=? AND org_id=?', [req.params.donationId, req.orgId]);
+  res.json({ success: true });
+});
+
+// ── Edit a donation note ───────────────────────────────────────────────────────
+router.put('/donations/:donationId/notes/:noteIdx', (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text) return res.status(400).json({ error: 'Text required' });
+    const don = get('SELECT * FROM donations WHERE id=? AND org_id=?', [req.params.donationId, req.orgId]);
+    if (!don) return res.status(404).json({ error: 'Donation not found' });
+    const notes = (() => { try { return JSON.parse(don.donation_notes || '[]'); } catch { return []; } })();
+    const idx = parseInt(req.params.noteIdx);
+    if (idx < 0 || idx >= notes.length) return res.status(404).json({ error: 'Note not found' });
+    notes[idx].text = text;
+    notes[idx].edited_at = new Date().toISOString();
+    run('UPDATE donations SET donation_notes=? WHERE id=? AND org_id=?', [JSON.stringify(notes), req.params.donationId, req.orgId]);
+    res.json({ success: true, notes });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Delete a donation note ─────────────────────────────────────────────────────
+router.delete('/donations/:donationId/notes/:noteIdx', (req, res) => {
+  try {
+    const don = get('SELECT * FROM donations WHERE id=? AND org_id=?', [req.params.donationId, req.orgId]);
+    if (!don) return res.status(404).json({ error: 'Donation not found' });
+    const notes = (() => { try { return JSON.parse(don.donation_notes || '[]'); } catch { return []; } })();
+    const idx = parseInt(req.params.noteIdx);
+    if (idx < 0 || idx >= notes.length) return res.status(404).json({ error: 'Note not found' });
+    notes.splice(idx, 1);
+    run('UPDATE donations SET donation_notes=? WHERE id=? AND org_id=?', [JSON.stringify(notes), req.params.donationId, req.orgId]);
+    res.json({ success: true, notes });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});

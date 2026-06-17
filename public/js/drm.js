@@ -702,22 +702,27 @@ const Donors = {
           <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
         </div>`);
       window._lwDonor = lwInit('lw-donor', lbls);
-      // Load org donor labels as quick-add suggestions
+      // Load org donor labels — replace free-text with select + preset chips
       API.get(`/api/orgs/${API.orgId}/label-lists`).then(ll => {
         const orgLabels = ll.donor_labels || [];
-        if (!orgLabels.length) return;
         const wrap = $('lw-donor');
-        if (!wrap) return;
-        // Add suggestion chips after the widget renders
-        const sugg = document.createElement('div');
-        sugg.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;align-items:center';
-        sugg.innerHTML = '<span style="font-size:11px;color:var(--gray-5)">Quick add:</span>' +
-          orgLabels.map(l =>
-            `<span class="pill pill-gray" style="cursor:pointer;font-size:11px"
-              onclick="if(!window._lwDonor?.get().includes('${l}')){document.getElementById('lw-donor-in').value='${l}';window._lw_add_lw_donor&&window._lw_add_lw_donor();}"
-            >${l}</span>`
-          ).join('');
-        wrap.appendChild(sugg);
+        if (!wrap || !orgLabels.length) return;
+        // Replace the input with a select for preset labels
+        const inp = $('lw-donor-in');
+        if (inp) {
+          const sel = document.createElement('select');
+          sel.style.cssText = 'flex:1;padding:5px 8px;border:1.5px solid var(--gray-3);border-radius:4px;font-size:12px';
+          sel.innerHTML = '<option value="">— Add label —</option>' +
+            orgLabels.filter(l=>!window._lwDonor?.get().includes(l)).map(l=>`<option value="${l}">${l}</option>`).join('');
+          sel.onchange = () => {
+            if(sel.value && window._lwDonor && !window._lwDonor.get().includes(sel.value)){
+              // Inject into input and trigger add
+              if(inp){inp.value=sel.value; window[`_lw_add_lw-donor`]&&window[`_lw_add_lw-donor`]();}
+              sel.value='';
+            }
+          };
+          inp.replaceWith(sel);
+        }
       }).catch(()=>{});
       tabsInit('#modal-body');
     }});
@@ -863,20 +868,76 @@ const DonorDetail = {
 
   donRow(d, did) {
     const dn = jsonParse(d.donation_notes);
+    const rid = 'dpr-'+d.id;
     return `<tr>
       <td style="font-size:12px;white-space:nowrap">${fmtD(d.donation_date)}</td>
       <td style="font-weight:600">${fmt$(d.amount)}${d.refund_amount>0?`<br><span style="font-size:11px;color:var(--red)">−${fmt$(d.refund_amount)}</span>`:''}</td>
       <td style="font-size:12px">${fmtMethod(d.method)}${d.last_four?` ••${d.last_four}`:''}</td>
-      <td style="font-size:11px;color:var(--gray-5);max-width:100px;word-break:break-all">${d.transaction_id||'—'}</td>
-      <td>${sbadge(d.status)}</td>
-      <td style="font-size:12px;max-width:130px">${d.notes||''}${dn.map(n=>`<div style="font-style:italic;color:var(--gray-5);font-size:11px">${fmtD(n.at)}: ${n.text}</div>`).join('')}</td>
+      <td style="font-size:11px;color:var(--gray-5)">${d.transaction_id||'—'}</td>
+      <td>${sbadge(d.status)}${d.label?` <span class="pill pill-blue" style="font-size:10px">${d.label}</span>`:''}</td>
       <td><div class="actions">
+        <button class="btn btn-icon" title="Expand" onclick="DonorDetail._togDPR('${d.id}')">&#8964;</button>
+        <button class="btn btn-icon" title="Edit" onclick="DonorDetail._editDon('${did}','${d.id}')">&#9998;</button>
         <button class="btn btn-icon" title="Add note" onclick="DonorDetail.addDonNote('${did}','${d.id}')">&#9997;</button>
         ${(d.status==='completed'||d.status==='partial_refund')?`<button class="btn btn-icon" title="Refund" onclick="DonorDetail.refund('${did}','${d.id}','${d.amount}','${d.transaction_id||''}')">&#8617;</button>`:''}
+        <button class="btn btn-icon" title="Label" onclick="DonorDetail._lblDon('${did}','${d.id}')">⦄</button>
+        <button class="btn btn-icon" style="color:var(--red)" title="Delete" onclick="DonorDetail._delDon('${did}','${d.id}')">&#10005;</button>
       </div></td>
+    </tr>
+    <tr id="${rid}" style="display:none;background:var(--gray-05)">
+      <td colspan="6" style="padding:10px 14px;font-size:12px">
+        <strong style="color:var(--navy)">Full Details</strong><br>
+        Date &amp; Time: ${fmtDT(d.donation_date)} | Trans ID: ${d.transaction_id||'—'} | Status: ${d.status}<br>
+        ${d.refund_amount>0?'Refunded: '+fmt$(d.refund_amount)+(d.refund_notes?' — '+d.refund_notes:'')+'<br>':''}
+        ${d.notes?'Notes: '+d.notes+'<br>':''}
+        <div style="margin-top:8px;font-weight:600">Donation Notes (${dn.length})</div>
+        <div id="dpr-n-${d.id}" style="margin-top:4px">${_renderNotesList(dn, d.id, did, true)}</div>
+      </td>
     </tr>`;
   },
-
+  _togDPR(id){const r=$('dpr-'+id);if(r)r.style.display=r.style.display==='none'?'table-row':'none';},
+  async _editDon(did, donId) {
+    const don=(this.data?.donations||[]).find(d=>d.id===donId);
+    if(!don){toast('Not found','err');return;}
+    Modal.open('Edit Donation',`
+      <div class="alert alert-info" style="font-size:12px;margin-bottom:8px">Amount cannot be changed after recording.</div>
+      <label>Amount (locked)</label><input value="${fmt$(don.amount)}" disabled style="background:var(--gray-1)">
+      <label>Method</label><select id="edd-meth">${['check','cash','wire','daf','other'].map(m=>`<option value="${m}" ${don.method===m?'selected':''}>${fmtMethod(m)}</option>`).join('')}</select>
+      <label>Date & Time</label><input type="datetime-local" id="edd-date" value="${toLocalDT(don.donation_date)}">
+      <label>Transaction ID</label><input id="edd-tx" value="${don.transaction_id||''}" autocomplete="off">
+      <label>Notes</label><input id="edd-notes" value="${(don.notes||'').replace(/"/g,'&quot;')}" autocomplete="off">
+      <div class="bg mt">
+        <button class="btn btn-primary" onclick="DonorDetail._saveEditDon('${did}','${donId}')">Save</button>
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+      </div>`,{sm:true});
+  },
+  async _saveEditDon(did, donId){
+    try{await API.put(`/api/orgs/${API.orgId}/donations/${donId}/edit`,{method:val('edd-meth'),donation_date:val('edd-date'),transaction_id:val('edd-tx')||null,notes:val('edd-notes')||null});toast('Updated ✓');Modal.close();DonorDetail.open(did);}catch(e){toast(e.message,'err');}
+  },
+  _delDon(did, donId){
+    confirmDlg('Delete this donation? Cannot be undone.',async()=>{
+      try{await API.del(`/api/orgs/${API.orgId}/donations/${donId}`);toast('Deleted');DonorDetail.open(did);}catch(e){toast(e.message,'err');}
+    });
+  },
+  async _lblDon(did, donId){
+    const cur=(this.data?.donations||[]).find(d=>d.id===donId)?.label||'';
+    let lbls=[];
+    try{const r=await API.get(`/api/orgs/${API.orgId}/label-lists`);lbls=r.donation_labels||[];}catch{}
+    window._saveLblDon=async()=>{
+      const v=$('lbld-sel')?.value||'';
+      try{await API.put(`/api/orgs/${API.orgId}/donations/${donId}/label`,{label:v||null});toast('Saved ✓');Modal.close();DonorDetail.open(did);}catch(e){toast(e.message,'err');}
+    };
+    Modal.open('Label Donation',`
+      <label>Label</label>
+      <select id="lbld-sel">
+        <option value="">— Remove label —</option>
+        ${lbls.map(l=>`<option value="${l}" ${cur===l?'selected':''}>${l}</option>`).join('')}
+      </select>
+      <div class="bg mt">
+        <button class="btn btn-primary" onclick="window._saveLblDon()">Save</button>
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+      </div>`,{sm:true});
+  },
   recCard(s, did) {
     const pm = s.pm_label || (s.pm_type==='credit_card' ? `${s.card_brand||'Card'} ••${s.last_four||''}` : fmtMethod(s.pm_type));
     const lim = s.occurrences_limit ? `${s.occurrences_count||0}/${s.occurrences_limit}` : 'Unlimited';
@@ -1171,7 +1232,14 @@ const DonorDetail = {
   },
 
   addDonNote(did, donId) { Modal.open('Add Note to Donation', `<textarea id="dn-txt" style="min-height:80px;width:100%" placeholder="Note…"></textarea><div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveDonNote('${did}','${donId}')">Add</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, {sm:true}); },
-  async _saveDonNote(did, donId) { const txt=val('dn-txt').trim(); if(!txt)return; try{await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations/${donId}/notes`,{text:txt}); toast('Added'); this.open(did);}catch(e){toast(e.message||'Unknown error','err');} },
+  async _saveDonNote(did, donId) {
+    const txt = val('dn-txt').trim(); if(!txt){toast('Enter a note','err');return;}
+    try {
+      await API.post(`/api/orgs/${API.orgId}/donations/${donId}/notes`, {text:txt});
+      toast('Note added ✓'); Modal.close();
+      DonorDetail.open(did);  // reopen donor profile, NOT donations page
+    } catch(e){toast(e.message||'Unknown error','err');}
+  },
 
   refund(did, donId, amt, txId) {
     Modal.open('Refund Donation', `
@@ -1262,6 +1330,51 @@ const DonorDetail = {
 };
 
 // ── Other pages ───────────────────────────────────────────────────────────────
+
+function _renderNotesList(notes, donId, did, onSave) {
+  if (!notes || !notes.length) return '<p style="color:var(--gray-5);font-size:12px;margin:4px 0">No notes yet.</p>';
+  return notes.map((n, i) => `
+    <div style="padding:6px 8px;border-bottom:1px solid var(--gray-1);display:flex;gap:8px;align-items:flex-start">
+      <div style="flex:1">
+        <div id="note-text-${donId}-${i}" style="font-size:13px">${n.text}</div>
+        <div style="font-size:10px;color:var(--gray-5);margin-top:2px">${fmtDT(n.at)}${n.by?' · '+n.by:''}${n.edited_at?' (edited)':''}</div>
+      </div>
+      <div class="actions" style="flex-shrink:0">
+        <button class="btn btn-icon" title="Edit" onclick="_editDonationNote('${donId}','${i}','${n.text.replace(/'/g,"\\'").replace(/"/g,'&quot;')}','${did||''}',${onSave?'true':'false'})">&#9998;</button>
+        <button class="btn btn-icon" style="color:var(--red)" title="Delete" onclick="_deleteDonationNote('${donId}','${i}','${did||''}',${onSave?'true':'false'})">&#10005;</button>
+      </div>
+    </div>`).join('');
+}
+
+function _editDonationNote(donId, idx, currentText, did, fromDonorProfile) {
+  Modal.open('Edit Note', `
+    <textarea id="en-txt" style="min-height:80px;width:100%">${currentText}</textarea>
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="window._doEditDonationNote('${donId}','${idx}','${did}',${fromDonorProfile})">Save</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+window._doEditDonationNote = async (donId, idx, did, fromDonorProfile) => {
+  const txt = val('en-txt').trim(); if(!txt){toast('Enter text','err');return;}
+  try {
+    await API.put(`/api/orgs/${API.orgId}/donations/${donId}/notes/${idx}`, {text:txt});
+    toast('Note updated ✓'); Modal.close();
+    if (fromDonorProfile && did) DonorDetail.open(did);
+    else renderDonations($('page-donations'));
+  } catch(e){toast(e.message,'err');}
+};
+
+function _deleteDonationNote(donId, idx, did, fromDonorProfile) {
+  confirmDlg('Delete this note?', async () => {
+    try {
+      await API.del(`/api/orgs/${API.orgId}/donations/${donId}/notes/${idx}`);
+      toast('Note deleted ✓');
+      if (fromDonorProfile && did) DonorDetail.open(did);
+      else renderDonations($('page-donations'));
+    } catch(e){toast(e.message,'err');}
+  });
+}
+
 async function renderDonations(el) {
   el.innerHTML = '<div class="spinner"></div>';
   try {
@@ -1288,26 +1401,74 @@ async function renderDonations(el) {
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
 function _donRows(rows) {
-  if (!rows.length) return '<tr><td colspan="9"><div class="empty">No donations</div></td></tr>';
-  return rows.map(d => `<tr>
-    <td style="font-size:12px;white-space:nowrap">${fmtD(d.donation_date)}</td>
-    <td>${d.donor_id&&d.donor_id!='null'?`<a href="#" onclick="event.preventDefault();DonorDetail.open('${d.donor_id}')" style="font-weight:600;color:var(--navy);text-decoration:none;cursor:pointer">${d.first_name||''} ${d.last_name||''}</a>`:`<span style="font-weight:600;color:var(--gray-5)">${d.notes||'Unlinked'}</span>`}</td>
-    <td style="font-weight:600">${fmt$(d.amount)}${d.refund_amount>0?`<br><span style="font-size:11px;color:var(--red)">−${fmt$(d.refund_amount)}</span>`:''}</td>
-    <td style="font-size:12px">${fmtMethod(d.method)}${d.last_four?` ••${d.last_four}`:''}</td>
-    <td style="font-size:11px;color:var(--gray-5);max-width:100px;word-break:break-all">${d.transaction_id||'—'}</td>
-    <td>${sbadge(d.status)}</td>
-    <td style="font-size:11px;max-width:140px">
-      ${d.label?`<span class="pill pill-blue" style="font-size:10px">${d.label}</span>`:''}
-      ${(() => { try { return JSON.parse(d.donation_notes||'[]').map(n=>`<div style="color:var(--gray-5);font-style:italic">${n.text}</div>`).join(''); } catch{return '';} })()}
-    </td>
-    <td><div class="actions">
-      <button class="btn btn-icon" title="Add note" onclick="_addDonationNote('${d.donor_id}','${d.id}')">&#9997;</button>
-      <a class="btn btn-ghost btn-sm" href="/api/orgs/${API.orgId}/payments/receipt/${d.id}" download="receipt-${d.transaction_id||d.id}.pdf" title="Download receipt">&#8681; Receipt</a>
-      ${(d.status==='completed'||d.status==='partial_refund')?`<button class="btn btn-icon" title="Refund" onclick="_refundFromList('${d.donor_id}','${d.id}','${d.amount}','${d.transaction_id||''}')">&#8617;</button>`:''}
-      <button class="btn btn-icon" title="Label" onclick="_labelDonation('${d.id}','${(d.label||'').replace(/'/g,"\\'")}')">&#9990;</button>
-      ${d.donor_id&&d.donor_id!='null'?`<button class="btn btn-icon" title="Unlink from donor" onclick="_unlinkDonation('${d.id}')">&#8854;</button>`:`<button class="btn btn-icon" title="Link to donor" onclick="_linkDonation('${d.id}')">&#8853;</button>`}
-    </div></td>
-  </tr>`).join('');
+  if (!rows.length) return '<tr><td colspan="7"><div class="empty">No donations</div></td></tr>';
+  return rows.map(d => {
+    const dn = (() => { try{return JSON.parse(d.donation_notes||'[]');}catch{return[];} })();
+    const rid = 'dlr-'+d.id;
+    return `<tr>
+      <td style="font-size:12px;white-space:nowrap">${fmtD(d.donation_date)}</td>
+      <td>${d.donor_id&&d.donor_id!='null'?`<a href="#" onclick="event.preventDefault();DonorDetail.open('${d.donor_id}')" style="font-weight:600;color:var(--navy);text-decoration:none">${d.first_name||''} ${d.last_name||''}</a>`:`<span style="font-weight:600;color:var(--gray-5)">${d.notes||'Unlinked'}</span>`}</td>
+      <td style="font-weight:600">${fmt$(d.amount)}${d.refund_amount>0?`<br><span style="font-size:11px;color:var(--red)">−${fmt$(d.refund_amount)}</span>`:''}</td>
+      <td style="font-size:12px">${fmtMethod(d.method)}${d.last_four?` ••${d.last_four}`:''}</td>
+      <td style="font-size:11px;color:var(--gray-5)">${d.transaction_id||'—'}</td>
+      <td>${sbadge(d.status)}${d.label?` <span class="pill pill-blue" style="font-size:10px">${d.label}</span>`:''}</td>
+      <td><div class="actions">
+        <button class="btn btn-icon" title="Expand" onclick="_togDlr('${d.id}')">&#8964;</button>
+        <button class="btn btn-icon" title="Add note" onclick="_addDonationNote('${d.donor_id}','${d.id}')">&#9997;</button>
+        <button class="btn btn-icon" title="Edit" onclick="_editDonList('${d.id}')">&#9998;</button>
+        <a class="btn btn-ghost btn-sm" href="/api/orgs/${API.orgId}/payments/receipt/${d.id}" download="receipt.pdf" title="Receipt">&#8681;</a>
+        ${(d.status==='completed'||d.status==='partial_refund')?`<button class="btn btn-icon" title="Refund" onclick="_refundFromList('${d.donor_id}','${d.id}','${d.amount}','${d.transaction_id||''}')">&#8617;</button>`:''}
+        <button class="btn btn-icon" title="Label" onclick="_labelDonation('${d.id}')">&#9990;</button>
+        ${d.donor_id&&d.donor_id!='null'?`<button class="btn btn-icon" title="Unlink" onclick="_unlinkDonation('${d.id}')">&#8854;</button>`:`<button class="btn btn-icon" title="Link" onclick="_linkDonation('${d.id}')">&#8853;</button>`}
+        <button class="btn btn-icon" style="color:var(--red)" title="Delete" onclick="_delDonList('${d.id}')">&#10005;</button>
+      </div></td>
+    </tr>
+    <tr id="${rid}" style="display:none;background:var(--gray-05)">
+      <td colspan="7" style="padding:12px 16px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+          <div style="font-size:12px;line-height:1.9">
+            <strong>Full Details</strong><br>
+            Date &amp; Time: ${fmtDT(d.donation_date)}<br>
+            Amount: ${fmt$(d.amount)}<br>
+            Method: ${fmtMethod(d.method)}${d.last_four?' ••'+d.last_four:''}<br>
+            Transaction ID: ${d.transaction_id||'—'}<br>
+            Status: ${d.status}<br>
+            ${d.refund_amount>0?'Refunded: '+fmt$(d.refund_amount)+(d.refund_notes?' — '+d.refund_notes:'')+'<br>':''}
+            ${d.notes?'Notes: '+d.notes+'<br>':''}
+            ${d.label?'Label: '+d.label:''}
+          </div>
+          <div>
+            <div style="font-size:12px;font-weight:600;margin-bottom:6px">Notes (${dn.length})</div>
+            <div id="dlr-n-${d.id}">${_renderNotesList(dn, d.id, d.donor_id, false)}</div>
+          </div>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+function _togDlr(id){const r=$('dlr-'+id);if(r)r.style.display=r.style.display==='none'?'table-row':'none';}
+async function _editDonList(donId){
+  const don=(window._donAll||[]).find(d=>d.id===donId);
+  if(!don){toast('Not found','err');return;}
+  Modal.open('Edit Donation',`
+    <div class="alert alert-info" style="font-size:12px;margin-bottom:8px">Amount cannot be changed.</div>
+    <label>Amount (locked)</label><input value="${fmt$(don.amount)}" disabled style="background:var(--gray-1)">
+    <label>Method</label><select id="edl-meth">${['check','cash','wire','daf','other'].map(m=>`<option value="${m}" ${don.method===m?'selected':''}>${fmtMethod(m)}</option>`).join('')}</select>
+    <label>Date & Time</label><input type="datetime-local" id="edl-date" value="${toLocalDT(don.donation_date)}">
+    <label>Transaction ID</label><input id="edl-tx" value="${don.transaction_id||''}" autocomplete="off">
+    <label>Notes</label><input id="edl-notes" value="${(don.notes||'').replace(/"/g,'&quot;')}" autocomplete="off">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_saveEditDonList('${donId}')">Save</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`,{sm:true});
+}
+async function _saveEditDonList(id){
+  try{await API.put(`/api/orgs/${API.orgId}/donations/${id}/edit`,{method:val('edl-meth'),donation_date:val('edl-date'),transaction_id:val('edl-tx')||null,notes:val('edl-notes')||null});toast('Updated ✓');Modal.close();renderDonations($('page-donations'));}catch(e){toast(e.message,'err');}
+}
+async function _delDonList(id){
+  confirmDlg('Delete this donation? Cannot be undone.',async()=>{
+    try{await API.del(`/api/orgs/${API.orgId}/donations/${id}`);toast('Deleted');renderDonations($('page-donations'));}catch(e){toast(e.message,'err');}
+  });
 }
 function _addDonationNote(did, donId) {
   Modal.open('Add Note to Donation', `
@@ -1451,11 +1612,14 @@ async function renderBank(el) {
 }
 function _connectBank(){Modal.open('Connect Bank',`<div class="alert alert-info">Chase requires OAuth credentials or Plaid.</div><label>API Key</label><input id="bk-key" type="password"><label>API Secret</label><input id="bk-sec" type="password"><div class="bg mt"><button class="btn btn-primary" onclick="API.post('/api/orgs/${API.orgId}/bank',{api_key:val('bk-key'),api_secret:val('bk-sec')}).then(()=>{toast('Connected');Modal.close()}).catch(e=>toast(e.message||'Unknown error','err'))">Connect</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
 async function _labelDonation(donId, currentLabel) {
+  if (currentLabel === undefined) {
+    currentLabel = (window._donAll||[]).find(d=>d.id===donId)?.label || '';
+  }
   let lbls = [];
   try { const r = await API.get(`/api/orgs/${API.orgId}/label-lists`); lbls = r.donation_labels||[]; } catch{}
   window._saveDonationLabel = async () => {
-    const sel = $('ldon-sel'); const inp = $('ldon-txt');
-    const v = (sel?.value || inp?.value || '').trim();
+    const sel = $('ldon-sel');
+    const v = (sel?.value || '').trim();
     const btn = $('ldon-save-btn');
     if(btn){btn.textContent='Saving…';btn.disabled=true;}
     try {
@@ -1469,11 +1633,10 @@ async function _labelDonation(donId, currentLabel) {
   };
   Modal.open('Label Donation', `
     <label>Label</label>
-    <select id="ldon-sel" onchange="const i=$('ldon-txt');if(i&&this.value)i.value=this.value" style="margin-bottom:6px">
-      <option value="">— Select from list or type below —</option>
+    <select id="ldon-sel" style="margin-bottom:4px">
+      <option value="">— Select label —</option>
       ${lbls.map(l=>`<option value="${l}" ${currentLabel===l?'selected':''}>${l}</option>`).join('')}
     </select>
-    <input id="ldon-txt" value="${currentLabel||''}" placeholder="Custom label…" autocomplete="off">
     <div class="bg mt">
       <button class="btn btn-primary" id="ldon-save-btn" onclick="window._saveDonationLabel()">Save</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
