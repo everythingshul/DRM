@@ -712,3 +712,29 @@ router.post('/donations/unlinked', (req, res) => {
     res.json({ success: true, donation: get('SELECT * FROM donations WHERE id=?', [id]) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+// ── Link a donation to a donor ────────────────────────────────────────────────
+router.put('/donations/:donationId/link', (req, res) => {
+  const { donor_id } = req.body;
+  const don = get('SELECT id FROM donations WHERE id=? AND org_id=?', [req.params.donationId, req.orgId]);
+  if (!don) return res.status(404).json({ error: 'Donation not found' });
+  if (donor_id) {
+    const donor = get('SELECT id FROM donors WHERE id=? AND org_id=?', [donor_id, req.orgId]);
+    if (!donor) return res.status(404).json({ error: 'Donor not found' });
+  }
+  run('UPDATE donations SET donor_id=? WHERE id=? AND org_id=?',
+    [donor_id || null, req.params.donationId, req.orgId]);
+  res.json({ success: true });
+});
+
+// ── Label a donation transaction ──────────────────────────────────────────────
+router.put('/donations/:donationId/label', (req, res) => {
+  const { label } = req.body;
+  const don = get('SELECT id FROM donations WHERE id=? AND org_id=?', [req.params.donationId, req.orgId]);
+  if (!don) return res.status(404).json({ error: 'Donation not found' });
+  run('UPDATE donations SET notes=? WHERE id=? AND org_id=?',
+    [label || null, req.params.donationId, req.orgId]);
+  res.json({ success: true });
+});
+
+// donor search moved to donors.js

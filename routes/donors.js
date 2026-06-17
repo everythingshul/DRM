@@ -72,6 +72,18 @@ router.get('/needs-verification', (req, res) => {
 });
 
 // Get single donor
+// ── Search donors — must be before /:id ──────────────────────────────────────
+router.get('/search', (req, res) => {
+  const q = '%' + (req.query.q || '') + '%';
+  const donors = all(`
+    SELECT id, first_name, last_name, hebrew_full_name, email, cell
+    FROM donors WHERE org_id=?
+      AND (first_name LIKE ? OR last_name LIKE ? OR email LIKE ? OR cell LIKE ? OR hebrew_full_name LIKE ?)
+    ORDER BY last_name, first_name LIMIT 20`,
+    [req.orgId, q, q, q, q, q]);
+  res.json(donors);
+});
+
 router.get('/:id', (req, res) => {
   const donor = get(`
     SELECT d.*,

@@ -178,6 +178,7 @@ function runMigrations() {
     `ALTER TABLE organizations ADD COLUMN settings TEXT DEFAULT '{}'`,
     `ALTER TABLE donors ADD COLUMN autopay_minute INTEGER DEFAULT 0`,
     `ALTER TABLE kvitel_settings ADD COLUMN neighborhood_font TEXT DEFAULT 'Frank Ruhl Libre'`,
+    `ALTER TABLE donations ADD COLUMN label TEXT`,
     `ALTER TABLE kvitel_settings ADD COLUMN neighborhood_size REAL DEFAULT 14`,
     `ALTER TABLE kvitel_settings ADD COLUMN neighborhood_bold INTEGER DEFAULT 1`,
     `CREATE TABLE IF NOT EXISTS email_templates (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT, subject TEXT NOT NULL, blocks TEXT DEFAULT '[]', is_default_receipt INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,

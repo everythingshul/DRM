@@ -1207,6 +1207,8 @@ function _donRows(rows) {
       <button class="btn btn-icon" title="Add note" onclick="_addDonationNote('${d.donor_id}','${d.id}')">&#9997;</button>
       <a class="btn btn-ghost btn-sm" href="/api/orgs/${API.orgId}/payments/receipt/${d.id}" download="receipt-${d.transaction_id||d.id}.pdf" title="Download receipt">&#8681; Receipt</a>
       ${(d.status==='completed'||d.status==='partial_refund')?`<button class="btn btn-icon" title="Refund" onclick="_refundFromList('${d.donor_id}','${d.id}','${d.amount}','${d.transaction_id||''}')">&#8617;</button>`:''}
+      <button class="btn btn-icon" title="Label" onclick="_labelDonation('${d.id}','${(d.notes||'').replace(/'/g,"\\'")}')">&#9990;</button>
+      ${d.donor_id&&d.donor_id!='null'?`<button class="btn btn-icon" title="Unlink from donor" onclick="_unlinkDonation('${d.id}')">&#8854;</button>`:`<button class="btn btn-icon" title="Link to donor" onclick="_linkDonation('${d.id}')">&#8853;</button>`}
     </div></td>
   </tr>`).join('');
 }
@@ -1333,6 +1335,56 @@ async function renderBank(el) {
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
 function _connectBank(){Modal.open('Connect Bank',`<div class="alert alert-info">Chase requires OAuth credentials or Plaid.</div><label>API Key</label><input id="bk-key" type="password"><label>API Secret</label><input id="bk-sec" type="password"><div class="bg mt"><button class="btn btn-primary" onclick="API.post('/api/orgs/${API.orgId}/bank',{api_key:val('bk-key'),api_secret:val('bk-sec')}).then(()=>{toast('Connected');Modal.close()}).catch(e=>toast(e.message||'Unknown error','err'))">Connect</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+function _labelDonation(donId, currentNotes) {
+  Modal.open('Label Donation', `
+    <label>Label / Notes</label>
+    <input id="ldon-txt" value="${currentNotes||''}" placeholder="e.g. Annual pledge, Matching gift…" autocomplete="off">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="API.put('/api/orgs/${API.orgId}/donations/${donId}/label',{label:val('ldon-txt')}).then(()=>{toast('Labeled ✓');Modal.close();renderDonations($('page-donations'))}).catch(e=>toast(e.message||'Error','err'))">Save</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+function _linkDonation(donId) {
+  let _linkDonorId = null;
+  Modal.open('Link to Donor', `
+    <p style="font-size:13px;color:var(--gray-5);margin-bottom:10px">Search for the donor to link this donation to.</p>
+    <input id="ld-search" placeholder="Name, email, phone…" autocomplete="off" oninput="_ldSearch(this.value,'${donId}')">
+    <div id="ld-results" style="margin-top:6px"></div>
+    <div class="bg mt">
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+  window._ldSelectedId = null;
+}
+let _ldTimeout = null;
+async function _ldSearch(q, donId) {
+  clearTimeout(_ldTimeout);
+  const c = $('ld-results'); if(!c)return;
+  if(!q.trim()){c.innerHTML='';return;}
+  _ldTimeout = setTimeout(async()=>{
+    try {
+      const donors = await API.get(`/api/orgs/${API.orgId}/donors/search?q=${encodeURIComponent(q)}`);
+      c.innerHTML = donors.length ? donors.map(d=>`<div onclick="_ldLink('${donId}','${d.id}','${d.first_name} ${d.last_name}')"
+        style="padding:8px 10px;cursor:pointer;border:1px solid var(--gray-1);border-radius:5px;margin-bottom:4px;font-size:13px"
+        onmouseover="this.style.background='var(--blue-pale)'" onmouseout="this.style.background=''">
+        <strong>${d.first_name} ${d.last_name}</strong>${d.email?`<span style="color:var(--gray-5)"> · ${d.email}</span>`:''}
+      </div>`).join('') : '<p style="color:var(--gray-5);font-size:13px">No donors found</p>';
+    } catch{}
+  }, 300);
+}
+async function _ldLink(donId, donorId, name) {
+  try {
+    await API.put(`/api/orgs/${API.orgId}/donations/${donId}/link`, {donor_id: donorId});
+    toast(`Linked to ${name} ✓`); Modal.close();
+    renderDonations($('page-donations'));
+  } catch(e) { toast(e.message||'Error','err'); }
+}
+async function _unlinkDonation(donId) {
+  if (!confirm('Unlink this donation from its donor?')) return;
+  try {
+    await API.put(`/api/orgs/${API.orgId}/donations/${donId}/link`, {donor_id: null});
+    toast('Unlinked ✓'); renderDonations($('page-donations'));
+  } catch(e) { toast(e.message||'Error','err'); }
+}
 function _labelTx(id){Modal.open('Label Transaction',`<label>Label</label><input id="tx-lbl" placeholder="e.g. Donation, Expense…"><div class="bg mt"><button class="btn btn-primary" onclick="API.post('/api/orgs/${API.orgId}/bank/transactions/${id}/label',{label:val('tx-lbl')}).then(()=>{toast('Labeled');Modal.close();renderBank($('page-bank'))}).catch(e=>toast(e.message||'Unknown error','err'))">Save</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
 
 async function renderEmails(el) {
@@ -2415,46 +2467,103 @@ async function _saveExpense() {
 }
 
 // ── Unlinked donation (Fix 24) ────────────────────────────────────────────────
+let _ulSelectedDonorId = null;
+
 function _addUnlinkedDonation() {
   const now = new Date().toISOString().slice(0,16);
-  Modal.open('Add Donation (No Donor)', `
-    <div class="alert alert-info" style="font-size:12px">This donation will not be linked to any donor account.</div>
-    <label>Donor Name (for records)</label>
-    <input id="ul-name" placeholder="e.g. Anonymous or John Smith" autocomplete="off">
+  _ulSelectedDonorId = null;
+  Modal.open('Add Donation', `
+    <div class="tabs"><div class="tab on" data-tc="ul-t-linked">Link to Donor</div><div class="tab" data-tc="ul-t-anon">No Donor</div></div>
+    <div id="ul-t-linked" class="tc on">
+      <div style="position:relative">
+        <label>Search Donor</label>
+        <input id="ul-donor-search" placeholder="Name, email, phone…" autocomplete="off"
+          oninput="_ulSearchDonor(this.value)">
+        <div id="ul-donor-results" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;
+          border:1.5px solid var(--blue);border-top:none;border-radius:0 0 6px 6px;z-index:100;max-height:180px;overflow-y:auto;box-shadow:var(--shadow-md)"></div>
+      </div>
+      <div id="ul-donor-selected" style="display:none;margin-top:6px" class="alert alert-ok"></div>
+    </div>
+    <div id="ul-t-anon" class="tc">
+      <label>Name / Description (for records)</label>
+      <input id="ul-name" placeholder="e.g. Anonymous, Walk-in donor" autocomplete="off">
+    </div>
     <div class="r2 mt">
       <div><label>Amount ($) *</label><input type="number" id="ul-amt" step="0.01" placeholder="0.00"></div>
       <div><label>Method *</label>
-        <select id="ul-meth">
+        <select id="ul-meth" onchange="document.getElementById('ul-chk').style.display=this.value==='check'?'':'none'">
           <option value="check">Check</option><option value="cash">Cash</option>
           <option value="daf">DAF</option><option value="wire">Wire</option><option value="other">Other</option>
         </select>
       </div>
     </div>
+    <div id="ul-chk"><label>Check Number</label><input id="ul-chknum" autocomplete="off"></div>
     <div class="r2">
       <div><label>Date</label><input type="datetime-local" id="ul-date" value="${now}"></div>
       <div><label>Trans ID (auto if blank)</label><input id="ul-tx" autocomplete="off"></div>
     </div>
-    <label>Notes</label>
+    <label>Notes / Label</label>
     <input id="ul-notes" autocomplete="off">
     <div class="bg mt">
       <button class="btn btn-primary" onclick="_saveUnlinkedDonation()">Record</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
     </div>`, {sm:true});
+  tabsInit('#modal-body');
+  // Reset on tab switch
+  document.querySelectorAll('#modal-body .tab').forEach(t=>t.addEventListener('click',()=>{ _ulSelectedDonorId=null; const sd=$('ul-donor-selected'); if(sd)sd.style.display='none'; }));
 }
+
+let _ulSearchTimeout = null;
+async function _ulSearchDonor(q) {
+  clearTimeout(_ulSearchTimeout);
+  const res = $('ul-donor-results'); if(!res)return;
+  if (!q.trim()) { res.style.display='none'; return; }
+  _ulSearchTimeout = setTimeout(async () => {
+    try {
+      const donors = await API.get(`/api/orgs/${API.orgId}/donors/search?q=${encodeURIComponent(q)}`);
+      if (!donors.length) { res.innerHTML='<div style="padding:8px 12px;font-size:13px;color:var(--gray-5)">No donors found</div>'; res.style.display='block'; return; }
+      res.innerHTML = donors.map(d=>`<div onclick="_ulSelectDonor('${d.id}','${d.first_name} ${d.last_name}')" style="padding:8px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--gray-1)" onmouseover="this.style.background='var(--blue-pale)'" onmouseout="this.style.background=''">
+        <strong>${d.first_name} ${d.last_name}</strong>${d.email?`<span style="color:var(--gray-5);font-size:12px"> · ${d.email}</span>`:''}${d.cell?`<span style="color:var(--gray-5);font-size:12px"> · ${d.cell}</span>`:''}
+      </div>`).join('');
+      res.style.display = 'block';
+    } catch{}
+  }, 300);
+}
+function _ulSelectDonor(id, name) {
+  _ulSelectedDonorId = id;
+  const inp=$('ul-donor-search'); if(inp)inp.value=name;
+  const res=$('ul-donor-results'); if(res)res.style.display='none';
+  const sel=$('ul-donor-selected'); if(sel){sel.textContent='✓ '+name; sel.style.display='block';}
+}
+
 async function _saveUnlinkedDonation() {
   const amt = parseFloat(val('ul-amt'));
   if (!amt||amt<=0) { toast('Amount required','err'); return; }
+  const method = val('ul-meth');
+  if (method==='check'&&!val('ul-chknum')) { toast('Check number required','err'); return; }
   try {
-    await API.post(`/api/orgs/${API.orgId}/donations/unlinked`, {
-      amount: amt, method: val('ul-meth'),
-      donor_name: val('ul-name') || 'Anonymous',
-      donation_date: val('ul-date') || new Date().toISOString(),
-      transaction_id: val('ul-tx') || null,
-      notes: val('ul-notes') || null
-    });
-    toast('Donation recorded');
-    Modal.close();
-    navigateTo('donations');
+    if (_ulSelectedDonorId) {
+      // Linked donation via donor's route
+      await API.post(`/api/orgs/${API.orgId}/donors/${_ulSelectedDonorId}/donations`, {
+        amount: amt, method,
+        check_number: method==='check'?val('ul-chknum'):undefined,
+        donation_date: val('ul-date')||new Date().toISOString(),
+        transaction_id: val('ul-tx')||null,
+        notes: val('ul-notes')||null
+      });
+    } else {
+      // Unlinked
+      await API.post(`/api/orgs/${API.orgId}/donations/unlinked`, {
+        amount: amt, method,
+        check_number: method==='check'?val('ul-chknum'):undefined,
+        donor_name: val('ul-name')||'Anonymous',
+        donation_date: val('ul-date')||new Date().toISOString(),
+        transaction_id: val('ul-tx')||null,
+        notes: val('ul-notes')||null
+      });
+    }
+    toast('Donation recorded ✓'); Modal.close();
+    renderDonations($('page-donations'));
   } catch(e) { toast(e.message||'Error','err'); }
 }
 

@@ -52,7 +52,8 @@ function solaPost(payload) {
 }
 
 function assertApproved(result) {
-  if (result.xResult !== 'A') {
+  // Cardknox xResult: 'A' = Approved, 'V' = Voided — both are success
+  if (result.xResult !== 'A' && result.xResult !== 'V') {
     const msg = result.xError || result.xErrorCode || `Declined (${result.xResult})`;
     throw new Error('Sola: ' + msg);
   }
@@ -93,21 +94,27 @@ async function ccSale(orgId, { token, amount, name, zip, email, invoice, note })
 
 // ── CC: Refund by refNum ───────────────────────────────────────────────────────
 async function ccRefund(orgId, { refNum, amount }) {
-  const r = assertApproved(await solaPost({
+  const raw = await solaPost({
     ...base(orgId, 'cc:refund'),
     xRefNum: refNum,
     xAmount: parseFloat(amount).toFixed(2)
-  }));
-  return { refNum: r.xRefNum };
+  });
+  console.log('Sola ccRefund response:', JSON.stringify(raw));
+  const r = assertApproved(raw);
+  // xRefNum on refund is the new refund transaction number
+  return { refNum: r.xRefNum || refNum };
 }
 
 // ── CC: Void ───────────────────────────────────────────────────────────────────
 async function ccVoid(orgId, { refNum }) {
-  const r = assertApproved(await solaPost({
+  const raw = await solaPost({
     ...base(orgId, 'cc:void'),
     xRefNum: refNum
-  }));
-  return { refNum: r.xRefNum };
+  });
+  console.log('Sola ccVoid response:', JSON.stringify(raw));
+  const r = assertApproved(raw);
+  // Void returns the original xRefNum — keep it
+  return { refNum: r.xRefNum || refNum };
 }
 
 // ── DAF: Grant Recommendation ─────────────────────────────────────────────────
