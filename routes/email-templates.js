@@ -31,6 +31,31 @@ function renderBlocks(blocks, vars = {}) {
           </div>
         </td></tr>`;
 
+      case 'image_overlay': {
+        const oAlign = b.textAlign || 'center';
+        const oVAlign= b.vAlign || 'center';
+        const vPad   = oVAlign==='top' ? '16px 16px auto' : oVAlign==='bottom' ? 'auto 16px 16px' : 'auto';
+        return `
+          <tr><td style="padding:${b.padding||'0'};position:relative">
+            <div style="position:relative;display:inline-block;width:100%">
+              ${b.url ? `<img src="${b.url}" alt="${b.alt||''}"
+                style="width:100%;max-height:${b.maxHeight||'400px'};object-fit:cover;display:block">` :
+                `<div style="background:#c7d2fe;height:${b.maxHeight||'200px'};display:flex;align-items:center;justify-content:center;color:#666;font-size:13px">Image placeholder</div>`}
+              <div style="position:absolute;inset:0;background:${b.overlay||'rgba(0,0,0,0.45)'};
+                display:flex;align-items:${oVAlign==='top'?'flex-start':oVAlign==='bottom'?'flex-end':'center'};
+                justify-content:${oAlign==='left'?'flex-start':oAlign==='right'?'flex-end':'center'};
+                padding:20px">
+                <div style="direction:${dir};text-align:${oAlign};font-family:${ff};
+                  font-size:${b.size||28}px;font-weight:${b.bold!==false?'bold':'normal'};
+                  color:${b.color||'#ffffff'};line-height:1.3;
+                  text-shadow:0 2px 8px rgba(0,0,0,0.5);max-width:${b.textWidth||'80%'}">
+                  ${interpolate(b.text||'Text over image', vars)}
+                </div>
+              </div>
+            </div>
+          </td></tr>`;
+      }
+
       case 'image': return `
         <tr><td style="padding:${b.padding||'0'};text-align:${b.align||'center'}">
           ${b.url ? `<img src="${b.url}" alt="${b.alt||''}"
@@ -145,10 +170,35 @@ function renderBlocks(blocks, vars = {}) {
 <table width="600" cellpadding="0" cellspacing="0" border="0"
   style="background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);max-width:600px;width:100%">
 ${rows}
+<tr><td style="padding:20px 32px 24px;text-align:center;background:#f9fafb;border-top:1px solid #e5e7eb">
+  <div style="font-size:10px;color:#9ca3af;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:8px">Powered By</div>
+  <a href="https://everythingshul.com" target="_blank" style="text-decoration:none">
+    <img src="https://drm.everythingshul.com/img/logo.png" alt="EverythingShul"
+      style="height:28px;width:auto;display:block;margin:0 auto;opacity:0.75"
+      onerror="this.style.display='none'">
+  </a>
+</td></tr>
 </table>
 </td></tr></table>
 </body></html>`;
 }
+
+// ── Image upload ─────────────────────────────────────────────────────────────
+router.post('/upload-image', requireOrgAdmin, async (req, res) => {
+  try {
+    const { image_base64, mime_type, filename } = req.body;
+    if (!image_base64) return res.status(400).json({ error: 'No image data' });
+    const fs   = require('fs');
+    const path = require('path');
+    const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
+    const dir  = path.join(DATA_DIR, 'email-images');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const ext  = (mime_type||'image/png').includes('jpeg')||String(filename||'').endsWith('.jpg') ? 'jpg' : 'png';
+    const name = `img-${Date.now()}-${Math.random().toString(36).slice(2,8)}.${ext}`;
+    fs.writeFileSync(path.join(dir, name), Buffer.from(image_base64, 'base64'));
+    res.json({ success: true, url: `/email-images/${name}` });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 // ── CRUD ───────────────────────────────────────────────────────────────────────
 router.get('/', (req, res) => {

@@ -268,7 +268,7 @@ router.get('/:id/donations', (req, res) => {
   res.json(donations);
 });
 
-router.post('/:id/donations', (req, res) => {
+router.post('/:id/donations', async (req, res) => {
   try {
     const { amount, method, payment_method_id, transaction_id, donation_date, notes, check_number } = req.body;
     if (!amount || !method) return res.status(400).json({ error: 'Amount and method required' });
@@ -278,7 +278,6 @@ router.post('/:id/donations', (req, res) => {
     if (!donor) return res.status(404).json({ error: 'Donor not found' });
 
     const id = uuidv4();
-    // Auto-generate ES transaction ID for manual donations if none provided
     const autoTxId = transaction_id || ('ES' + String(Math.floor(Math.random() * 1000000000)).padStart(9, '0'));
     const finalNotes = check_number ? `Check #${check_number}${notes ? ' — ' + notes : ''}` : (notes || null);
 
@@ -287,10 +286,17 @@ router.post('/:id/donations', (req, res) => {
       [id, req.orgId, req.params.id, amount, method, payment_method_id || null, autoTxId,
        donation_date || new Date().toISOString(), finalNotes, req.user.id]);
 
-    res.json({ success: true, donation: get('SELECT * FROM donations WHERE id = ?', [id]) });
+    const donation = get('SELECT * FROM donations WHERE id = ?', [id]);
+    const org = get('SELECT * FROM organizations WHERE id = ?', [req.orgId]);
+
+    // Send receipt email for all manual donations
+    const { sendReceiptEmail } = require('../utils/scheduler');
+    await sendReceiptEmail(donor, donation, org).catch(e => console.error('Receipt email:', e.message));
+
+    res.json({ success: true, donation });
   } catch (e) {
     console.error(e);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: e.message || 'Server error' });
   }
 });
 

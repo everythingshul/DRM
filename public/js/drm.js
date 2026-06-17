@@ -40,10 +40,12 @@ const API = {
     const ct = res.headers.get('content-type') || '';
     if (!ct.includes('json')) {
       const txt = await res.text();
-      throw new Error(txt.slice(0, 200) || 'Server error');
+      // Strip HTML tags to get readable error text
+      const clean = txt.replace(/<[^>]*>/g,'').replace(/\s+/g,' ').trim();
+      throw new Error(clean.slice(0, 300) || `Server error (${res.status})`);
     }
     const json = await res.json();
-    if (!res.ok) throw new Error(json.error || json.message || (typeof json==='string'?json:'') || 'Request failed ('+res.status+')');
+    if (!res.ok) throw new Error(json.error || json.message || (typeof json==='string'?json:JSON.stringify(json)) || `Request failed (${res.status})`);
     return json;
   },
 
@@ -104,7 +106,11 @@ const Modal = {
     $('modal-title').textContent = title;
     $('modal-body').innerHTML = html;
     const box = $('modal-box');
-    box.className = 'modal-box' + (opts.lg ? ' lg' : '') + (opts.sm ? ' sm' : '') + (opts.tall ? ' tall' : '');
+    box.className = 'modal-box'
+      + (opts.lg   ? ' lg'   : '')
+      + (opts.sm   ? ' sm'   : '')
+      + (opts.tall ? ' tall' : '')
+      + (opts.full ? ' full' : '');
     $('modal-overlay').style.display = 'flex';
     if (opts.cb) setTimeout(opts.cb, 0);
   },
@@ -942,6 +948,45 @@ const DonorDetail = {
       this.open(did);
     } catch(e) { if(btn){btn.textContent='Save & Tokenize';btn.disabled=false;} toast(e.message||'Unknown error','err'); }
   },
+  _chargeDaf(did, pmId) {
+    const pm = (this.data?.paymentMethods||[]).find(p=>p.id===pmId);
+    if (!pm) { toast('Payment method not found','err'); return; }
+    const parts = (pm.other_description||'').split('|');
+    const cardNum = parts[0]||''; const exp = parts[1]||'1299';
+    if (!cardNum) { toast('No DAF card number stored. Re-add this payment method.','err'); return; }
+    Modal.open('Process DAF Grant', `
+      <div class="alert alert-info" style="font-size:13px;margin-bottom:12px">
+        <strong>${pm.daf_name||'DAF'}</strong> ••${cardNum.slice(-4)}<br>
+        Sola will route to the correct DAF provider automatically.
+      </div>
+      <label>Amount ($) *</label>
+      <input type="number" id="daf-amt" step="0.01" min="0.01" placeholder="0.00">
+      <label>Notes (optional)</label>
+      <input id="daf-notes" autocomplete="off">
+      <div class="bg mt">
+        <button class="btn btn-primary" id="daf-charge-btn" onclick="DonorDetail._doChargeDaf('${did}','${pmId}')">Process Grant</button>
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+      </div>`, {sm:true});
+  },
+  async _doChargeDaf(did, pmId) {
+    const amt = parseFloat(val('daf-amt'));
+    if (!amt||amt<=0) { toast('Enter amount','err'); return; }
+    const pm = (this.data?.paymentMethods||[]).find(p=>p.id===pmId);
+    const parts = (pm?.other_description||'').split('|');
+    const btn = document.getElementById('daf-charge-btn');
+    if (btn) { btn.textContent='Processing…'; btn.disabled=true; }
+    try {
+      const r = await API.post(`/api/orgs/${API.orgId}/payments/charge-daf`, {
+        donor_id: did, payment_method_id: pmId,
+        amount: amt, notes: val('daf-notes')||null
+      });
+      toast(`DAF grant processed · ${r.transaction_id}`);
+      Modal.close(); DonorDetail.open(did);
+    } catch(e) {
+      if (btn) { btn.textContent='Process Grant'; btn.disabled=false; }
+      toast(e.message||'DAF charge failed','err');
+    }
+  },
   async delPM(did, pmId) { confirmDlg('Remove payment method?', async()=>{ try{await API.del(`/api/orgs/${API.orgId}/donors/${did}/payment-methods/${pmId}`); toast('Removed'); DonorDetail.open(did);}catch(e){toast(e.message,'err');} }); },
 
   chargeNow(did) {
@@ -1038,13 +1083,53 @@ const DonorDetail = {
   addDonNote(did, donId) { Modal.open('Add Note to Donation', `<textarea id="dn-txt" style="min-height:80px;width:100%" placeholder="Note…"></textarea><div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveDonNote('${did}','${donId}')">Add</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, {sm:true}); },
   async _saveDonNote(did, donId) { const txt=val('dn-txt').trim(); if(!txt)return; try{await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations/${donId}/notes`,{text:txt}); toast('Added'); this.open(did);}catch(e){toast(e.message||'Unknown error','err');} },
 
-  refund(did, donId, amt, txId) { Modal.open('Refund', `<p style="margin-bottom:10px;font-size:13px;color:var(--gray-5)">Original: ${fmt$(amt)}</p><label>Refund Amount ($)</label><input type="number" id="rf-amt" step="0.01" max="${amt}" value="${amt}"><label>Reason</label><input id="rf-rsn" autocomplete="off">${txId?`<div class="alert alert-info" style="margin-top:10px;font-size:12px">Trans ID: ${txId}</div>`:''}<div class="bg mt"><button class="btn btn-red" onclick="DonorDetail._doRefund('${did}','${donId}','${txId}')">Refund</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, {sm:true}); },
+  refund(did, donId, amt, txId) {
+    Modal.open('Refund Donation', `
+      <p style="margin-bottom:10px;font-size:13px;color:var(--gray-5)">
+        Original amount: <strong>${fmt$(amt)}</strong>
+      </p>
+      <label>Refund Amount ($) *</label>
+      <input type="number" id="rf-amt" step="0.01" min="0.01" max="${parseFloat(amt).toFixed(2)}" value="${parseFloat(amt).toFixed(2)}">
+      <label>Reason (optional)</label>
+      <input id="rf-rsn" autocomplete="off" placeholder="Reason for refund">
+      ${txId && !txId.startsWith('ES') ? `<div class="alert alert-info" style="margin-top:10px;font-size:12px">Sola Trans ID: <strong>${txId}</strong> — will attempt gateway refund/void.</div>` : '<div class="alert alert-warn" style="margin-top:10px;font-size:12px">Manual payment — will mark as refunded in system only.</div>'}
+      <div id="rf-err" style="display:none" class="alert alert-err mt"></div>
+      <div class="bg mt">
+        <button class="btn btn-red" id="rf-btn" onclick="DonorDetail._doRefund('${did}','${donId}','${txId||''}')">Process Refund</button>
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+      </div>`, {sm:true});
+  },
   async _doRefund(did, donId, txId) {
-    const amt = parseFloat(val('rf-amt')); if (!amt||amt<=0) { toast('Enter amount','err'); return; }
+    // Read values from inputs while modal is still open
+    const amtInput = document.getElementById('rf-amt');
+    const rsnInput = document.getElementById('rf-rsn');
+    const errEl    = document.getElementById('rf-err');
+    const btn      = document.getElementById('rf-btn');
+
+    const amt = parseFloat(amtInput?.value);
+    if (!amt || amt <= 0) { toast('Enter a valid amount', 'err'); return; }
+    const notes = rsnInput?.value || '';
+
+    if (btn) { btn.textContent = 'Processing…'; btn.disabled = true; }
+    if (errEl) errEl.style.display = 'none';
+
     try {
-      const r = await API.post(`/api/orgs/${API.orgId}/payments/refund`, {donation_id:donId, donor_id:did, amount:amt, notes:val('rf-rsn')});
-      toast(`Refund of ${fmt$(amt)} processed (${r.method||'manual'})`); Modal.close(); DonorDetail.open(did);
-    } catch(e) { toast(e.message||'Unknown error','err'); }
+      const r = await API.post(`/api/orgs/${API.orgId}/payments/refund`, {
+        donation_id: donId,
+        donor_id: did,
+        amount: amt,
+        notes: notes || null
+      });
+      const label = r.method === 'void' ? 'Voided' : 'Refunded';
+      toast(`${label} ${fmt$(amt)} ✓`);
+      Modal.close();
+      DonorDetail.open(did);
+    } catch(e) {
+      const msg = e.message || 'Refund failed';
+      if (errEl) { errEl.textContent = msg; errEl.style.display = 'block'; }
+      if (btn) { btn.textContent = 'Process Refund'; btn.disabled = false; }
+      toast(msg, 'err');
+    }
   },
 
   addRecurring(did) {
@@ -1126,7 +1211,10 @@ function _donRows(rows) {
   </tr>`).join('');
 }
 function _addDonationNote(did, donId) { Modal.open('Add Note', `<textarea id="dn-txt" style="min-height:80px;width:100%" placeholder="Note…"></textarea><div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveDonNote('${did}','${donId}')">Add</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true}); }
-function _refundFromList(did, donId, amt, txId) { DonorDetail.refund(did, donId, amt, txId); }
+function _refundFromList(did, donId, amt, txId) {
+  if (!did || did === 'null') { toast('Cannot refund an unlinked donation from here — open the donor record', 'err'); return; }
+  DonorDetail.refund(did, donId, amt, txId);
+}
 function _filterDon() { const s=val('don-s').toLowerCase(),m=val('don-meth'),st=val('don-stat'); const f=(window._donAll||[]).filter(d=>(!s||`${d.first_name} ${d.last_name} ${d.transaction_id||''}`.toLowerCase().includes(s))&&(!m||d.method===m)&&(!st||d.status===st)); const tb=$('don-tb'); if(tb)tb.innerHTML=_donRows(f); }
 
 async function renderVerification(el) {
@@ -1428,7 +1516,7 @@ function _emailOpenDesigner(id, name, subject, blocks) {
   window._edBlocks = JSON.parse(JSON.stringify(blocks)); // deep copy
   window._edSelected = null;
 
-  Modal.open(id ? 'Edit Template' : 'New Template', '', {lg:true, tall:true, cb: () => {
+  Modal.open(id ? 'Edit Template' : 'New Template', '', {lg:true, tall:true, full:true, cb: () => {
     $('modal-body').innerHTML = _edRenderShell(name, subject);
     _edRenderCanvas();
     _edRenderProps();
@@ -1437,7 +1525,7 @@ function _emailOpenDesigner(id, name, subject, blocks) {
 
 function _edRenderShell(name, subject) {
   return `
-    <div style="display:grid;grid-template-columns:200px 1fr 260px;height:80vh;gap:0;margin:-20px">
+    <div style="display:grid;grid-template-columns:220px 1fr 280px;height:calc(100vh - 80px);gap:0;margin:-20px">
 
       <!-- Left: Block palette -->
       <div style="background:var(--gray-05);border-right:1px solid var(--gray-1);overflow-y:auto;padding:12px 10px">
@@ -1451,6 +1539,7 @@ function _edRenderShell(name, subject) {
           ['button',         '▶',  'Button'],
           ['columns',        '⊟',  'Columns'],
           ['divider',        '—',  'Divider'],
+          ['image_overlay',  '⊡',  'Image + Text Overlay'],
           ['spacer',         '↕',  'Spacer'],
           ['tax_footer',     '©',  'Tax Footer'],
         ].map(([type,icon,label]) => `
@@ -1528,6 +1617,20 @@ function _edBlockHtml(b, idx, selected) {
       </div>`; break;
     case 'text':
       inner = `<div style="padding:${b.padding||'12px 32px'};direction:${dir};text-align:${align};font-family:${ff};font-size:${b.size||15}px;color:${b.color||'#333'};line-height:${b.lineHeight||1.7}">${b.text||'Text block'}</div>`; break;
+    case 'image_overlay':
+      inner = `<div style="position:relative;display:inline-block;width:100%">
+        ${b.url?`<img src="${b.url}" style="width:100%;max-height:${b.maxHeight||'280px'};object-fit:cover;display:block">`:
+        `<div style="background:#c7d2fe;height:${b.maxHeight||'200px'};display:flex;align-items:center;justify-content:center;color:#666;font-size:13px">Upload an image</div>`}
+        <div style="position:absolute;inset:0;background:${b.overlay||'rgba(0,0,0,0.45)'};
+          display:flex;align-items:${b.vAlign==='top'?'flex-start':b.vAlign==='bottom'?'flex-end':'center'};
+          justify-content:${b.textAlign==='left'?'flex-start':b.textAlign==='right'?'flex-end':'center'};padding:20px">
+          <div style="direction:${dir};text-align:${b.textAlign||'center'};font-family:${ff};
+            font-size:${b.size||28}px;font-weight:${b.bold!==false?'bold':'normal'};
+            color:${b.color||'#fff'};line-height:1.3;text-shadow:0 2px 8px rgba(0,0,0,.5);max-width:${b.textWidth||'80%'}">
+            ${b.text||'Text over image'}
+          </div>
+        </div>
+      </div>`; break;
     case 'image':
       inner = `<div style="padding:${b.padding||'0'};text-align:${b.align||'center'}">
         ${b.url?`<img src="${b.url}" style="max-width:${b.maxWidth||'100%'};height:auto;display:block;${b.align==='center'?'margin:0 auto':''}">`
@@ -1670,14 +1773,33 @@ function _edRenderProps() {
       props += field('Padding', 'padding');
       break;
     case 'image':
-      props += field('Image URL', 'url');
+      props += `<div class="bg mt"><button class="btn btn-blue btn-sm" onclick="_edUploadImage(${idx})">&#8679; Upload Image</button></div>`;
+      props += field('Or paste Image URL', 'url');
       props += field('Alt Text', 'alt');
       props += field('Max Width (e.g. 100% or 300px)', 'maxWidth');
       props += alignSel('Alignment');
       props += field('Padding', 'padding');
       break;
+    case 'image_overlay':
+      props += `<div class="bg mt"><button class="btn btn-blue btn-sm" onclick="_edUploadImage(${idx})">&#8679; Upload Image</button></div>`;
+      props += field('Or paste Image URL', 'url');
+      props += field('Alt Text', 'alt');
+      props += field('Image Height (e.g. 280px)', 'maxHeight');
+      props += textarea('Overlay Text (HTML allowed)', 'text');
+      props += color('Text Color', 'color', '#ffffff');
+      props += field('Font Size (px)', 'size', 'number');
+      props += check('Bold', 'bold');
+      props += dirSel('Text Direction');
+      props += alignSel('Text Horizontal Align', 'textAlign');
+      props += select('Text Vertical Position', 'vAlign', [['center','Middle'],['top','Top'],['bottom','Bottom']]);
+      props += fontSel('Font Family', 'fontFamily');
+      props += color('Overlay Color', 'overlay', 'rgba(0,0,0,0.45)');
+      props += field('Max Text Width (e.g. 80%)', 'textWidth');
+      props += field('Outer Padding', 'padding');
+      break;
     case 'image_text':
-      props += field('Image URL', 'url');
+      props += `<div class="bg mt"><button class="btn btn-blue btn-sm" onclick="_edUploadImage(${idx},'imgUrl')">&#8679; Upload Image</button></div>`;
+      props += field('Or paste Image URL', 'url');
       props += select('Image Side', 'imgSide', [['left','Left'],['right','Right']]);
       props += field('Image Width (e.g. 40%)', 'imgWidth');
       props += textarea('Text (HTML allowed)', 'text');
@@ -1749,6 +1871,32 @@ function _edRenderProps() {
   c.innerHTML = props;
 }
 
+function _edUploadImage(idx, urlKey='url') {
+  // Create a hidden file input
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'image/png,image/jpeg,image/gif,image/webp';
+  inp.onchange = async e => {
+    const file = e.target.files[0]; if (!file) return;
+    if (file.size > 5*1024*1024) { toast('Image too large (max 5MB)','err'); return; }
+    const reader = new FileReader();
+    reader.onload = async ev => {
+      const b64 = ev.target.result.split(',')[1];
+      try {
+        toast('Uploading…');
+        const r = await API.post(`/api/orgs/${API.orgId}/email-templates/upload-image`, {
+          image_base64: b64, mime_type: file.type, filename: file.name
+        });
+        // Set the URL on the block
+        window._edBlocks[idx][urlKey] = r.url;
+        _edRenderCanvas();
+        _edRenderProps();
+        toast('Image uploaded ✓');
+      } catch(e2) { toast(e2.message||'Upload failed','err'); }
+    };
+    reader.readAsDataURL(file);
+  };
+  inp.click();
+}
 function _edAddBlock(type) {
   const defaults = {
     header:           { type:'header', text:'Your Header Here', bg:'#1a3a6b', color:'#ffffff', size:26, bold:true, dir:'ltr', align:'center', padding:'28px 32px' },
@@ -1757,6 +1905,7 @@ function _edAddBlock(type) {
     image_text:       { type:'image_text', url:'', text:'Text alongside your image.', imgSide:'left', imgWidth:'40%', size:15, color:'#333', dir:'ltr', padding:'16px 24px' },
     donation_details: { type:'donation_details', title:'Donation Details', headerBg:'#f0f4ff', headerColor:'#1a3a6b', size:14, padding:'0 32px' },
     button:           { type:'button', text:'Click Here', url:'#', bg:'#1a3a6b', color:'#ffffff', size:15, radius:6, btnPadding:'12px 28px', align:'center' },
+    image_overlay:    { type:'image_overlay', url:'', text:'Your headline here', color:'#ffffff', size:28, bold:true, dir:'ltr', textAlign:'center', vAlign:'center', overlay:'rgba(0,0,0,0.45)', maxHeight:'280px', textWidth:'80%', padding:'0' },
     columns:          { type:'columns', columns:[{text:'Column 1',dir:'ltr'},{text:'עמודה 2',dir:'rtl'}], padding:'8px 32px' },
     divider:          { type:'divider', color:'#e5e7eb', thickness:1, padding:'8px 32px' },
     spacer:           { type:'spacer', height:24 },

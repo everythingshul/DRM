@@ -70,6 +70,13 @@ async function sendReceiptEmail(donor, donation, org) {
             Tax ID: 11-6076986 &nbsp;|&nbsp; {{org_name}}<br>
             No goods or services were provided in exchange for this donation.
           </p>
+          <div style="margin-top:24px;padding-top:16px;border-top:1px solid #e5e7eb;text-align:center">
+            <div style="font-size:10px;color:#9ca3af;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:8px">Powered By</div>
+            <a href="https://everythingshul.com" target="_blank" style="text-decoration:none">
+              <img src="https://drm.everythingshul.com/img/logo.png" alt="EverythingShul"
+                style="height:28px;width:auto;display:block;margin:0 auto;opacity:0.75">
+            </a>
+          </div>
         </div>`, vars);
     }
 
@@ -108,16 +115,24 @@ async function sendChargeNotificationToOwner(org, donor, donation, success, fail
       ? `✅ Charge Processed — ${donorName} ${amount}`
       : `❌ Charge FAILED — ${donorName} ${amount}`;
 
+    const poweredBy = `<div style="margin-top:24px;padding-top:16px;border-top:1px solid #e5e7eb;text-align:center">
+      <div style="font-size:10px;color:#9ca3af;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:8px">Powered By</div>
+      <a href="https://everythingshul.com" target="_blank" style="text-decoration:none">
+        <img src="https://drm.everythingshul.com/img/logo.png" alt="EverythingShul"
+          style="height:28px;width:auto;display:block;margin:0 auto;opacity:0.75">
+      </a>
+    </div>`;
+
     const html = success
       ? `<p>A scheduled charge of <strong>${amount}</strong> was successfully processed for <strong>${donorName}</strong>.</p>
          <p>Date: ${new Date().toLocaleString()}</p>
          <p>Transaction ID: ${donation.transaction_id || 'N/A'}</p>
-         ${donor.email ? `<p>Donor email: ${donor.email}</p>` : ''}`
+         ${donor.email ? `<p>Donor email: ${donor.email}</p>` : ''}${poweredBy}`
       : `<p>A scheduled charge of <strong>${amount}</strong> <span style="color:red;font-weight:bold;">FAILED</span> for <strong>${donorName}</strong>.</p>
          <p>Date: ${new Date().toLocaleString()}</p>
          <p>Reason: <strong>${failReason || 'Unknown'}</strong></p>
          <p>Please log in to DRM to review and retry this charge.</p>
-         ${donor.email ? `<p>Donor email: ${donor.email}</p>` : ''}`;
+         ${donor.email ? `<p>Donor email: ${donor.email}</p>` : ''}${poweredBy}`;
 
     for (const admin of admins) {
       await transporter.sendMail({

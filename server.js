@@ -35,6 +35,8 @@ app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 // Serve org-uploaded logos
 app.use('/org-logos', express.static(path.join(DATA_DIR, 'logos')));
+// Serve email-designer uploaded images
+app.use('/email-images', express.static(path.join(DATA_DIR, 'email-images')));
 
 // File upload
 const upload = multer({

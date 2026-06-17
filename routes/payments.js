@@ -168,23 +168,25 @@ router.post('/refund', async (req, res) => {
       && !don.transaction_id.startsWith('ES');
 
     if (isRealSolaTx) {
-      // Try refund first (works for settled transactions)
+      // Try void first (Sola prefers void for same-day / unsettled transactions)
       try {
-        const r = await ccRefund(req.orgId, { refNum: don.transaction_id, amount: refAmt });
-        solaRefNum = r.refNum;
-        method = 'refund';
-      } catch(refundErr) {
-        // If refund fails (e.g. same-day), try void
+        const v = await ccVoid(req.orgId, { refNum: don.transaction_id });
+        solaRefNum = v.refNum;
+        method = 'void';
+      } catch(voidErr) {
+        // Void failed (transaction already settled) — fall back to refund
         try {
-          const v = await ccVoid(req.orgId, { refNum: don.transaction_id });
-          solaRefNum = v.refNum;
-          method = 'void';
-        } catch(voidErr) {
-          return res.status(400).json({ error: `Refund failed: ${refundErr.message}. Void also failed: ${voidErr.message}` });
+          const r = await ccRefund(req.orgId, { refNum: don.transaction_id, amount: refAmt });
+          solaRefNum = r.refNum;
+          method = 'refund';
+        } catch(refundErr) {
+          return res.status(400).json({
+            error: `Void failed: ${voidErr.message}. Refund also failed: ${refundErr.message}`
+          });
         }
       }
     }
-    // For manual/check/cash — just mark in DB (no Sola call)
+    // For manual/check/cash/wire — just mark in DB, no Sola call
 
     const newRefunded = prevRefunded + refAmt;
     const newStatus = newRefunded >= parseFloat(don.amount) - 0.001 ? 'refunded' : 'partial_refund';

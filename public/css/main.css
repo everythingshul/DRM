@@ -244,7 +244,7 @@ th.sa::after{content:' ▲';font-size:9px}th.sd::after{content:' ▼';font-size:
   display:flex;align-items:flex-start;justify-content:center;padding:32px 14px;overflow-y:auto}
 .modal-box{background:var(--white);border-radius:12px;width:100%;max-width:660px;
   box-shadow:var(--shadow-md);margin:auto}
-.modal-box.lg{max-width:920px}.modal-box.sm{max-width:440px}.modal-box.tall{min-height:80vh}
+.modal-box.lg{max-width:960px}.modal-box.sm{max-width:440px}.modal-box.tall{min-height:80vh}.modal-box.full{max-width:98vw;width:98vw}
 /* Logo — transparent PNG, no filter needed */
 .auth-logo{height:72px;object-fit:contain;margin-bottom:18px;display:block;margin-left:auto;margin-right:auto}
 #sb-logo-img{
