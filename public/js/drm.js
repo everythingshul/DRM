@@ -91,18 +91,37 @@ const $ = (id) => document.getElementById(id);
 const val = (id) => $(id)?.value || '';
 
 function toast(msg, type='ok') {
+  // Fully JS-driven — no CSS animation to conflict with
   const c = $('toast-wrap');
   if (!c) return;
   const t = document.createElement('div');
-  t.className = 'toast ' + type;
-  t.textContent = String(msg||'Unknown error');
+  const text = String(msg || 'An error occurred');
+  // Inline all styles — guaranteed to show regardless of CSS issues
+  const bg = type==='err' ? '#d63031' : type==='warn' ? '#f0a500' : '#22a06b';
+  const color = type==='warn' ? '#1a1a2e' : '#ffffff';
+  t.setAttribute('style',
+    `background:${bg};color:${color};padding:11px 16px;border-radius:6px;` +
+    `font-size:13px;font-family:Arial,sans-serif;font-weight:500;` +
+    `box-shadow:0 4px 16px rgba(0,0,0,0.22);max-width:340px;` +
+    `word-break:break-word;line-height:1.4;` +
+    `position:relative;right:-320px;opacity:0;` +
+    `transition:right 0.25s ease, opacity 0.25s ease`
+  );
+  t.textContent = text;
   c.appendChild(t);
-  const dur = type==='err' ? 6000 : 3200;
+  // Slide in after a tick
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      t.style.right = '0';
+      t.style.opacity = '1';
+    });
+  });
+  // Fade out and remove
+  const dur = type==='err' ? 7000 : 3500;
   setTimeout(() => {
-    // Only apply transition at fade-out time — doesn't conflict with slideIn animation
-    t.style.transition = 'opacity 0.4s ease';
+    t.style.right = '-320px';
     t.style.opacity = '0';
-    setTimeout(() => t.remove(), 420);
+    setTimeout(() => { if(t.parentNode) t.parentNode.removeChild(t); }, 300);
   }, dur);
 }
 
@@ -1060,6 +1079,15 @@ const DonorDetail = {
 
   manual(did) {
     const now = new Date().toISOString().slice(0,16);
+    // Load donation labels for the dropdown
+    API.get(`/api/orgs/${API.orgId}/label-lists`).then(lists => {
+      const sel = $('md-label-sel');
+      if (sel && lists.donation_labels) {
+        lists.donation_labels.forEach(l => {
+          const o = document.createElement('option'); o.value=l; o.textContent=l; sel.appendChild(o);
+        });
+      }
+    }).catch(()=>{});
     Modal.open('Manual Donation', `
       <div class="r2">
         <div><label>Amount ($) *</label><input type="number" id="md-amt" step="0.01" placeholder="0.00"></div>
@@ -1081,7 +1109,13 @@ const DonorDetail = {
         <div><label>Date *</label><input type="datetime-local" id="md-date" value="${now}"></div>
         <div><label>Trans ID (auto-assigned if blank)</label><input id="md-tx" autocomplete="off" placeholder="ES…"></div>
       </div>
-      <label>Notes</label><input id="md-notes" autocomplete="off">
+      <label>Label (optional)</label>
+      <div style="display:flex;gap:6px">
+        <select id="md-label-sel" style="flex:1" onchange="const inp=$('md-notes');if(inp&&this.value)inp.value=this.value">
+          <option value="">— Select label or type custom —</option>
+        </select>
+      </div>
+      <input id="md-notes" autocomplete="off" placeholder="Or type custom label/notes…" style="margin-top:4px">
       <div class="bg mt">
         <button class="btn btn-primary" onclick="DonorDetail._saveManual('${did}')">Record</button>
         <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
@@ -1246,12 +1280,34 @@ function _donRows(rows) {
       <button class="btn btn-icon" title="Add note" onclick="_addDonationNote('${d.donor_id}','${d.id}')">&#9997;</button>
       <a class="btn btn-ghost btn-sm" href="/api/orgs/${API.orgId}/payments/receipt/${d.id}" download="receipt-${d.transaction_id||d.id}.pdf" title="Download receipt">&#8681; Receipt</a>
       ${(d.status==='completed'||d.status==='partial_refund')?`<button class="btn btn-icon" title="Refund" onclick="_refundFromList('${d.donor_id}','${d.id}','${d.amount}','${d.transaction_id||''}')">&#8617;</button>`:''}
-      <button class="btn btn-icon" title="Label" onclick="_labelDonation('${d.id}','${(d.notes||'').replace(/'/g,"\\'")}')">&#9990;</button>
+      <button class="btn btn-icon" title="Label" onclick="_labelDonation('${d.id}','${(d.label||'').replace(/'/g,"\\'")}')">&#9990;</button>
       ${d.donor_id&&d.donor_id!='null'?`<button class="btn btn-icon" title="Unlink from donor" onclick="_unlinkDonation('${d.id}')">&#8854;</button>`:`<button class="btn btn-icon" title="Link to donor" onclick="_linkDonation('${d.id}')">&#8853;</button>`}
     </div></td>
   </tr>`).join('');
 }
-function _addDonationNote(did, donId) { Modal.open('Add Note', `<textarea id="dn-txt" style="min-height:80px;width:100%" placeholder="Note…"></textarea><div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveDonNote('${did}','${donId}')">Add</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true}); }
+function _addDonationNote(did, donId) {
+  Modal.open('Add Note to Donation', `
+    <textarea id="dn-txt" style="min-height:90px;width:100%" placeholder="Note…"></textarea>
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_saveDonationNoteFromList('${did}','${donId}')">Add Note</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+async function _saveDonationNoteFromList(did, donId) {
+  const txt = val('dn-txt').trim();
+  if (!txt) { toast('Enter a note', 'err'); return; }
+  try {
+    if (did && did !== 'null') {
+      await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations/${donId}/notes`, {text: txt});
+    } else {
+      // Unlinked donation — store note in the donation's notes field directly
+      await API.put(`/api/orgs/${API.orgId}/donations/${donId}/label`, {label: txt});
+    }
+    toast('Note added ✓');
+    Modal.close();
+    renderDonations($('page-donations'));  // stay on donations page
+  } catch(e) { toast(e.message || 'Failed to add note', 'err'); }
+}
 function _refundFromList(did, donId, amt, txId) {
   if (!did || did === 'null') { toast('Cannot refund an unlinked donation from here — open the donor record', 'err'); return; }
   DonorDetail.refund(did, donId, amt, txId);
@@ -2659,33 +2715,40 @@ function _ulSelectDonor(id, name) {
 
 async function _saveUnlinkedDonation() {
   const amt = parseFloat(val('ul-amt'));
-  if (!amt||amt<=0) { toast('Amount required','err'); return; }
+  if (!amt || amt <= 0) { toast('Enter an amount', 'err'); return; }
   const method = val('ul-meth');
-  if (method==='check'&&!val('ul-chknum')) { toast('Check number required','err'); return; }
+  if (!method) { toast('Select a payment method', 'err'); return; }
+  if (method === 'check' && !val('ul-chknum').trim()) { toast('Check number required', 'err'); return; }
+
+  const btn = document.querySelector('#modal-body .btn-primary');
+  if (btn) { btn.textContent = 'Recording…'; btn.disabled = true; }
+
   try {
     if (_ulSelectedDonorId) {
-      // Linked donation via donor's route
       await API.post(`/api/orgs/${API.orgId}/donors/${_ulSelectedDonorId}/donations`, {
         amount: amt, method,
-        check_number: method==='check'?val('ul-chknum'):undefined,
-        donation_date: val('ul-date')||new Date().toISOString(),
-        transaction_id: val('ul-tx')||null,
-        notes: val('ul-notes')||null
+        check_number: method === 'check' ? val('ul-chknum') : undefined,
+        donation_date: val('ul-date') || new Date().toISOString(),
+        transaction_id: val('ul-tx') || null,
+        notes: val('ul-notes') || null
       });
     } else {
-      // Unlinked
       await API.post(`/api/orgs/${API.orgId}/donations/unlinked`, {
         amount: amt, method,
-        check_number: method==='check'?val('ul-chknum'):undefined,
-        donor_name: val('ul-name')||'Anonymous',
-        donation_date: val('ul-date')||new Date().toISOString(),
-        transaction_id: val('ul-tx')||null,
-        notes: val('ul-notes')||null
+        check_number: method === 'check' ? val('ul-chknum') : undefined,
+        donor_name: val('ul-name') || 'Anonymous',
+        donation_date: val('ul-date') || new Date().toISOString(),
+        transaction_id: val('ul-tx') || null,
+        notes: val('ul-notes') || null
       });
     }
-    toast('Donation recorded ✓'); Modal.close();
+    toast('Donation recorded ✓');
+    Modal.close();
     renderDonations($('page-donations'));
-  } catch(e) { toast(e.message||'Error','err'); }
+  } catch(e) {
+    if (btn) { btn.textContent = 'Record'; btn.disabled = false; }
+    toast(e.message || 'Failed to record donation', 'err');
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init);

@@ -734,7 +734,7 @@ router.put('/donations/:donationId/label', (req, res) => {
   const { label } = req.body;
   const don = get('SELECT id FROM donations WHERE id=? AND org_id=?', [req.params.donationId, req.orgId]);
   if (!don) return res.status(404).json({ error: 'Donation not found' });
-  run('UPDATE donations SET notes=? WHERE id=? AND org_id=?',
+  run('UPDATE donations SET label=? WHERE id=? AND org_id=?',
     [label || null, req.params.donationId, req.orgId]);
   res.json({ success: true });
 });

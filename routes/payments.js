@@ -168,26 +168,44 @@ router.post('/refund', async (req, res) => {
       && !don.transaction_id.startsWith('ES');
 
     if (isRealSolaTx) {
-      // Try void first (Sola prefers void for same-day / unsettled transactions)
       try {
-        console.log(`[refund] Attempting void of txId=${don.transaction_id} amount=${refAmt}`);
+        console.log(`[refund] Attempting void txId=${don.transaction_id}`);
         const v = await ccVoid(req.orgId, { refNum: don.transaction_id });
         solaRefNum = v.refNum;
         method = 'void';
-        console.log(`[refund] Void SUCCESS solaRefNum=${solaRefNum}`);
+        console.log(`[refund] Void SUCCESS refNum=${solaRefNum}`);
       } catch(voidErr) {
-        console.log(`[refund] Void failed: ${voidErr.message} — trying refund`);
-        // Void failed — fall back to refund
-        try {
-          const r = await ccRefund(req.orgId, { refNum: don.transaction_id, amount: refAmt });
-          solaRefNum = r.refNum;
-          method = 'refund';
-          console.log(`[refund] Refund SUCCESS solaRefNum=${solaRefNum}`);
-        } catch(refundErr) {
-          console.log(`[refund] Refund also failed: ${refundErr.message}`);
-          return res.status(400).json({
-            error: `Void failed: ${voidErr.message}. Refund also failed: ${refundErr.message}`
-          });
+        const voidMsg = voidErr.message || '';
+        const alreadyVoided = voidMsg.toLowerCase().includes('previously voided') ||
+                              voidMsg.toLowerCase().includes('already voided');
+        console.log(`[refund] Void failed: ${voidMsg} alreadyVoided=${alreadyVoided}`);
+
+        if (alreadyVoided) {
+          // Sola says it was already voided — mark it in our DB without another Sola call
+          method = 'void';
+          solaRefNum = don.transaction_id;
+          console.log('[refund] Treating as already voided — marking in DB');
+        } else {
+          // Try refund as fallback (settled transactions)
+          try {
+            const r = await ccRefund(req.orgId, { refNum: don.transaction_id, amount: refAmt });
+            solaRefNum = r.refNum;
+            method = 'refund';
+            console.log(`[refund] Refund SUCCESS refNum=${solaRefNum}`);
+          } catch(refundErr) {
+            const refundMsg = refundErr.message || '';
+            const alreadyRefunded = refundMsg.toLowerCase().includes('previously voided') ||
+                                    refundMsg.toLowerCase().includes('already');
+            if (alreadyRefunded) {
+              method = 'refund';
+              solaRefNum = don.transaction_id;
+              console.log('[refund] Treating as already refunded — marking in DB');
+            } else {
+              return res.status(400).json({
+                error: `Void failed: ${voidMsg}. Refund also failed: ${refundMsg}`
+              });
+            }
+          }
         }
       }
     }

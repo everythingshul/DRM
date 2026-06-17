@@ -7,7 +7,14 @@ const nodemailer = require('nodemailer');
 const { ccSale: chargeToken } = require('./sola');
 
 function getTransporter(settings) {
-  if (!settings?.smtp_email || !settings?.smtp_password) return null;
+  if (!settings?.smtp_email) {
+    console.log('[email] No SMTP email configured — skipping email');
+    return null;
+  }
+  if (!settings?.smtp_password) {
+    console.log('[email] No SMTP password configured — skipping email. Configure in Settings > Email.');
+    return null;
+  }
   return nodemailer.createTransport({
     host: settings.smtp_host || 'smtp.gmail.com',
     port: settings.smtp_port || 587,
@@ -24,9 +31,24 @@ function interpolateTemplate(template, vars) {
 
 async function sendReceiptEmail(donor, donation, org) {
   try {
-    if (donor.donation_emails_paused) return;
+    if (donor.donation_emails_paused) {
+      console.log(`[receipt] Skipping — donation emails paused for donor ${donor.id}`);
+      return;
+    }
     const settings = get('SELECT * FROM email_settings WHERE org_id = ?', [org.id]);
-    if (!settings?.smtp_email || settings.donation_emails_paused) return;
+    if (!settings?.smtp_email) {
+      console.log(`[receipt] Skipping — no SMTP email configured for org ${org.id}`);
+      return;
+    }
+    if (settings.donation_emails_paused) {
+      console.log(`[receipt] Skipping — donation emails paused for org ${org.id}`);
+      return;
+    }
+    if (!donor.email) {
+      console.log(`[receipt] Skipping — donor ${donor.id} has no email address`);
+      return;
+    }
+    console.log(`[receipt] Sending to ${donor.email} for donation ${donation.id}`);
 
     const transporter = getTransporter(settings);
     if (!transporter) return;

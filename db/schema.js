@@ -185,6 +185,30 @@ function runMigrations() {
     `ALTER TABLE donors ADD COLUMN autopay_minute INTEGER DEFAULT 0`,
     `ALTER TABLE kvitel_settings ADD COLUMN neighborhood_font TEXT DEFAULT 'Frank Ruhl Libre'`,
     `ALTER TABLE donations ADD COLUMN label TEXT`,
+    // Rebuild donations table to remove old CHECK constraint on status (if it exists)
+    (() => {
+      try {
+        const info = db.exec("SELECT sql FROM sqlite_master WHERE type='table' AND name='donations'");
+        const ddl = info[0]?.values[0]?.[0] || '';
+        if (ddl.includes('CHECK') && ddl.includes('status')) {
+          // Rename old, create new without constraint, copy data, drop old
+          db.run('ALTER TABLE donations RENAME TO donations_old');
+          db.run(`CREATE TABLE donations (
+            id TEXT PRIMARY KEY, org_id TEXT NOT NULL, donor_id TEXT,
+            amount REAL NOT NULL, method TEXT NOT NULL, payment_method_id TEXT,
+            transaction_id TEXT, status TEXT DEFAULT 'completed',
+            donation_date DATETIME NOT NULL, notes TEXT, label TEXT,
+            donation_notes TEXT DEFAULT '[]', refund_amount REAL DEFAULT 0, refund_notes TEXT,
+            is_manual INTEGER DEFAULT 0, is_autopay INTEGER DEFAULT 0, is_recurring INTEGER DEFAULT 0,
+            receipt_sent INTEGER DEFAULT 0, failure_reason TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP, created_by TEXT
+          )`);
+          db.run('INSERT INTO donations SELECT id,org_id,donor_id,amount,method,payment_method_id,transaction_id,status,donation_date,notes,NULL,donation_notes,COALESCE(refund_amount,0),refund_notes,COALESCE(is_manual,0),COALESCE(is_autopay,0),COALESCE(is_recurring,0),COALESCE(receipt_sent,0),failure_reason,created_at,created_by FROM donations_old');
+          db.run('DROP TABLE donations_old');
+          console.log('[migration] Rebuilt donations table without CHECK constraint');
+        }
+      } catch(e) { /* already clean */ }
+    })(),
     `CREATE TABLE IF NOT EXISTS org_label_lists (id TEXT PRIMARY KEY, org_id TEXT UNIQUE NOT NULL, donor_labels TEXT DEFAULT '[]', donation_labels TEXT DEFAULT '[]', updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
     `ALTER TABLE kvitel_settings ADD COLUMN neighborhood_size REAL DEFAULT 14`,
     `ALTER TABLE kvitel_settings ADD COLUMN neighborhood_bold INTEGER DEFAULT 1`,
