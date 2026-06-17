@@ -201,12 +201,14 @@ router.get('/reports/donations', (req, res) => {
   const { from, to, method, donor_id, status, format = 'json' } = req.query;
   let sql = `
     SELECT don.id, don.donation_date, don.amount, don.method, don.status,
-           don.transaction_id, don.notes, don.is_manual, don.is_autopay,
+           don.transaction_id, don.notes, don.label, don.is_manual, don.is_autopay,
+           don.donor_id,
            d.first_name, d.last_name, d.email, d.cell,
            n.name_he as neighborhood,
-           pm.label as payment_label, pm.last_four
+           pm.label as payment_label, pm.last_four,
+           don.refund_amount, don.refund_notes
     FROM donations don
-    JOIN donors d ON don.donor_id = d.id
+    LEFT JOIN donors d ON don.donor_id = d.id
     LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
     LEFT JOIN payment_methods pm ON don.payment_method_id = pm.id
     WHERE don.org_id = ?
@@ -738,3 +740,25 @@ router.put('/donations/:donationId/label', (req, res) => {
 });
 
 // donor search moved to donors.js
+
+// ── Label lists (donor labels + donation labels) ───────────────────────────────
+router.get('/label-lists', (req, res) => {
+  const r = get('SELECT * FROM org_label_lists WHERE org_id=?', [req.orgId]);
+  res.json({
+    donor_labels:    (() => { try { return JSON.parse(r?.donor_labels||'[]'); } catch { return []; } })(),
+    donation_labels: (() => { try { return JSON.parse(r?.donation_labels||'[]'); } catch { return []; } })()
+  });
+});
+
+router.put('/label-lists', requireOrgAdmin, (req, res) => {
+  const { donor_labels, donation_labels } = req.body;
+  const ex = get('SELECT id FROM org_label_lists WHERE org_id=?', [req.orgId]);
+  if (ex) {
+    run('UPDATE org_label_lists SET donor_labels=?,donation_labels=?,updated_at=CURRENT_TIMESTAMP WHERE org_id=?',
+      [JSON.stringify(donor_labels||[]), JSON.stringify(donation_labels||[]), req.orgId]);
+  } else {
+    run('INSERT INTO org_label_lists (id,org_id,donor_labels,donation_labels) VALUES (?,?,?,?)',
+      [require('uuid').v4(), req.orgId, JSON.stringify(donor_labels||[]), JSON.stringify(donation_labels||[])]);
+  }
+  res.json({ success: true });
+});

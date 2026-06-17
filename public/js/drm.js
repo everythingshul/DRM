@@ -97,8 +97,13 @@ function toast(msg, type='ok') {
   t.className = 'toast ' + type;
   t.textContent = String(msg||'Unknown error');
   c.appendChild(t);
-  const dur = type==='err' ? 5000 : 3200;
-  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 350); }, dur);
+  const dur = type==='err' ? 6000 : 3200;
+  setTimeout(() => {
+    // Only apply transition at fade-out time — doesn't conflict with slideIn animation
+    t.style.transition = 'opacity 0.4s ease';
+    t.style.opacity = '0';
+    setTimeout(() => t.remove(), 420);
+  }, dur);
 }
 
 const Modal = {
@@ -990,17 +995,51 @@ const DonorDetail = {
   async delPM(did, pmId) { confirmDlg('Remove payment method?', async()=>{ try{await API.del(`/api/orgs/${API.orgId}/donors/${did}/payment-methods/${pmId}`); toast('Removed'); DonorDetail.open(did);}catch(e){toast(e.message,'err');} }); },
 
   chargeNow(did) {
-    const pms = (this.data?.paymentMethods||[]).filter(p=>p.type==='credit_card'&&p.sola_token);
-    if (!pms.length) { toast('No tokenized cards on file. Add a card first.','err'); return; }
-    Modal.open('Charge Card', `
+    const allPms  = this.data?.paymentMethods||[];
+    const ccPms   = allPms.filter(p => p.type==='credit_card' && p.sola_token);
+    const dafPms  = allPms.filter(p => p.type==='daf' && (p.other_description||'').split('|')[0]);
+    if (!ccPms.length && !dafPms.length) {
+      toast('No chargeable payment methods. Add a credit card or DAF card first.','err'); return;
+    }
+    const opts = [
+      ...ccPms.map(p  => `<option value="cc|${p.id}">${cbrand(p.card_brand,p.last_four)} ${p.label?'('+p.label+')':''}</option>`),
+      ...dafPms.map(p => `<option value="daf|${p.id}">DAF: ${p.daf_name||'DAF'} ••${((p.other_description||'').split('|')[0]).slice(-4)} ${p.label?'('+p.label+')':''}</option>`)
+    ].join('');
+    Modal.open('Charge', `
       <label>Payment Method</label>
-      <select id="cn-pm">${pms.map(p=>`<option value="${p.id}">${cbrand(p.card_brand,p.last_four)} ${p.label?'('+p.label+')':''}</option>`).join('')}</select>
-      <label>Amount ($)</label><input type="number" id="cn-amt" step="0.01" placeholder="0.00">
-      <label>Notes (optional)</label><input id="cn-notes" autocomplete="off">
+      <select id="cn-pm">${opts}</select>
+      <label>Amount ($) *</label>
+      <input type="number" id="cn-amt" step="0.01" min="0.01" placeholder="0.00">
+      <label>Notes (optional)</label>
+      <input id="cn-notes" autocomplete="off">
       <div class="bg mt">
-        <button class="btn btn-primary" onclick="DonorDetail._doCharge('${did}')">Charge Now</button>
+        <button class="btn btn-primary" id="cn-btn" onclick="DonorDetail._doChargeNow('${did}')">Charge Now</button>
         <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>`, { sm: true });
+      </div>`, {sm:true});
+  },
+  async _doChargeNow(did) {
+    const amt = parseFloat(val('cn-amt'));
+    if (!amt||amt<=0) { toast('Enter amount','err'); return; }
+    const sel   = val('cn-pm');
+    const [type, pmId] = sel.split('|');
+    const notes = val('cn-notes')||null;
+    const btn   = $('cn-btn');
+    if (btn) { btn.textContent='Charging…'; btn.disabled=true; }
+    try {
+      let r;
+      if (type==='daf') {
+        r = await API.post(`/api/orgs/${API.orgId}/payments/charge-daf`,
+          {donor_id:did, payment_method_id:pmId, amount:amt, notes});
+      } else {
+        r = await API.post(`/api/orgs/${API.orgId}/payments/charge`,
+          {donor_id:did, payment_method_id:pmId, amount:amt, notes});
+      }
+      toast(`Charged ${fmt$(amt)} · ${r.transaction_id}`);
+      Modal.close(); DonorDetail.open(did);
+    } catch(e) {
+      if (btn) { btn.textContent='Charge Now'; btn.disabled=false; }
+      toast(e.message||'Charge failed','err');
+    }
   },
   chargeCard(did, pmId) {
     Modal.open('Charge Card', `
@@ -1335,14 +1374,26 @@ async function renderBank(el) {
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
 function _connectBank(){Modal.open('Connect Bank',`<div class="alert alert-info">Chase requires OAuth credentials or Plaid.</div><label>API Key</label><input id="bk-key" type="password"><label>API Secret</label><input id="bk-sec" type="password"><div class="bg mt"><button class="btn btn-primary" onclick="API.post('/api/orgs/${API.orgId}/bank',{api_key:val('bk-key'),api_secret:val('bk-sec')}).then(()=>{toast('Connected');Modal.close()}).catch(e=>toast(e.message||'Unknown error','err'))">Connect</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
-function _labelDonation(donId, currentNotes) {
+async function _labelDonation(donId, currentLabel) {
+  let lbls = [];
+  try { const r = await API.get(`/api/orgs/${API.orgId}/label-lists`); lbls = r.donation_labels||[]; } catch{}
   Modal.open('Label Donation', `
-    <label>Label / Notes</label>
-    <input id="ldon-txt" value="${currentNotes||''}" placeholder="e.g. Annual pledge, Matching gift…" autocomplete="off">
+    <label>Label</label>
+    <select id="ldon-sel" style="margin-bottom:6px">
+      <option value="">— Select or type custom —</option>
+      ${lbls.map(l=>`<option value="${l}" ${currentLabel===l?'selected':''}>${l}</option>`).join('')}
+    </select>
+    <input id="ldon-txt" value="${currentLabel||''}" placeholder="Custom label…" autocomplete="off">
     <div class="bg mt">
-      <button class="btn btn-primary" onclick="API.put('/api/orgs/${API.orgId}/donations/${donId}/label',{label:val('ldon-txt')}).then(()=>{toast('Labeled ✓');Modal.close();renderDonations($('page-donations'))}).catch(e=>toast(e.message||'Error','err'))">Save</button>
+      <button class="btn btn-primary" onclick="
+        const v=val('ldon-sel')||val('ldon-txt');
+        API.put('/api/orgs/${API.orgId}/donations/'+donId+'/label',{label:v||null})
+        .then(()=>{toast('Labeled ✓');Modal.close();renderDonations($('page-donations'))})
+        .catch(e=>toast(e.message||'Error','err'))">Save</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
     </div>`, {sm:true});
+  // sync select → input
+  setTimeout(()=>{ const s=$('ldon-sel'); if(s) s.onchange=()=>{ const inp=$('ldon-txt'); if(inp&&s.value) inp.value=s.value; }; },50);
 }
 function _linkDonation(donId) {
   let _linkDonorId = null;
@@ -2246,7 +2297,7 @@ async function renderSettings(el) {
     
     el.innerHTML = `
       <div class="ph"><div class="ph-title">Settings</div></div>
-      <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-tz">Timezone</div><div class="tab" data-tc="st-log">Login Log</div></div>
+      <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-labels">Labels</div><div class="tab" data-tc="st-tz">Timezone</div><div class="tab" data-tc="st-log">Login Log</div></div>
       <div id="st-users" class="tc on"><div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
           <strong>Users</strong>
@@ -2264,6 +2315,11 @@ async function renderSettings(el) {
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><strong>Neighborhoods</strong><button class="btn btn-primary btn-sm" onclick="_addHood()">+ Add</button></div>
         ${hoods.map(h=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--gray-1)"><span style="font-family:var(--font-he);font-size:15px">${h.name_he}</span><button class="btn btn-icon" style="color:var(--red)" onclick="API.del(API.o.hoods()+'/${h.id}').then(()=>{toast('Removed');renderSettings($('page-settings'))}).catch(e=>toast(e.message||'Unknown error','err'))">&#10005;</button></div>`).join('')||'<p style="color:var(--gray-5)">No neighborhoods yet</p>'}
       </div></div>
+      <div id="st-labels" class="tc">
+        <div class="card" id="st-labels-card">
+          <div class="spinner"></div>
+        </div>
+      </div>
       <div id="st-tz" class="tc"><div class="card">
         <div class="card-title">Timezone Settings</div>
         <p style="font-size:13px;color:var(--gray-5);margin-bottom:14px">Set your organization's timezone for scheduled emails and recurring charges.</p>
@@ -2282,6 +2338,8 @@ async function renderSettings(el) {
         </table></div>
       </div></div>`;
     tabsInit('#page-settings');
+    // Load label lists when Labels tab is clicked
+    document.querySelector('#page-settings .tab[data-tc="st-labels"]').addEventListener('click', _loadLabelSettings);
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
 function _inviteUser(){Modal.open('Invite User',`<p style="color:var(--gray-5);font-size:13px;margin-bottom:12px">They'll receive a setup link to create their own password.</p><label>Email *</label><input id="iu-email" type="email" autocomplete="off"><label>Role</label><select id="iu-role"><option value="staff">Staff</option><option value="admin">Admin</option></select><div id="iu-res" style="display:none;margin-top:10px"></div><div class="bg mt"><button class="btn btn-primary" onclick="_doInviteUser()">Send Invite</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
@@ -2290,6 +2348,69 @@ function _inviteAcct(){Modal.open('Invite New Account',`<p style="color:var(--gr
 async function _doInviteAcct(){try{const r=await API.post('/auth/invite-account',{email:val('ia-email')});const res=$('ia-res');res.innerHTML=r.emailSent?`<div class="alert alert-ok">Invite sent to ${val('ia-email')}</div>`:`<div class="alert alert-warn">Email not configured. Share this link:<br><a href="${r.setupUrl}" target="_blank" style="font-size:11px;word-break:break-all">${r.setupUrl}</a></div>`;res.style.display='block';}catch(e){toast(e.message||'Unknown error','err');}}
 function _resetPw(id,name){Modal.open('Reset Password',`<p style="margin-bottom:10px">New password for <strong>${name}</strong></p><label>Password</label><input id="rp-pw" type="password"><div class="bg mt"><button class="btn btn-primary" onclick="API.put('/api/orgs/${API.orgId}/users/${id}/password',{password:val('rp-pw')}).then(()=>{toast('Updated');Modal.close()}).catch(e=>toast(e.message||'Unknown error','err'))">Set</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
 function _removeUser(id,name){confirmDlg(`Remove ${name}?`,async()=>{await API.del(`/api/orgs/${API.orgId}/users/${id}`);toast('Removed');renderSettings($('page-settings'));});}
+async function _loadLabelSettings() {
+  const c = $('st-labels-card'); if(!c) return;
+  c.innerHTML = '<div class="spinner"></div>';
+  try {
+    const lists = await API.get(`/api/orgs/${API.orgId}/label-lists`);
+    let donorLbls    = [...(lists.donor_labels||[])];
+    let donationLbls = [...(lists.donation_labels||[])];
+
+    function renderLabelList(containerId, arr, type) {
+      const el = $(containerId); if(!el) return;
+      el.innerHTML = arr.length
+        ? arr.map((l,i) => `<div style="display:flex;align-items:center;gap:6px;padding:6px 0;border-bottom:1px solid var(--gray-1)">
+            <span class="pill pill-blue" style="flex:1">${l}</span>
+            <button class="btn btn-icon" style="color:var(--red)" onclick="window._removeLabel('${type}',${i})">&#10005;</button>
+          </div>`).join('')
+        : '<p style="color:var(--gray-5);font-size:13px">No labels yet</p>';
+    }
+
+    window._removeLabel = (type, idx) => {
+      if(type==='donor')    { donorLbls.splice(idx,1);    renderLabelList('donor-lbl-list', donorLbls,'donor'); }
+      if(type==='donation') { donationLbls.splice(idx,1); renderLabelList('donation-lbl-list', donationLbls,'donation'); }
+    };
+    window._addLabel = (type) => {
+      const inp = $(type+'-lbl-inp');
+      const v = inp?.value?.trim(); if(!v) return;
+      if(type==='donor')    { if(!donorLbls.includes(v)) donorLbls.push(v);    renderLabelList('donor-lbl-list', donorLbls,'donor'); }
+      if(type==='donation') { if(!donationLbls.includes(v)) donationLbls.push(v); renderLabelList('donation-lbl-list', donationLbls,'donation'); }
+      inp.value = '';
+    };
+    window._saveLabelLists = async () => {
+      await API.put(`/api/orgs/${API.orgId}/label-lists`,{donor_labels:donorLbls,donation_labels:donationLbls});
+      toast('Labels saved ✓');
+    };
+
+    c.innerHTML = `
+      <div class="g2">
+        <div>
+          <div class="card-title">Donor Labels</div>
+          <p style="font-size:12px;color:var(--gray-5);margin-bottom:10px">Tags applied to donors (e.g. Major Donor, Board Member, Volunteer)</p>
+          <div id="donor-lbl-list"></div>
+          <div class="bg mt">
+            <input id="donor-lbl-inp" placeholder="New label…" style="flex:1" autocomplete="off"
+              onkeydown="if(event.key==='Enter'){event.preventDefault();window._addLabel('donor')}">
+            <button class="btn btn-blue btn-sm" onclick="window._addLabel('donor')">Add</button>
+          </div>
+        </div>
+        <div>
+          <div class="card-title">Donation Labels</div>
+          <p style="font-size:12px;color:var(--gray-5);margin-bottom:10px">Labels applied to individual donations (e.g. Annual Pledge, Matching Gift, Yizkor)</p>
+          <div id="donation-lbl-list"></div>
+          <div class="bg mt">
+            <input id="donation-lbl-inp" placeholder="New label…" style="flex:1" autocomplete="off"
+              onkeydown="if(event.key==='Enter'){event.preventDefault();window._addLabel('donation')}">
+            <button class="btn btn-blue btn-sm" onclick="window._addLabel('donation')">Add</button>
+          </div>
+        </div>
+      </div>
+      <div class="bg mt"><button class="btn btn-primary" onclick="window._saveLabelLists()">Save Labels</button></div>`;
+
+    renderLabelList('donor-lbl-list',    donorLbls,    'donor');
+    renderLabelList('donation-lbl-list', donationLbls, 'donation');
+  } catch(e) { c.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
 function _uploadLogo() {
   Modal.open('Upload Receipt Logo', `
     <p style="font-size:13px;color:var(--gray-5);margin-bottom:10px">Upload your organization logo to appear on PDF receipts.</p>

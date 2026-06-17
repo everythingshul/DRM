@@ -170,16 +170,21 @@ router.post('/refund', async (req, res) => {
     if (isRealSolaTx) {
       // Try void first (Sola prefers void for same-day / unsettled transactions)
       try {
+        console.log(`[refund] Attempting void of txId=${don.transaction_id} amount=${refAmt}`);
         const v = await ccVoid(req.orgId, { refNum: don.transaction_id });
         solaRefNum = v.refNum;
         method = 'void';
+        console.log(`[refund] Void SUCCESS solaRefNum=${solaRefNum}`);
       } catch(voidErr) {
-        // Void failed (transaction already settled) — fall back to refund
+        console.log(`[refund] Void failed: ${voidErr.message} — trying refund`);
+        // Void failed — fall back to refund
         try {
           const r = await ccRefund(req.orgId, { refNum: don.transaction_id, amount: refAmt });
           solaRefNum = r.refNum;
           method = 'refund';
+          console.log(`[refund] Refund SUCCESS solaRefNum=${solaRefNum}`);
         } catch(refundErr) {
+          console.log(`[refund] Refund also failed: ${refundErr.message}`);
           return res.status(400).json({
             error: `Void failed: ${voidErr.message}. Refund also failed: ${refundErr.message}`
           });
@@ -192,8 +197,10 @@ router.post('/refund', async (req, res) => {
     const newStatus = newRefunded >= parseFloat(don.amount) - 0.001 ? 'refunded' : 'partial_refund';
     const refNote = `${method==='void'?'Voided':'Refund'} $${refAmt.toFixed(2)}${solaRefNum?' (ref:'+solaRefNum+')':''}${notes?' — '+notes:''}`;
 
+    console.log(`[refund] Writing DB: status=${newStatus} refunded=${newRefunded} method=${method}`);
     run('UPDATE donations SET refund_amount=?, refund_notes=?, status=? WHERE id=?',
       [newRefunded, refNote, newStatus, donation_id]);
+    console.log(`[refund] DB write done for donation ${donation_id}`);
 
     res.json({ success: true, newStatus, solaRefNum, method, refunded: newRefunded });
   } catch(e) {

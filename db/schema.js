@@ -150,6 +150,12 @@ function createTables() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS org_label_lists (
+      id TEXT PRIMARY KEY, org_id TEXT UNIQUE NOT NULL,
+      donor_labels TEXT DEFAULT '[]',
+      donation_labels TEXT DEFAULT '[]',
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
     CREATE TABLE IF NOT EXISTS bank_connections (
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL, bank_name TEXT DEFAULT 'Chase',
       api_key TEXT, api_secret TEXT, last_sync DATETIME, is_active INTEGER DEFAULT 1,
@@ -179,6 +185,7 @@ function runMigrations() {
     `ALTER TABLE donors ADD COLUMN autopay_minute INTEGER DEFAULT 0`,
     `ALTER TABLE kvitel_settings ADD COLUMN neighborhood_font TEXT DEFAULT 'Frank Ruhl Libre'`,
     `ALTER TABLE donations ADD COLUMN label TEXT`,
+    `CREATE TABLE IF NOT EXISTS org_label_lists (id TEXT PRIMARY KEY, org_id TEXT UNIQUE NOT NULL, donor_labels TEXT DEFAULT '[]', donation_labels TEXT DEFAULT '[]', updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
     `ALTER TABLE kvitel_settings ADD COLUMN neighborhood_size REAL DEFAULT 14`,
     `ALTER TABLE kvitel_settings ADD COLUMN neighborhood_bold INTEGER DEFAULT 1`,
     `CREATE TABLE IF NOT EXISTS email_templates (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT, subject TEXT NOT NULL, blocks TEXT DEFAULT '[]', is_default_receipt INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
