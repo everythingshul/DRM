@@ -197,23 +197,38 @@ function tabsInit(scope) {
   });
 }
 
-function lwInit(id, init=[]) {
-  const c = $(id); let arr = [...init];
+// Preset-only label picker. labelType: 'donor_labels' or 'donation_labels' from org label-lists.
+// Renders selected labels as removable pills + a dropdown of remaining org-defined labels.
+// No free text is ever accepted — labels must come from Settings > Labels.
+function labelPicker(id, initSelected = [], labelType = 'donor_labels') {
+  const c = $(id);
+  let selected = [...initSelected];
+  let available = []; // org's full label list for this type
+
   const render = () => {
+    const remaining = available.filter(l => !selected.includes(l));
     c.innerHTML = `
       <div class="bg" style="flex-wrap:wrap;gap:4px;margin-bottom:6px">
-        ${arr.map((l, i) => `<span class="pill pill-blue">${l} <span style="cursor:pointer" onclick="window['_lw_rm_${id}'](${i})">×</span></span>`).join('')}
+        ${selected.length ? selected.map((l, i) => `<span class="pill pill-blue">${l} <span style="cursor:pointer" onclick="window['_lp_rm_${id}'](${i})">×</span></span>`).join('') : '<span style="font-size:12px;color:var(--gray-5)">No labels selected</span>'}
       </div>
-      <div class="bg">
-        <input id="${id}-in" type="text" placeholder="Add label…" style="flex:1" autocomplete="off">
-        <button type="button" class="btn btn-ghost btn-sm" onclick="window['_lw_add_${id}']()">Add</button>
-      </div>`;
-    $(`${id}-in`)?.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); window[`_lw_add_${id}`](); } });
+      <select id="${id}-sel" style="width:100%">
+        <option value="">${remaining.length ? '— Add label —' : (available.length ? '— All labels added —' : '— No labels defined in Settings —')}</option>
+        ${remaining.map(l => `<option value="${l}">${l}</option>`).join('')}
+      </select>`;
+    $(`${id}-sel`)?.addEventListener('change', function () {
+      if (this.value && !selected.includes(this.value)) { selected.push(this.value); render(); }
+    });
   };
-  window[`_lw_add_${id}`] = () => { const v = $(`${id}-in`)?.value.trim(); if (v && !arr.includes(v)) { arr.push(v); render(); } };
-  window[`_lw_rm_${id}`] = i => { arr.splice(i, 1); render(); };
-  render();
-  return { get: () => arr, set: a => { arr = [...a]; render(); } };
+  window[`_lp_rm_${id}`] = i => { selected.splice(i, 1); render(); };
+
+  // Load the org's label list for this type, then render
+  API.get(`/api/orgs/${API.orgId}/label-lists`).then(ll => {
+    available = ll[labelType] || [];
+    render();
+  }).catch(() => { available = []; render(); });
+
+  render(); // render immediately with empty available so UI isn't blank while loading
+  return { get: () => selected, set: a => { selected = [...a]; render(); } };
 }
 
 function renderPie(el, data) {
@@ -701,29 +716,7 @@ const Donors = {
           <button class="btn btn-primary" onclick="Donors.save('${donor?.id||''}')">${ie?'Save':'Add Donor'}</button>
           <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
         </div>`);
-      window._lwDonor = lwInit('lw-donor', lbls);
-      // Load org donor labels — replace free-text with select + preset chips
-      API.get(`/api/orgs/${API.orgId}/label-lists`).then(ll => {
-        const orgLabels = ll.donor_labels || [];
-        const wrap = $('lw-donor');
-        if (!wrap || !orgLabels.length) return;
-        // Replace the input with a select for preset labels
-        const inp = $('lw-donor-in');
-        if (inp) {
-          const sel = document.createElement('select');
-          sel.style.cssText = 'flex:1;padding:5px 8px;border:1.5px solid var(--gray-3);border-radius:4px;font-size:12px';
-          sel.innerHTML = '<option value="">— Add label —</option>' +
-            orgLabels.filter(l=>!window._lwDonor?.get().includes(l)).map(l=>`<option value="${l}">${l}</option>`).join('');
-          sel.onchange = () => {
-            if(sel.value && window._lwDonor && !window._lwDonor.get().includes(sel.value)){
-              // Inject into input and trigger add
-              if(inp){inp.value=sel.value; window[`_lw_add_lw-donor`]&&window[`_lw_add_lw-donor`]();}
-              sel.value='';
-            }
-          };
-          inp.replaceWith(sel);
-        }
-      }).catch(()=>{});
+      window._lwDonor = labelPicker('lw-donor', lbls, 'donor_labels');
       tabsInit('#modal-body');
     }});
   },
@@ -880,7 +873,7 @@ const DonorDetail = {
         <button class="btn btn-icon" title="Edit" onclick="DonorDetail._editDon('${did}','${d.id}')">&#9998;</button>
         <button class="btn btn-icon" title="Add note" onclick="DonorDetail.addDonNote('${did}','${d.id}')">&#9997;</button>
         ${(d.status==='completed'||d.status==='partial_refund')?`<button class="btn btn-icon" title="Refund" onclick="DonorDetail.refund('${did}','${d.id}','${d.amount}','${d.transaction_id||''}')">&#8617;</button>`:''}
-        <button class="btn btn-icon" title="Label" onclick="DonorDetail._lblDon('${did}','${d.id}')">⦄</button>
+        <button class="btn btn-icon" title="Label" onclick="DonorDetail._lblDon('${did}','${d.id}')">&#9990;</button>
         <button class="btn btn-icon" style="color:var(--red)" title="Delete" onclick="DonorDetail._delDon('${did}','${d.id}')">&#10005;</button>
       </div></td>
     </tr>
@@ -889,8 +882,8 @@ const DonorDetail = {
         <strong style="color:var(--navy)">Full Details</strong><br>
         Date &amp; Time: ${fmtDT(d.donation_date)} | Trans ID: ${d.transaction_id||'—'} | Status: ${d.status}<br>
         ${d.refund_amount>0?'Refunded: '+fmt$(d.refund_amount)+(d.refund_notes?' — '+d.refund_notes:'')+'<br>':''}
-        ${d.notes?'Notes: '+d.notes+'<br>':''}
-        <div style="margin-top:8px;font-weight:600">Donation Notes (${dn.length})</div>
+        ${d.notes?`<span style="color:var(--gray-5)">${d.notes}</span><br>`:''}
+        <div style="margin-top:8px;font-weight:600">Notes (${dn.length})</div>
         <div id="dpr-n-${d.id}" style="margin-top:4px">${_renderNotesList(dn, d.id, did, true)}</div>
       </td>
     </tr>`;
@@ -921,23 +914,9 @@ const DonorDetail = {
   },
   async _lblDon(did, donId){
     const cur=(this.data?.donations||[]).find(d=>d.id===donId)?.label||'';
-    let lbls=[];
-    try{const r=await API.get(`/api/orgs/${API.orgId}/label-lists`);lbls=r.donation_labels||[];}catch{}
-    window._saveLblDon=async()=>{
-      const v=$('lbld-sel')?.value||'';
-      try{await API.put(`/api/orgs/${API.orgId}/donations/${donId}/label`,{label:v||null});toast('Saved ✓');Modal.close();DonorDetail.open(did);}catch(e){toast(e.message,'err');}
-    };
-    Modal.open('Label Donation',`
-      <label>Label</label>
-      <select id="lbld-sel">
-        <option value="">— Remove label —</option>
-        ${lbls.map(l=>`<option value="${l}" ${cur===l?'selected':''}>${l}</option>`).join('')}
-      </select>
-      <div class="bg mt">
-        <button class="btn btn-primary" onclick="window._saveLblDon()">Save</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>`,{sm:true});
+    _labelDonationModal(donId, cur, () => DonorDetail.open(did));
   },
+
   recCard(s, did) {
     const pm = s.pm_label || (s.pm_type==='credit_card' ? `${s.card_brand||'Card'} ••${s.last_four||''}` : fmtMethod(s.pm_type));
     const lim = s.occurrences_limit ? `${s.occurrences_count||0}/${s.occurrences_limit}` : 'Unlimited';
@@ -1157,15 +1136,6 @@ const DonorDetail = {
 
   manual(did) {
     const now = toLocalDT(new Date().toISOString()); // local time for datetime-local input
-    // Load donation labels for the dropdown
-    API.get(`/api/orgs/${API.orgId}/label-lists`).then(lists => {
-      const sel = $('md-label-sel');
-      if (sel && lists.donation_labels) {
-        lists.donation_labels.forEach(l => {
-          const o = document.createElement('option'); o.value=l; o.textContent=l; sel.appendChild(o);
-        });
-      }
-    }).catch(()=>{});
     Modal.open('Manual Donation', `
       <div class="r2">
         <div><label>Amount ($) *</label><input type="number" id="md-amt" step="0.01" placeholder="0.00"></div>
@@ -1187,17 +1157,23 @@ const DonorDetail = {
         <div><label>Date *</label><input type="datetime-local" id="md-date" value="${now}"></div>
         <div><label>Trans ID (auto-assigned if blank)</label><input id="md-tx" autocomplete="off" placeholder="ES…"></div>
       </div>
-      <label>Label (optional)</label>
-      <div style="display:flex;gap:6px">
-        <select id="md-label-sel" style="flex:1" onchange="const inp=$('md-notes');if(inp&&this.value)inp.value=this.value">
-          <option value="">— Select label or type custom —</option>
-        </select>
-      </div>
-      <input id="md-notes" autocomplete="off" placeholder="Or type custom label/notes…" style="margin-top:4px">
+      <label>Label</label>
+      <select id="md-label-sel"><option value="">— Select label (optional) —</option></select>
+      <label style="margin-top:8px">Notes</label>
+      <input id="md-notes" autocomplete="off" placeholder="Additional notes (optional)…">
       <div class="bg mt">
         <button class="btn btn-primary" onclick="DonorDetail._saveManual('${did}')">Record</button>
         <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
       </div>`, { sm: true });
+    // Populate label dropdown from org's donation_labels list (preset only)
+    API.get(`/api/orgs/${API.orgId}/label-lists`).then(lists => {
+      const sel = $('md-label-sel');
+      if (sel && lists.donation_labels) {
+        lists.donation_labels.forEach(l => {
+          const o = document.createElement('option'); o.value=l; o.textContent=l; sel.appendChild(o);
+        });
+      }
+    }).catch(()=>{});
   },
   _manualMethodChange() {
     const m = val('md-meth');
@@ -1208,6 +1184,7 @@ const DonorDetail = {
   async _saveManual(did) {
     const amt = parseFloat(val('md-amt')); if (!amt||amt<=0) { toast('Amount required','err'); return; }
     const method = val('md-meth');
+    const label = val('md-label-sel') || null;
     // DAF with card number — charge via Sola
     if (method === 'daf' && val('md-dafcard').trim()) {
       try {
@@ -1215,18 +1192,20 @@ const DonorDetail = {
           donor_id: did, daf_card_num: val('md-dafcard'), daf_provider: val('md-dafprov'),
           amount: amt, notes: val('md-notes')
         });
+        if (label && r.donation?.id) await API.put(`/api/orgs/${API.orgId}/donations/${r.donation.id}/label`, {label}).catch(()=>{});
         toast(`DAF grant submitted · Trans: ${r.transaction_id}`); Modal.close(); this.open(did);
       } catch(e) { toast(e.message, 'err'); }
       return;
     }
     try {
-      await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations`, {
+      const r = await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations`, {
         amount: amt, method,
         check_number: method==='check' ? val('md-chknum') : undefined,
         donation_date: val('md-date') || new Date().toISOString(),
         transaction_id: val('md-tx') || null,
         notes: val('md-notes') || null
       });
+      if (label && r.donation?.id) await API.put(`/api/orgs/${API.orgId}/donations/${r.donation.id}/label`, {label}).catch(()=>{});
       toast('Recorded'); Modal.close(); this.open(did);
     } catch(e) { toast(e.message, 'err'); }
   },
@@ -1383,6 +1362,7 @@ async function renderDonations(el) {
     el.innerHTML = `
       <div class="ph"><div><div class="ph-title">Donations</div><div class="ph-sub">${rows.length} records</div></div>
         <div class="bg"><button class="btn btn-primary btn-sm" onclick="_addUnlinkedDonation()">+ Add Donation</button>
+        <button class="btn btn-outline btn-sm" onclick="_addRecurringFromList()">+ Recurring</button>
         <button class="btn btn-ghost btn-sm" onclick="API.dl('/api/orgs/${API.orgId}/reports/donations?format=xlsx','donations.xlsx').catch(e=>toast(e.message||'Unknown error','err'))">&#8681; XLSX</button></div>
       </div>
       <div class="card" style="padding:0;overflow:hidden">
@@ -1394,7 +1374,15 @@ async function renderDonations(el) {
           </div>
         </div>
         <div class="tw"><table>
-          <thead><tr><th>Date</th><th>Donor</th><th>Amount</th><th>Method</th><th>Trans ID</th><th>Status</th><th></th></tr></thead>
+          <thead><tr>
+            <th class="sort" onclick="_sortDon('donation_date')">Date</th>
+            <th class="sort" onclick="_sortDon('last_name')">Donor</th>
+            <th class="sort" onclick="_sortDon('amount')">Amount</th>
+            <th class="sort" onclick="_sortDon('method')">Method</th>
+            <th>Trans ID</th>
+            <th class="sort" onclick="_sortDon('status')">Status</th>
+            <th></th>
+          </tr></thead>
           <tbody id="don-tb">${_donRows(rows)}</tbody>
         </table></div>
       </div>`;
@@ -1493,32 +1481,86 @@ function _refundFromList(did, donId, amt, txId) {
   if (!did || did === 'null') { toast('Cannot refund an unlinked donation from here — open the donor record', 'err'); return; }
   DonorDetail.refund(did, donId, amt, txId);
 }
-function _filterDon() { const s=val('don-s').toLowerCase(),m=val('don-meth'),st=val('don-stat'); const f=(window._donAll||[]).filter(d=>(!s||`${d.first_name} ${d.last_name} ${d.transaction_id||''}`.toLowerCase().includes(s))&&(!m||d.method===m)&&(!st||d.status===st)); const tb=$('don-tb'); if(tb)tb.innerHTML=_donRows(f); }
+function _sortDon(key) {
+  window._donSort = window._donSort || {key:'donation_date', dir:'desc'};
+  const s = window._donSort;
+  s.dir = (s.key===key && s.dir==='asc') ? 'desc' : 'asc';
+  s.key = key;
+  _filterDon();
+}
+function _filterDon() {
+  const s=val('don-s').toLowerCase(),m=val('don-meth'),st=val('don-stat');
+  let f=(window._donAll||[]).filter(d=>(!s||`${d.first_name} ${d.last_name} ${d.transaction_id||''}`.toLowerCase().includes(s))&&(!m||d.method===m)&&(!st||d.status===st));
+  const srt = window._donSort;
+  if (srt) {
+    f = [...f].sort((a,b) => {
+      const av=a[srt.key]??'', bv=b[srt.key]??'';
+      const r = typeof av==='number' ? av-bv : String(av).localeCompare(String(bv));
+      return srt.dir==='asc' ? r : -r;
+    });
+  }
+  const tb=$('don-tb'); if(tb)tb.innerHTML=_donRows(f);
+}
 
 async function renderVerification(el) {
   el.innerHTML = '<div class="spinner"></div>';
   try {
     const donors = await API.get(API.o.verify());
     window._verDonors = donors;
+    window._verSort = window._verSort || {key:'last_name', dir:'asc'};
     el.innerHTML = `
       <div class="ph"><div><div class="ph-title">Info Check</div><div class="ph-sub">${donors.length} need verification</div></div>
         ${donors.length?`<button class="btn btn-green btn-sm" onclick="_verifyAll()">Verify All</button>`:''}
       </div>
       ${donors.length?`<div class="alert alert-warn">These donors haven't had their info verified in over 6 months.</div>`:'' }
       ${donors.length ? `
-        <div class="card" style="padding:0;overflow:hidden"><div class="tw"><table>
-          <thead><tr><th>Donor</th><th>Contact</th><th>Neighborhood</th><th>Age</th><th>Last Verified</th><th></th></tr></thead>
-          <tbody>${donors.map(d=>`<tr id="vr-${d.id}">
-            <td><div style="display:flex;align-items:center;gap:8px">${avatar(d,26)}<div><div style="font-weight:600;font-size:13px">${d.first_name} ${d.last_name}</div>${d.hebrew_full_name?`<div style="font-family:var(--font-he);font-size:11px">${d.hebrew_full_name}</div>`:''}</div></div></td>
-            <td style="font-size:12px">${d.cell||''}${d.email?`<br>${d.email}`:''}</td>
-            <td style="font-family:var(--font-he);font-size:12px">${d.neighborhood_name||'—'}</td>
-            <td style="font-size:12px">${age(d.months_old)}</td>
-            <td style="font-size:12px;color:var(--red)">${d.info_verified_at?fmtD(d.info_verified_at):'Never'}</td>
-            <td><div class="actions"><button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${d.id}')">View</button><button class="btn btn-green btn-sm" onclick="_verifyOne('${d.id}')">Verify</button></div></td>
-          </tr>`).join('')}</tbody>
-        </table></div></div>` :
+        <div class="card" style="padding:0;overflow:hidden">
+          <div style="padding:12px 14px;border-bottom:1px solid var(--gray-1)">
+            <div class="sw"><input id="ver-search" placeholder="Search name, email, phone…" oninput="_filterVer()" autocomplete="off"></div>
+          </div>
+          <div class="tw"><table>
+            <thead><tr>
+              <th class="sort" onclick="_sortVer('last_name')">Donor</th>
+              <th>Contact</th>
+              <th class="sort" onclick="_sortVer('neighborhood_name')">Neighborhood</th>
+              <th class="sort" onclick="_sortVer('months_old')">Age</th>
+              <th class="sort" onclick="_sortVer('info_verified_at')">Last Verified</th>
+              <th></th>
+            </tr></thead>
+            <tbody id="ver-tb">${_verRows(donors)}</tbody>
+          </table></div>
+        </div>` :
         `<div class="card"><div class="empty"><h3>All donors verified!</h3><p>No info checks needed right now.</p></div></div>`}`;
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+function _verRows(donors) {
+  if (!donors.length) return '<tr><td colspan="6"><div class="empty">No matches</div></td></tr>';
+  return donors.map(d=>`<tr id="vr-${d.id}">
+    <td><div style="display:flex;align-items:center;gap:8px">${avatar(d,26)}<div><div style="font-weight:600;font-size:13px">${d.first_name} ${d.last_name}</div>${d.hebrew_full_name?`<div style="font-family:var(--font-he);font-size:11px">${d.hebrew_full_name}</div>`:''}</div></div></td>
+    <td style="font-size:12px">${d.cell||''}${d.email?`<br>${d.email}`:''}</td>
+    <td style="font-family:var(--font-he);font-size:12px">${d.neighborhood_name||'—'}</td>
+    <td style="font-size:12px">${age(d.months_old)}</td>
+    <td style="font-size:12px;color:var(--red)">${d.info_verified_at?fmtD(d.info_verified_at):'Never'}</td>
+    <td><div class="actions"><button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${d.id}')">View</button><button class="btn btn-green btn-sm" onclick="_verifyOne('${d.id}')">Verify</button></div></td>
+  </tr>`).join('');
+}
+function _sortVer(key) {
+  const s = window._verSort;
+  s.dir = (s.key===key && s.dir==='asc') ? 'desc' : 'asc';
+  s.key = key;
+  _filterVer();
+}
+function _filterVer() {
+  const q = (val('ver-search')||'').toLowerCase();
+  let rows = (window._verDonors||[]).filter(d =>
+    !q || `${d.first_name} ${d.last_name} ${d.email||''} ${d.cell||''} ${d.hebrew_full_name||''}`.toLowerCase().includes(q));
+  const s = window._verSort || {key:'last_name', dir:'asc'};
+  rows = [...rows].sort((a,b) => {
+    const av=a[s.key]??'', bv=b[s.key]??'';
+    const r = typeof av==='number' ? av-bv : String(av).localeCompare(String(bv));
+    return s.dir==='asc' ? r : -r;
+  });
+  const tb = $('ver-tb'); if(tb) tb.innerHTML = _verRows(rows);
 }
 async function _verifyOne(id) { await API.post(`/api/orgs/${API.orgId}/donors/${id}/verify`,{}); const row=$(`vr-${id}`); if(row){row.style.opacity=0;row.style.transition='opacity .3s';setTimeout(()=>row.remove(),320);} toast('Verified'); loadBadges(); }
 function _verifyAll() { confirmDlg(`Verify all ${(window._verDonors||[]).length} donors?`, async()=>{ for(const d of window._verDonors||[])await API.post(`/api/orgs/${API.orgId}/donors/${d.id}/verify`,{}).catch(()=>{}); toast('All verified'); renderVerification($('page-verification')); loadBadges(); }); }
@@ -1528,30 +1570,73 @@ async function renderFailures(el) {
   try {
     const fs = await API.get(API.o.failures());
     const un = fs.filter(f=>!f.acknowledged);
+    window._failAll = fs;
+    window._failSort = window._failSort || {key:'occurred_at', dir:'desc'};
     el.innerHTML = `
       <div class="ph"><div><div class="ph-title">Failed Charges</div><div class="ph-sub">${un.length} unacknowledged</div></div>
         ${un.length?`<button class="btn btn-ghost btn-sm" onclick="_ackAll()">Acknowledge All</button>`:''}
       </div>
       ${un.length?`<div class="alert alert-err">${un.length} charge${un.length>1?'s':''} failed — admins notified.</div>`:''}
       ${fs.length ? `
-        <div class="card" style="padding:0;overflow:hidden"><div class="tw"><table>
-          <thead><tr><th>Date</th><th>Donor</th><th>Amount</th><th>Reason</th><th>Status</th><th></th></tr></thead>
-          <tbody>${fs.map(f=>`<tr id="fr-${f.id}" style="${f.acknowledged?'opacity:.6':''}">
-            <td style="font-size:12px">${fmtDT(f.occurred_at)}</td>
-            <td><strong>${f.first_name} ${f.last_name}</strong>${f.email?`<br><span style="font-size:11px;color:var(--gray-5)">${f.email}</span>`:''}</td>
-            <td style="font-weight:600">${fmt$(f.amount)}</td>
-            <td style="font-size:12px;color:var(--red)">${f.failure_reason||'Unknown'}</td>
-            <td>${f.acknowledged?'<span class="pill pill-green">Acked</span>':'<span class="pill pill-red">New</span>'}</td>
-            <td><div class="actions">
-              <button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${f.donor_id}')">View</button>
-              ${!f.acknowledged
-                ?`<button class="btn btn-ghost btn-sm" onclick="_ackOne('${f.id}')">Ack</button>`
-                :`<button class="btn btn-ghost btn-sm" onclick="_unackOne('${f.id}',this)">Un-Ack</button>`}
-            </div></td>
-          </tr>`).join('')}</tbody>
-        </table></div></div>` :
+        <div class="card" style="padding:0;overflow:hidden">
+          <div style="padding:12px 14px;border-bottom:1px solid var(--gray-1)">
+            <div class="search-bar">
+              <div class="sw" style="flex:1"><input id="fail-search" placeholder="Search donor, reason…" oninput="_filterFail()" autocomplete="off"></div>
+              <select id="fail-stat" onchange="_filterFail()">
+                <option value="">All</option><option value="ack">Acknowledged</option><option value="unack">Unacknowledged</option>
+              </select>
+            </div>
+          </div>
+          <div class="tw"><table>
+            <thead><tr>
+              <th class="sort" onclick="_sortFail('occurred_at')">Date</th>
+              <th class="sort" onclick="_sortFail('first_name')">Donor</th>
+              <th class="sort" onclick="_sortFail('amount')">Amount</th>
+              <th>Reason</th><th>Status</th><th></th>
+            </tr></thead>
+            <tbody id="fail-tb">${_failRows(fs)}</tbody>
+          </table></div>
+        </div>` :
         `<div class="card"><div class="empty"><h3>No failed charges</h3></div></div>`}`;
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+function _failRows(fs) {
+  if (!fs.length) return '<tr><td colspan="6"><div class="empty">No matches</div></td></tr>';
+  return fs.map(f=>`<tr id="fr-${f.id}" style="${f.acknowledged?'opacity:.6':''}">
+    <td style="font-size:12px">${fmtDT(f.occurred_at)}</td>
+    <td><strong>${f.first_name} ${f.last_name}</strong>${f.email?`<br><span style="font-size:11px;color:var(--gray-5)">${f.email}</span>`:''}</td>
+    <td style="font-weight:600">${fmt$(f.amount)}</td>
+    <td style="font-size:12px;color:var(--red)">${f.failure_reason||'Unknown'}</td>
+    <td>${f.acknowledged?'<span class="pill pill-green">Acked</span>':'<span class="pill pill-red">New</span>'}</td>
+    <td><div class="actions">
+      <button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${f.donor_id}')">View</button>
+      ${!f.acknowledged
+        ?`<button class="btn btn-ghost btn-sm" onclick="_ackOne('${f.id}')">Ack</button>`
+        :`<button class="btn btn-ghost btn-sm" onclick="_unackOne('${f.id}',this)">Un-Ack</button>`}
+    </div></td>
+  </tr>`).join('');
+}
+function _sortFail(key) {
+  const s = window._failSort;
+  s.dir = (s.key===key && s.dir==='asc') ? 'desc' : 'asc';
+  s.key = key;
+  _filterFail();
+}
+function _filterFail() {
+  const q = (val('fail-search')||'').toLowerCase();
+  const stat = val('fail-stat');
+  let rows = (window._failAll||[]).filter(f => {
+    const matchQ = !q || `${f.first_name} ${f.last_name} ${f.failure_reason||''}`.toLowerCase().includes(q);
+    const matchStat = !stat || (stat==='ack' ? f.acknowledged : !f.acknowledged);
+    return matchQ && matchStat;
+  });
+  const s = window._failSort || {key:'occurred_at', dir:'desc'};
+  rows = [...rows].sort((a,b) => {
+    const av=a[s.key]??'', bv=b[s.key]??'';
+    const r = typeof av==='number' ? av-bv : String(av).localeCompare(String(bv));
+    return s.dir==='asc' ? r : -r;
+  });
+  const tb = $('fail-tb'); if(tb) tb.innerHTML = _failRows(rows);
 }
 async function _ackOne(id) {
   try {
@@ -1611,21 +1696,19 @@ async function renderBank(el) {
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
 function _connectBank(){Modal.open('Connect Bank',`<div class="alert alert-info">Chase requires OAuth credentials or Plaid.</div><label>API Key</label><input id="bk-key" type="password"><label>API Secret</label><input id="bk-sec" type="password"><div class="bg mt"><button class="btn btn-primary" onclick="API.post('/api/orgs/${API.orgId}/bank',{api_key:val('bk-key'),api_secret:val('bk-sec')}).then(()=>{toast('Connected');Modal.close()}).catch(e=>toast(e.message||'Unknown error','err'))">Connect</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
-async function _labelDonation(donId, currentLabel) {
-  if (currentLabel === undefined) {
-    currentLabel = (window._donAll||[]).find(d=>d.id===donId)?.label || '';
-  }
+// Single shared label modal used by donations page, donor profile, everywhere.
+// Always preset-only from the org's donation_labels list (Settings > Labels).
+async function _labelDonationModal(donId, currentLabel, onSaved) {
   let lbls = [];
   try { const r = await API.get(`/api/orgs/${API.orgId}/label-lists`); lbls = r.donation_labels||[]; } catch{}
   window._saveDonationLabel = async () => {
-    const sel = $('ldon-sel');
-    const v = (sel?.value || '').trim();
+    const v = ($('ldon-sel')?.value || '').trim();
     const btn = $('ldon-save-btn');
     if(btn){btn.textContent='Saving…';btn.disabled=true;}
     try {
       await API.put(`/api/orgs/${API.orgId}/donations/${donId}/label`, {label: v||null});
       toast('Label saved ✓'); Modal.close();
-      renderDonations($('page-donations'));
+      if (onSaved) onSaved();
     } catch(e) {
       if(btn){btn.textContent='Save';btn.disabled=false;}
       toast(e.message||'Failed to save label','err');
@@ -1634,13 +1717,17 @@ async function _labelDonation(donId, currentLabel) {
   Modal.open('Label Donation', `
     <label>Label</label>
     <select id="ldon-sel" style="margin-bottom:4px">
-      <option value="">— Select label —</option>
+      <option value="">${lbls.length?'— Select label —':'— No labels defined in Settings —'}</option>
       ${lbls.map(l=>`<option value="${l}" ${currentLabel===l?'selected':''}>${l}</option>`).join('')}
     </select>
     <div class="bg mt">
       <button class="btn btn-primary" id="ldon-save-btn" onclick="window._saveDonationLabel()">Save</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
     </div>`, {sm:true});
+}
+async function _labelDonation(donId, currentLabel) {
+  if (currentLabel === undefined) currentLabel = (window._donAll||[]).find(d=>d.id===donId)?.label || '';
+  _labelDonationModal(donId, currentLabel, () => renderDonations($('page-donations')));
 }
 function _linkDonation(donId) {
   let _linkDonorId = null;
@@ -1742,6 +1829,7 @@ async function renderEmails(el) {
       </div>
 
       <div id="em-smtp" class="tc"><div class="card">
+        <div id="em-status" style="margin-bottom:12px"></div>
         <div class="trow"><div>Pause all donation receipt emails</div>
           <label class="tgl"><input type="checkbox" id="em-pause" ${cfg?.donation_emails_paused?'checked':''}>
           <span class="tgl-s"></span></label></div>
@@ -1756,10 +1844,19 @@ async function renderEmails(el) {
         </div>
         <label>App Password <span style="font-size:11px;color:var(--gray-5)">(leave blank to keep existing)</span></label>
         <input id="em-pass" type="password" placeholder="Gmail App Password">
-        <small style="color:var(--gray-5);font-size:11px">Gmail → Google Account → Security → 2-Step Verification → App Passwords</small>
+        <small style="color:var(--gray-5);font-size:11px">Gmail → Google Account → Security → 2-Step Verification → App Passwords. This is NOT your regular Gmail password.</small>
         <div class="bg mt">
           <button class="btn btn-primary" onclick="_saveEmailSettings()">Save</button>
           <button class="btn btn-ghost btn-sm" onclick="_testEmail()">Send Test Email</button>
+        </div>
+        <hr class="divider">
+        <div style="font-size:12px;color:var(--gray-5);line-height:1.7">
+          <strong style="color:var(--gray-7)">Avoiding spam folders:</strong><br>
+          • Gmail SMTP relay (smtp.gmail.com) authenticates as your real Gmail address, which already has strong sender reputation — this is the single biggest factor.<br>
+          • Ask first-time recipients to add your address to their contacts, or reply once — this trains their spam filter.<br>
+          • Avoid spam-trigger words in subject lines ("free", "act now", excessive exclamation marks/caps).<br>
+          • Keep a reasonable send volume — Gmail's free SMTP relay has daily limits (~500/day for regular accounts, ~2000/day for Workspace) and sudden spikes can trigger filtering.<br>
+          • For high-volume sending (hundreds of receipts/day), consider a dedicated transactional email service (Postmark, SendGrid, Amazon SES) with your own domain and SPF/DKIM/DMARC records — this gives the most reliable inbox placement.
         </div>
       </div></div>
 
@@ -1768,6 +1865,7 @@ async function renderEmails(el) {
       </div>`;
 
     tabsInit('#page-emails');
+    _loadEmailStatus();
 
     // Load scheduled emails on tab click
     document.querySelector('#page-emails .tab[data-tc="em-sched"]').addEventListener('click', _loadSchedEmails);
@@ -2323,6 +2421,43 @@ window.confirm2 = (msg, yes) => {
 };
 
 
+async function _saveEmailSettings() {
+  const email = val('em-email').trim();
+  if (!email) { toast('Enter your SMTP email address', 'err'); return; }
+  const btn = document.querySelector('#em-smtp .btn-primary');
+  if (btn) { btn.textContent = 'Saving…'; btn.disabled = true; }
+  try {
+    await API.put(API.o.email(), {
+      smtp_email: email,
+      smtp_password: val('em-pass') || undefined, // undefined = keep existing if blank
+      smtp_host: val('em-host') || 'smtp.gmail.com',
+      smtp_port: parseInt(val('em-port')) || 587,
+      from_name: val('em-name') || '',
+      donation_emails_paused: $('em-pause')?.checked ? 1 : 0
+    });
+    toast('Email settings saved ✓');
+    const passInput = $('em-pass'); if (passInput) passInput.value = '';
+    _loadEmailStatus();
+  } catch(e) {
+    toast(e.message || 'Failed to save', 'err');
+  } finally {
+    if (btn) { btn.textContent = 'Save'; btn.disabled = false; }
+  }
+}
+async function _loadEmailStatus() {
+  const c = $('em-status'); if (!c) return;
+  try {
+    const s = await API.get(`/api/orgs/${API.orgId}/email-settings/status`);
+    if (s.configured) {
+      c.innerHTML = `<div class="alert alert-ok" style="font-size:12px">✓ SMTP configured (${s.has_email?'email set':''}${s.paused?' — currently paused':''}). Click "Send Test Email" to verify it actually delivers.</div>`;
+    } else if (s.has_email && !s.has_password) {
+      c.innerHTML = `<div class="alert alert-warn" style="font-size:12px">⚠ Email address saved but no App Password set. Receipts will NOT send until you add it.</div>`;
+    } else {
+      c.innerHTML = `<div class="alert alert-warn" style="font-size:12px">⚠ Email not configured yet. Donation receipts will not be sent until you fill this in and Save.</div>`;
+    }
+  } catch { c.innerHTML = ''; }
+}
+
 function _testEmail(){Modal.open('Send Test Email',`
   <p style="font-size:13px;color:var(--gray-5);margin-bottom:10px">Sends a test receipt email with placeholder data. Tax ID 11-6076986 will be included.</p>
   <label>Send to</label><input id="te-to" type="email" placeholder="your@email.com">
@@ -2837,20 +2972,92 @@ async function _saveExpense() {
 // ── Unlinked donation (Fix 24) ────────────────────────────────────────────────
 let _ulSelectedDonorId = null;
 
+function _addRecurringFromList() {
+  let selectedId = null;
+  Modal.open('Set Up Recurring Donation', `
+    <p style="font-size:13px;color:var(--gray-5);margin-bottom:10px">Search for an existing donor, or add a new one to set up a recurring charge.</p>
+    <div style="position:relative">
+      <label>Search Donor</label>
+      <input id="arl-search" placeholder="Name, email, phone…" autocomplete="off" oninput="_arlSearch(this.value)">
+      <div id="arl-results" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;
+        border:1.5px solid var(--blue);border-top:none;border-radius:0 0 6px 6px;z-index:100;max-height:180px;overflow-y:auto;box-shadow:var(--shadow-md)"></div>
+    </div>
+    <div id="arl-selected" style="display:none;margin-top:8px" class="alert alert-ok"></div>
+    <div class="bg mt">
+      <button class="btn btn-primary" id="arl-go-btn" onclick="_arlGoToDonor()" disabled>Continue to Donor Profile</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>
+    <hr class="divider">
+    <p style="font-size:12px;color:var(--gray-5);margin-bottom:6px">Or create a new donor:</p>
+    <button class="btn btn-outline btn-sm w-full" onclick="_arlNewDonor()">+ New Donor</button>
+  `, {sm:true});
+  window._arlSelectedId = null;
+}
+let _arlTimeout = null;
+async function _arlSearch(q) {
+  clearTimeout(_arlTimeout);
+  const res = $('arl-results'); if(!res) return;
+  if (!q.trim()) { res.style.display='none'; return; }
+  _arlTimeout = setTimeout(async () => {
+    try {
+      const donors = await API.get(`/api/orgs/${API.orgId}/donors/search?q=${encodeURIComponent(q)}`);
+      res.innerHTML = donors.length ? donors.map(d=>`<div onclick="_arlSelect('${d.id}','${d.first_name} ${d.last_name}')"
+        style="padding:8px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--gray-1)"
+        onmouseover="this.style.background='var(--blue-pale)'" onmouseout="this.style.background=''">
+        <strong>${d.first_name} ${d.last_name}</strong>${d.email?`<span style="color:var(--gray-5);font-size:12px"> · ${d.email}</span>`:''}
+      </div>`).join('') : '<div style="padding:8px 12px;font-size:13px;color:var(--gray-5)">No donors found — try "+ New Donor" below</div>';
+      res.style.display = 'block';
+    } catch{}
+  }, 300);
+}
+function _arlSelect(id, name) {
+  window._arlSelectedId = id;
+  const inp=$('arl-search'); if(inp) inp.value=name;
+  const res=$('arl-results'); if(res) res.style.display='none';
+  const sel=$('arl-selected'); if(sel){ sel.textContent='✓ '+name; sel.style.display='block'; }
+  const btn=$('arl-go-btn'); if(btn) btn.disabled=false;
+}
+function _arlGoToDonor() {
+  if (!window._arlSelectedId) return;
+  Modal.close();
+  // Navigate to donors page then open the profile and trigger recurring setup
+  navigateTo('donors');
+  setTimeout(() => {
+    DonorDetail.open(window._arlSelectedId);
+    setTimeout(() => {
+      const tab = document.querySelector('#modal-body .tab[data-tc="dd-rec"]');
+      if (tab) tab.click();
+      toast('Add a payment method first if none exist, then set up the recurring schedule.');
+    }, 400);
+  }, 150);
+}
+function _arlNewDonor() {
+  Modal.close();
+  navigateTo('donors');
+  setTimeout(() => {
+    Donors.openAdd();
+    toast('Add the donor, then open their profile to set up recurring.');
+  }, 150);
+}
+
 function _addUnlinkedDonation() {
-  const now = toLocalDT(new Date().toISOString()); // local time
+  const now = toLocalDT(new Date().toISOString());
   _ulSelectedDonorId = null;
   Modal.open('Add Donation', `
     <div class="tabs"><div class="tab on" data-tc="ul-t-linked">Link to Donor</div><div class="tab" data-tc="ul-t-anon">No Donor</div></div>
     <div id="ul-t-linked" class="tc on">
       <div style="position:relative">
         <label>Search Donor</label>
-        <input id="ul-donor-search" placeholder="Name, email, phone…" autocomplete="off"
-          oninput="_ulSearchDonor(this.value)">
+        <input id="ul-donor-search" placeholder="Name, email, phone…" autocomplete="off" oninput="_ulSearchDonor(this.value)">
         <div id="ul-donor-results" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;
           border:1.5px solid var(--blue);border-top:none;border-radius:0 0 6px 6px;z-index:100;max-height:180px;overflow-y:auto;box-shadow:var(--shadow-md)"></div>
       </div>
       <div id="ul-donor-selected" style="display:none;margin-top:6px" class="alert alert-ok"></div>
+      <div id="ul-pm-row" style="display:none;margin-top:8px">
+        <label>Payment Method</label>
+        <select id="ul-pm-sel"><option value="">— Loading… —</option></select>
+        <p style="font-size:11px;color:var(--gray-5);margin-top:2px">Selecting a saved card or DAF will charge it via Sola instead of recording manually.</p>
+      </div>
     </div>
     <div id="ul-t-anon" class="tc">
       <label>Name / Description (for records)</label>
@@ -2859,7 +3066,7 @@ function _addUnlinkedDonation() {
     <div class="r2 mt">
       <div><label>Amount ($) *</label><input type="number" id="ul-amt" step="0.01" placeholder="0.00"></div>
       <div><label>Method *</label>
-        <select id="ul-meth" onchange="document.getElementById('ul-chk').style.display=this.value==='check'?'':'none'">
+        <select id="ul-meth" onchange="_ulMethodChange()">
           <option value="check">Check</option><option value="cash">Cash</option>
           <option value="daf">DAF</option><option value="wire">Wire</option><option value="other">Other</option>
         </select>
@@ -2871,21 +3078,29 @@ function _addUnlinkedDonation() {
       <div><label>Trans ID (auto if blank)</label><input id="ul-tx" autocomplete="off"></div>
     </div>
     <label>Label</label>
-    <div style="display:flex;gap:6px;margin-bottom:4px">
-      <select id="ul-label-sel" style="flex:1" onchange="const i=$('ul-notes');if(i&&this.value)i.value=this.value">
-        <option value="">— Select from label list —</option>
-      </select>
-    </div>
-    <input id="ul-notes" autocomplete="off" placeholder="Or type custom label…">
+    <select id="ul-label-sel"><option value="">— Select label (optional) —</option></select>
     <label style="margin-top:8px">Notes</label>
     <input id="ul-extra-notes" autocomplete="off" placeholder="Additional notes (optional)…">
     <div class="bg mt">
-      <button class="btn btn-primary" onclick="_saveUnlinkedDonation()">Record</button>
+      <button class="btn btn-primary" id="ul-save-btn" onclick="_saveUnlinkedDonation()">Record</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
     </div>`, {sm:true});
   tabsInit('#modal-body');
-  // Reset on tab switch
-  document.querySelectorAll('#modal-body .tab').forEach(t=>t.addEventListener('click',()=>{ _ulSelectedDonorId=null; const sd=$('ul-donor-selected'); if(sd)sd.style.display='none'; }));
+  document.querySelectorAll('#modal-body .tab').forEach(t=>t.addEventListener('click',()=>{
+    _ulSelectedDonorId=null; const sd=$('ul-donor-selected'); if(sd)sd.style.display='none';
+    const pr=$('ul-pm-row'); if(pr)pr.style.display='none';
+  }));
+  // Populate label dropdown (preset only)
+  API.get(`/api/orgs/${API.orgId}/label-lists`).then(lists => {
+    const sel = $('ul-label-sel');
+    if (sel && lists.donation_labels) lists.donation_labels.forEach(l => {
+      const o=document.createElement('option'); o.value=l; o.textContent=l; sel.appendChild(o);
+    });
+  }).catch(()=>{});
+}
+function _ulMethodChange() {
+  const m = val('ul-meth');
+  const chk = $('ul-chk'); if(chk) chk.style.display = m==='check' ? '' : 'none';
 }
 
 let _ulSearchTimeout = null;
@@ -2904,42 +3119,89 @@ async function _ulSearchDonor(q) {
     } catch{}
   }, 300);
 }
-function _ulSelectDonor(id, name) {
+async function _ulSelectDonor(id, name) {
   _ulSelectedDonorId = id;
   const inp=$('ul-donor-search'); if(inp)inp.value=name;
   const res=$('ul-donor-results'); if(res)res.style.display='none';
   const sel=$('ul-donor-selected'); if(sel){sel.textContent='✓ '+name; sel.style.display='block';}
+  // Load this donor's CC/DAF payment methods so they can be charged directly
+  const pmRow = $('ul-pm-row'), pmSel = $('ul-pm-sel');
+  if (!pmRow || !pmSel) return;
+  try {
+    const data = await API.get(API.o.donor(id));
+    const pms = (data.paymentMethods||[]).filter(p =>
+      (p.type==='credit_card' && p.sola_token) ||
+      (p.type==='daf' && (p.other_description||'').split('|')[0]));
+    if (pms.length) {
+      pmSel.innerHTML = '<option value="">— Record manually (no charge) —</option>' +
+        pms.map(p => p.type==='credit_card'
+          ? `<option value="cc|${p.id}">${p.card_brand||'Card'} ••${p.last_four||''} ${p.label?'('+p.label+')':''}</option>`
+          : `<option value="daf|${p.id}">DAF: ${p.daf_name||''} ••${((p.other_description||'').split('|')[0]).slice(-4)}</option>`
+        ).join('');
+      pmRow.style.display = '';
+    } else {
+      pmSel.innerHTML = '<option value="">No saved cards or DAF on file</option>';
+      pmRow.style.display = '';
+    }
+  } catch{}
 }
 
 async function _saveUnlinkedDonation() {
   const amt = parseFloat(val('ul-amt'));
   if (!amt || amt <= 0) { toast('Enter an amount', 'err'); return; }
+
+  const btn = $('ul-save-btn');
+  const label = val('ul-label-sel') || null;
+  const pmChoice = (_ulSelectedDonorId && val('ul-pm-sel')) || '';
+
+  // Path 1: charge a saved CC or DAF directly
+  if (pmChoice) {
+    const [type, pmId] = pmChoice.split('|');
+    if (btn) { btn.textContent='Charging…'; btn.disabled=true; }
+    try {
+      let r;
+      if (type==='daf') {
+        r = await API.post(`/api/orgs/${API.orgId}/payments/charge-daf`, {donor_id:_ulSelectedDonorId, payment_method_id:pmId, amount:amt, notes:val('ul-extra-notes')||null});
+      } else {
+        r = await API.post(`/api/orgs/${API.orgId}/payments/charge`, {donor_id:_ulSelectedDonorId, payment_method_id:pmId, amount:amt, notes:val('ul-extra-notes')||null});
+      }
+      if (label && r.donation?.id) await API.put(`/api/orgs/${API.orgId}/donations/${r.donation.id}/label`, {label}).catch(()=>{});
+      toast(`Charged ${fmt$(amt)} · ${r.transaction_id} ✓`);
+      Modal.close(); renderDonations($('page-donations'));
+    } catch(e) {
+      if (btn) { btn.textContent='Record'; btn.disabled=false; }
+      toast(e.message || 'Charge failed', 'err');
+    }
+    return;
+  }
+
+  // Path 2: manual record (check/cash/wire/other/daf-manual)
   const method = val('ul-meth');
   if (!method) { toast('Select a payment method', 'err'); return; }
   if (method === 'check' && !val('ul-chknum').trim()) { toast('Check number required', 'err'); return; }
 
-  const btn = document.querySelector('#modal-body .btn-primary');
   if (btn) { btn.textContent = 'Recording…'; btn.disabled = true; }
-
   try {
+    let r;
     if (_ulSelectedDonorId) {
-      await API.post(`/api/orgs/${API.orgId}/donors/${_ulSelectedDonorId}/donations`, {
+      r = await API.post(`/api/orgs/${API.orgId}/donors/${_ulSelectedDonorId}/donations`, {
         amount: amt, method,
         check_number: method === 'check' ? val('ul-chknum') : undefined,
         donation_date: val('ul-date') || new Date().toISOString(),
         transaction_id: val('ul-tx') || null,
-        notes: [val('ul-notes'), val('ul-extra-notes')].filter(Boolean).join(' — ') || null
+        notes: val('ul-extra-notes') || null
       });
     } else {
-      await API.post(`/api/orgs/${API.orgId}/donations/unlinked`, {
+      r = await API.post(`/api/orgs/${API.orgId}/donations/unlinked`, {
         amount: amt, method,
         check_number: method === 'check' ? val('ul-chknum') : undefined,
         donor_name: val('ul-name') || 'Anonymous',
         donation_date: val('ul-date') || new Date().toISOString(),
         transaction_id: val('ul-tx') || null,
-        notes: [val('ul-notes'), val('ul-extra-notes')].filter(Boolean).join(' — ') || null
+        notes: val('ul-extra-notes') || null
       });
     }
+    if (label && r.donation?.id) await API.put(`/api/orgs/${API.orgId}/donations/${r.donation.id}/label`, {label}).catch(()=>{});
     toast('Donation recorded ✓');
     Modal.close();
     renderDonations($('page-donations'));

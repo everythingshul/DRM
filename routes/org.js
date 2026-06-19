@@ -53,7 +53,8 @@ router.post('/email-settings/test', requireOrgAdmin, async (req, res) => {
   try {
     const { to, subject, html } = req.body;
     const settings = get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]);
-    if (!settings?.smtp_email) return res.status(400).json({ error: 'Email not configured' });
+    if (!settings?.smtp_email) return res.status(400).json({ error: 'Email not configured. Enter your SMTP email and save first.' });
+    if (!settings?.smtp_password) return res.status(400).json({ error: 'App Password not set. Enter it and save before testing.' });
 
     const transporter = nodemailer.createTransport({
       host: settings.smtp_host || 'smtp.gmail.com',
@@ -61,6 +62,13 @@ router.post('/email-settings/test', requireOrgAdmin, async (req, res) => {
       secure: false,
       auth: { user: settings.smtp_email, pass: settings.smtp_password }
     });
+
+    // Verify connection/auth before attempting to send — surfaces the real reason
+    try {
+      await transporter.verify();
+    } catch (verifyErr) {
+      return res.status(400).json({ error: `SMTP connection failed: ${verifyErr.message}. Check your email and App Password (not your regular Gmail password).` });
+    }
 
     await transporter.sendMail({
       from: `"${settings.from_name || 'DRM'}" <${settings.smtp_email}>`,
@@ -73,6 +81,17 @@ router.post('/email-settings/test', requireOrgAdmin, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ── Email status — quick check whether SMTP is fully configured ───────────────
+router.get('/email-settings/status', (req, res) => {
+  const settings = get('SELECT smtp_email, smtp_password, donation_emails_paused FROM email_settings WHERE org_id = ?', [req.orgId]);
+  res.json({
+    configured: !!(settings?.smtp_email && settings?.smtp_password),
+    has_email: !!settings?.smtp_email,
+    has_password: !!settings?.smtp_password,
+    paused: !!settings?.donation_emails_paused
+  });
 });
 
 // --- SCHEDULED EMAILS ---
