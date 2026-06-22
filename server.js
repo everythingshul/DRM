@@ -106,6 +106,21 @@ app.get('*', (req, res, next) => {
 async function start() {
   await initDb();
   startScheduler();
-  app.listen(PORT, () => console.log(`\nDRM running on port ${PORT}\n`));
+  app.listen(PORT, () => {
+    console.log(`\nDRM running on port ${PORT}\n`);
+    // Log email config status on startup so it's visible in Render logs
+    try {
+      const { all } = require('./db/schema');
+      const orgs = all('SELECT id, name FROM organizations', []);
+      for (const org of orgs) {
+        const settings = require('./db/schema').get('SELECT smtp_email, smtp_password FROM email_settings WHERE org_id=?', [org.id]);
+        if (settings?.smtp_email && settings?.smtp_password) {
+          console.log(`[email] ✓ SMTP configured for "${org.name}" — ${settings.smtp_email}`);
+        } else {
+          console.log(`[email] ⚠ No SMTP configured for "${org.name}" — receipts will NOT send`);
+        }
+      }
+    } catch(e) { /* DB may not be ready yet on first boot */ }
+  });
 }
 start().catch(console.error);

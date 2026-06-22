@@ -90,7 +90,7 @@ router.post('/charge', async (req, res) => {
       [donId, req.orgId, donor_id, amount, pm.id, result.refNum, notes||null, req.user.id]);
 
     const donation = get('SELECT * FROM donations WHERE id=?', [donId]);
-    await sendReceiptEmail(donor, donation, org).catch(()=>{});
+    await sendReceiptEmail(donor, donation, org).catch(e => console.error('[receipt] Failed:', e.message));
     res.json({ success: true, donation, transaction_id: result.refNum, auth_code: result.authCode });
   } catch(e) {
     const { donor_id, payment_method_id, amount } = req.body;
@@ -135,7 +135,7 @@ router.post('/charge-daf', async (req, res) => {
        `${pm.daf_name||'DAF'} grant${notes?' — '+notes:''}`, req.user.id]);
 
     const donation = get('SELECT * FROM donations WHERE id=?', [donId]);
-    await sendReceiptEmail(donor, donation, org).catch(()=>{});
+    await sendReceiptEmail(donor, donation, org).catch(e => console.error('[receipt] Failed:', e.message));
     res.json({ success: true, donation, transaction_id: result.refNum });
   } catch(e) {
     console.error('charge-daf:', e.message);
