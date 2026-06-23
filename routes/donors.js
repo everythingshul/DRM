@@ -282,7 +282,7 @@ router.get('/:id/donations', (req, res) => {
 
 router.post('/:id/donations', async (req, res) => {
   try {
-    const { amount, method, payment_method_id, transaction_id, donation_date, notes, check_number } = req.body;
+    const { amount, method, payment_method_id, transaction_id, donation_date, notes, check_number, send_receipt } = req.body;
     if (!amount || !method) return res.status(400).json({ error: 'Amount and method required' });
     if (method === 'check' && !check_number) return res.status(400).json({ error: 'Check number required for check payments' });
 
@@ -301,9 +301,13 @@ router.post('/:id/donations', async (req, res) => {
     const donation = get('SELECT * FROM donations WHERE id = ?', [id]);
     const org = get('SELECT * FROM organizations WHERE id = ?', [req.orgId]);
 
-    // Send receipt email for all manual donations
-    const { sendReceiptEmail } = require('../utils/scheduler');
-    await sendReceiptEmail(donor, donation, org).catch(e => console.error('Receipt email:', e.message));
+    // Send receipt — default ON, only skip if explicitly set to false
+    if (send_receipt !== false && send_receipt !== 'false') {
+      const { sendReceiptEmail } = require('../utils/scheduler');
+      await sendReceiptEmail(donor, donation, org).catch(e => console.error('[receipt] Failed:', e.message));
+    } else {
+      console.log(`[receipt] Skipped by user choice for donation ${id}`);
+    }
 
     res.json({ success: true, donation });
   } catch (e) {

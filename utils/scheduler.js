@@ -37,7 +37,11 @@ async function sendReceiptEmail(donor, donation, org) {
     }
     const settings = get('SELECT * FROM email_settings WHERE org_id = ?', [org.id]);
     if (!settings?.smtp_email) {
-      console.log(`[receipt] Skipping — no SMTP email configured for org ${org.id}`);
+      console.log(`[receipt] Skipping — no SMTP email configured for org ${org.id}. Go to Email Designer > SMTP Settings.`);
+      return;
+    }
+    if (!settings?.smtp_password) {
+      console.log(`[receipt] Skipping — no App Password saved for org ${org.id}. Enter it in Email Designer > SMTP Settings.`);
       return;
     }
     if (settings.donation_emails_paused) {
@@ -45,13 +49,13 @@ async function sendReceiptEmail(donor, donation, org) {
       return;
     }
     if (!donor.email) {
-      console.log(`[receipt] Skipping — donor ${donor.id} has no email address`);
+      console.log(`[receipt] Skipping — donor ${donor.id} (${donor.first_name} ${donor.last_name}) has no email address`);
       return;
     }
-    console.log(`[receipt] Sending to ${donor.email} for donation ${donation.id}`);
+    console.log(`[receipt] Attempting to send to ${donor.email} via ${settings.smtp_host||'smtp.gmail.com'}:${settings.smtp_port||587}`);
 
     const transporter = getTransporter(settings);
-    if (!transporter) return;
+    if (!transporter) { console.log('[receipt] getTransporter returned null'); return; }
 
     // Use default receipt template from designer if set, else fall back to plain
     const defaultTpl = get('SELECT * FROM email_templates WHERE org_id=? AND is_default_receipt=1', [org.id]);
@@ -102,17 +106,16 @@ async function sendReceiptEmail(donor, donation, org) {
         </div>`, vars);
     }
 
-    if (donor.email) {
-      await transporter.sendMail({
-        from: `"${settings.from_name || org.name}" <${settings.smtp_email}>`,
-        to: donor.email,
-        subject,
-        html
-      });
-      run('UPDATE donations SET receipt_sent = 1 WHERE id = ?', [donation.id]);
-    }
+    await transporter.sendMail({
+      from: `"${settings.from_name || org.name}" <${settings.smtp_email}>`,
+      to: donor.email,
+      subject,
+      html
+    });
+    run('UPDATE donations SET receipt_sent = 1 WHERE id = ?', [donation.id]);
+    console.log(`[receipt] ✓ Sent to ${donor.email} — subject: ${subject}`);
   } catch (e) {
-    console.error('Receipt email error:', e.message);
+    console.error(`[receipt] ✗ FAILED to ${donor?.email} — ${e.message}`);
   }
 }
 

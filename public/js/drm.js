@@ -1161,6 +1161,10 @@ const DonorDetail = {
       <select id="md-label-sel"><option value="">— Select label (optional) —</option></select>
       <label style="margin-top:8px">Notes</label>
       <input id="md-notes" autocomplete="off" placeholder="Additional notes (optional)…">
+      <div class="trow mt" style="padding:8px 0;border-top:1px solid var(--gray-1);margin-top:8px">
+        <div style="font-size:13px">Send donation receipt email</div>
+        <label class="tgl"><input type="checkbox" id="md-send-receipt" checked><span class="tgl-s"></span></label>
+      </div>
       <div class="bg mt">
         <button class="btn btn-primary" onclick="DonorDetail._saveManual('${did}')">Record</button>
         <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
@@ -1203,7 +1207,8 @@ const DonorDetail = {
         check_number: method==='check' ? val('md-chknum') : undefined,
         donation_date: val('md-date') || new Date().toISOString(),
         transaction_id: val('md-tx') || null,
-        notes: val('md-notes') || null
+        notes: val('md-notes') || null,
+        send_receipt: $('md-send-receipt')?.checked !== false
       });
       if (label && r.donation?.id) await API.put(`/api/orgs/${API.orgId}/donations/${r.donation.id}/label`, {label}).catch(()=>{});
       toast('Recorded'); Modal.close(); this.open(did);
@@ -3081,6 +3086,10 @@ function _addUnlinkedDonation() {
     <select id="ul-label-sel"><option value="">— Select label (optional) —</option></select>
     <label style="margin-top:8px">Notes</label>
     <input id="ul-extra-notes" autocomplete="off" placeholder="Additional notes (optional)…">
+    <div class="trow" style="padding:8px 0;border-top:1px solid var(--gray-1)">
+      <div style="font-size:13px">Send donation receipt email</div>
+      <label class="tgl"><input type="checkbox" id="ul-send-receipt" checked><span class="tgl-s"></span></label>
+    </div>
     <div class="bg mt">
       <button class="btn btn-primary" id="ul-save-btn" onclick="_saveUnlinkedDonation()">Record</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
@@ -3189,7 +3198,8 @@ async function _saveUnlinkedDonation() {
         check_number: method === 'check' ? val('ul-chknum') : undefined,
         donation_date: val('ul-date') || new Date().toISOString(),
         transaction_id: val('ul-tx') || null,
-        notes: val('ul-extra-notes') || null
+        notes: val('ul-extra-notes') || null,
+        send_receipt: $('ul-send-receipt')?.checked !== false
       });
     } else {
       r = await API.post(`/api/orgs/${API.orgId}/donations/unlinked`, {
