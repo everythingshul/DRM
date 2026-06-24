@@ -156,6 +156,19 @@ function createTables() {
       donation_labels TEXT DEFAULT '[]',
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS email_log (
+      id TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL,
+      to_email TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      html_body TEXT,
+      type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'sent',
+      error TEXT,
+      donor_id TEXT,
+      donation_id TEXT,
+      sent_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
     CREATE TABLE IF NOT EXISTS bank_connections (
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL, bank_name TEXT DEFAULT 'Chase',
       api_key TEXT, api_secret TEXT, last_sync DATETIME, is_active INTEGER DEFAULT 1,
@@ -181,10 +194,15 @@ function runMigrations() {
     `ALTER TABLE payment_methods ADD COLUMN sola_token TEXT`,
     `ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'admin'`,
     `ALTER TABLE email_settings ADD COLUMN marketing_template TEXT DEFAULT ''`,
+    `ALTER TABLE email_settings ADD COLUMN postmark_key TEXT DEFAULT ''`,
     `ALTER TABLE organizations ADD COLUMN settings TEXT DEFAULT '{}'`,
     `ALTER TABLE donors ADD COLUMN autopay_minute INTEGER DEFAULT 0`,
     `ALTER TABLE kvitel_settings ADD COLUMN neighborhood_font TEXT DEFAULT 'Frank Ruhl Libre'`,
     `ALTER TABLE donations ADD COLUMN label TEXT`,
+    `ALTER TABLE organizations ADD COLUMN expires_at DATETIME DEFAULT NULL`,
+    `ALTER TABLE organizations ADD COLUMN expiry_warned INTEGER DEFAULT 0`,
+    `CREATE TABLE IF NOT EXISTS email_log (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, to_email TEXT NOT NULL, subject TEXT NOT NULL, html_body TEXT, type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'sent', error TEXT, donor_id TEXT, donation_id TEXT, sent_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
+    `ALTER TABLE email_log ADD COLUMN html_body TEXT`,
     // Rebuild donations table to remove old CHECK constraint on status (if it exists)
     (() => {
       try {

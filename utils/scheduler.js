@@ -4,15 +4,26 @@ const cron = require('node-cron');
 const { v4: uuidv4 } = require('uuid');
 const { all, get, run } = require('../db/schema');
 const nodemailer = require('nodemailer');
+const mailer    = require('./mailer');
 const { ccSale: chargeToken } = require('./sola');
 
 function getTransporter(settings) {
+  // Postmark: if API key is set, use it (best deliverability, avoids spam folders)
+  if (settings?.postmark_key) {
+    return nodemailer.createTransport({
+      host: 'smtp.postmarkapp.com',
+      port: 587,
+      secure: false,
+      auth: { user: settings.postmark_key, pass: settings.postmark_key }
+    });
+  }
+  // Gmail SMTP fallback
   if (!settings?.smtp_email) {
-    console.log('[email] No SMTP email configured — skipping email');
+    console.log('[email] No email provider configured — skipping. Add Postmark API key or Gmail SMTP in Email Settings.');
     return null;
   }
   if (!settings?.smtp_password) {
-    console.log('[email] No SMTP password configured — skipping email. Configure in Settings > Email.');
+    console.log('[email] No SMTP password configured — skipping. Add Gmail App Password in Email Settings.');
     return null;
   }
   return nodemailer.createTransport({
@@ -36,12 +47,12 @@ async function sendReceiptEmail(donor, donation, org) {
       return;
     }
     const settings = get('SELECT * FROM email_settings WHERE org_id = ?', [org.id]);
-    if (!settings?.smtp_email) {
-      console.log(`[receipt] Skipping — no SMTP email configured for org ${org.id}. Go to Email Designer > SMTP Settings.`);
+    if (!settings?.postmark_key && !settings?.smtp_email) {
+      console.log(`[receipt] Skipping — no email provider configured for org ${org.id}. Add Postmark API key or Gmail SMTP in Email Settings.`);
       return;
     }
-    if (!settings?.smtp_password) {
-      console.log(`[receipt] Skipping — no App Password saved for org ${org.id}. Enter it in Email Designer > SMTP Settings.`);
+    if (!settings?.postmark_key && !settings?.smtp_password) {
+      console.log(`[receipt] Skipping — no App Password saved for org ${org.id}. Enter Gmail App Password in Email Settings, or use Postmark instead.`);
       return;
     }
     if (settings.donation_emails_paused) {
@@ -52,10 +63,11 @@ async function sendReceiptEmail(donor, donation, org) {
       console.log(`[receipt] Skipping — donor ${donor.id} (${donor.first_name} ${donor.last_name}) has no email address`);
       return;
     }
-    console.log(`[receipt] Attempting to send to ${donor.email} via ${settings.smtp_host||'smtp.gmail.com'}:${settings.smtp_port||587}`);
+    const provider = settings.postmark_key ? 'smtp.postmarkapp.com:587 (Postmark)' : `${settings.smtp_host||'smtp.gmail.com'}:${settings.smtp_port||587} (Gmail)`;
+    console.log(`[receipt] Attempting to send to ${donor.email} via ${provider}`);
 
-    const transporter = getTransporter(settings);
-    if (!transporter) { console.log('[receipt] getTransporter returned null'); return; }
+    const transporter = mailer.buildTransporter(settings);
+    if (!transporter) { console.log('[receipt] No email provider configured — check Email Settings'); return; }
 
     // Use default receipt template from designer if set, else fall back to plain
     const defaultTpl = get('SELECT * FROM email_templates WHERE org_id=? AND is_default_receipt=1', [org.id]);
@@ -63,6 +75,7 @@ async function sendReceiptEmail(donor, donation, org) {
 
     const vars = {
       title:          donor.title || '',
+      hebrew_title:   donor.hebrew_title || '',
       first_name:     donor.first_name,
       last_name:      donor.last_name,
       hebrew_name:    donor.hebrew_full_name || '',
@@ -106,14 +119,15 @@ async function sendReceiptEmail(donor, donation, org) {
         </div>`, vars);
     }
 
-    await transporter.sendMail({
-      from: `"${settings.from_name || org.name}" <${settings.smtp_email}>`,
-      to: donor.email,
-      subject,
-      html
+    await mailer.sendMail({
+      transporter, orgId: org.id,
+      to: donor.email, from: mailer.fromAddr(settings, org.name),
+      subject, html,
+      type: 'receipt',
+      donorId: donor.id, donationId: donation.id,
+      headers: mailer.pmHeaders(settings)
     });
     run('UPDATE donations SET receipt_sent = 1 WHERE id = ?', [donation.id]);
-    console.log(`[receipt] ✓ Sent to ${donor.email} — subject: ${subject}`);
   } catch (e) {
     console.error(`[receipt] ✗ FAILED to ${donor?.email} — ${e.message}`);
   }
@@ -315,6 +329,86 @@ async function processScheduledEmails() {
   }
 }
 
+async function processExpiryWarnings() {
+  const { all, get, run } = require('../db/schema');
+  const nodemailer = require('nodemailer');
+  const now = new Date();
+
+  // Find orgs with expiry dates that haven't been fully warned
+  const orgs = all(`
+    SELECT o.*, es.smtp_email, es.smtp_password, es.smtp_host, es.smtp_port,
+           es.from_name, es.postmark_key
+    FROM organizations o
+    LEFT JOIN email_settings es ON es.org_id = o.id
+    WHERE o.expires_at IS NOT NULL
+  `, []);
+
+  for (const org of orgs) {
+    const expiry = new Date(org.expires_at);
+    const daysLeft = Math.ceil((expiry - now) / (1000 * 60 * 60 * 24));
+    const warned = org.expiry_warned || 0;
+
+    // Warning levels: 14 days = bit 1, 7 days = bit 2, 1 day = bit 4
+    const warnings = [
+      { days: 14, bit: 1 },
+      { days: 7,  bit: 2 },
+      { days: 1,  bit: 4 }
+    ];
+
+    for (const w of warnings) {
+      if (daysLeft <= w.days && daysLeft > 0 && !(warned & w.bit)) {
+        // Send warning email to all org admins
+        const admins = all(`
+          SELECT u.email, u.full_name FROM users u
+          JOIN org_users ou ON ou.user_id = u.id
+          WHERE ou.org_id = ? AND ou.role IN ('admin','org_admin')
+        `, [org.id]);
+
+        const expiryStr = expiry.toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
+        const html = `
+          <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto">
+            <h2 style="color:#d63031">Account Expiring in ${daysLeft} Day${daysLeft>1?'s':''}</h2>
+            <p>Your <strong>${org.name}</strong> DRM account subscription expires on <strong>${expiryStr}</strong>.</p>
+            <p>After expiration, your data will be preserved but:</p>
+            <ul>
+              <li>Recurring donations will stop processing</li>
+              <li>Team members will not be able to log in</li>
+            </ul>
+            <p>Please contact <a href="mailto:support@everythingshul.com">support@everythingshul.com</a> to renew your subscription.</p>
+            <hr style="border:none;border-top:1px solid #eee;margin:20px 0">
+            <p style="color:#9ca3af;font-size:12px">DRM – Powered by EverythingShul</p>
+          </div>`;
+
+        // Send via Postmark or SMTP
+        let transporter;
+        if (org.postmark_key) {
+          transporter = nodemailer.createTransport({ host:'smtp.postmarkapp.com', port:587, secure:false, auth:{user:org.postmark_key, pass:org.postmark_key} });
+        } else if (org.smtp_email && org.smtp_password) {
+          transporter = nodemailer.createTransport({ host:org.smtp_host||'smtp.gmail.com', port:org.smtp_port||587, secure:false, auth:{user:org.smtp_email, pass:org.smtp_password} });
+        }
+
+        if (transporter) {
+          for (const admin of admins) {
+            try {
+              await mailer.sendMail({
+                transporter, orgId: org.id,
+                to: admin.email,
+                from: `"EverythingShul DRM" <${org.smtp_email || 'noreply@everythingshul.com'}>`,
+                subject: `Action Required: DRM Account Expires in ${daysLeft} Day${daysLeft>1?'s':''}`,
+                html, type: 'expiry_warning',
+                headers: org.postmark_key ? { 'X-PM-Message-Stream': 'outbound' } : {}
+              });
+            } catch(e) { console.error(`[expiry] Warning email failed: ${e.message}`); }
+          }
+        }
+
+        // Mark this warning level as sent (bitwise OR)
+        run('UPDATE organizations SET expiry_warned = ? WHERE id = ?', [warned | w.bit, org.id]);
+      }
+    }
+  }
+}
+
 async function processRecurringSchedules() {
   const due = all(`
     SELECT rs.*, d.first_name, d.last_name, d.email, d.zip
@@ -434,6 +528,12 @@ function startScheduler() {
   cron.schedule('0 * * * *', async () => {
     try { await processAutopay(); }
     catch (e) { console.error('Autopay error:', e.message); }
+  });
+
+  // Check expiry warnings once a day at 9am
+  cron.schedule('0 9 * * *', async () => {
+    try { await processExpiryWarnings(); }
+    catch(e) { console.error('Expiry warning error:', e.message); }
   });
 
   console.log('✅ Scheduler started');

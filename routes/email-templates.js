@@ -6,6 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const { all, get, run } = require('../db/schema');
 const { requireAuth, requireOrg, requireOrgAdmin } = require('../middleware/auth');
 const nodemailer = require('nodemailer');
+const mailer    = require('../utils/mailer');
 
 router.use(requireAuth, requireOrg);
 
@@ -312,11 +313,12 @@ router.post('/:id/test-send', requireOrgAdmin, async (req, res) => {
       auth: { user: settings.smtp_email, pass: settings.smtp_password }
     });
 
-    await transporter.sendMail({
-      from: `"${settings.from_name || org?.name || 'DRM'}" <${settings.smtp_email}>`,
-      to,
-      subject: '[TEST] ' + t.subject,
-      html
+    await mailer.sendMail({
+      transporter, orgId: req.orgId,
+      to, from: mailer.fromAddr(settings, org?.name),
+      subject: '[TEST] ' + t.subject, html,
+      type: 'test',
+      headers: mailer.pmHeaders(settings)
     });
 
     res.json({ success: true });

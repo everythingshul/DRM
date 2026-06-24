@@ -38,6 +38,18 @@ router.post('/login', async (req, res) => {
       orgId: activeOrg?.id
     });
 
+    // Check if org is expired (non-super-admins only)
+    if (activeOrg && !user.is_super_admin && activeOrg.expires_at) {
+      const expiry = new Date(activeOrg.expires_at);
+      if (expiry < new Date()) {
+        return res.status(403).json({
+          error: 'expired',
+          message: 'Your account subscription has expired. Please contact EverythingShul to renew your subscription.',
+          expired_at: activeOrg.expires_at
+        });
+      }
+    }
+
     run('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', [user.id]);
     run(`INSERT INTO login_log (id, user_id, org_id, action, ip, user_agent)
          VALUES (?, ?, ?, 'login', ?, ?)`,
@@ -332,7 +344,9 @@ router.post('/setup', async (req, res) => {
 
     const slug = org_name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') + '-' + Date.now().toString(36);
     const orgId = uuidv4();
-    run('INSERT INTO organizations (id, name, slug) VALUES (?, ?, ?)', [orgId, org_name, slug]);
+    // Setup route: no expiry date for the initial super admin org
+    const expiresAt = null;
+    run('INSERT INTO organizations (id, name, slug, expires_at) VALUES (?, ?, ?, ?)', [orgId, org_name, slug, expiresAt]);
     run('INSERT INTO org_users (id, org_id, user_id, role) VALUES (?, ?, ?, ?)', [uuidv4(), orgId, userId, 'admin']);
     run('INSERT INTO email_settings (id, org_id) VALUES (?, ?)', [uuidv4(), orgId]);
     run('INSERT INTO kvitel_settings (id, org_id) VALUES (?, ?)', [uuidv4(), orgId]);
@@ -349,7 +363,7 @@ router.post('/setup', async (req, res) => {
 router.post('/invite-account', requireAuth, async (req, res) => {
   try {
     if (!req.user.is_super_admin) return res.status(403).json({ error: 'Super admin only' });
-    const { email } = req.body;
+    const { email, expiry_date } = req.body;
     if (!email) return res.status(400).json({ error: 'Email required' });
 
     // Check not already a user
@@ -360,7 +374,7 @@ router.post('/invite-account', requireAuth, async (req, res) => {
     const jwt = require('jsonwebtoken');
     const { JWT_SECRET } = require('../middleware/auth');
     const inviteToken = jwt.sign(
-      { inviteEmail: email.toLowerCase().trim(), newAccount: true },
+      { inviteEmail: email.toLowerCase().trim(), newAccount: true, expiryDate: expiry_date || null },
       JWT_SECRET,
       { expiresIn: '7d' }
     );
@@ -447,7 +461,8 @@ router.post('/new-account', async (req, res) => {
 
     const slug = org_name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') + '-' + Date.now().toString(36);
     const orgId = uuidv4();
-    run('INSERT INTO organizations (id, name, slug) VALUES (?, ?, ?)', [orgId, org_name, slug]);
+    const expiresAt = decoded.expiryDate ? new Date(decoded.expiryDate).toISOString() : null;
+    run('INSERT INTO organizations (id, name, slug, expires_at) VALUES (?, ?, ?, ?)', [orgId, org_name, slug, expiresAt]);
     run('INSERT INTO org_users (id, org_id, user_id, role) VALUES (?, ?, ?, ?)', [uuidv4(), orgId, userId, 'admin']);
     run('INSERT INTO email_settings (id, org_id) VALUES (?, ?)', [uuidv4(), orgId]);
     run('INSERT INTO kvitel_settings (id, org_id) VALUES (?, ?)', [uuidv4(), orgId]);
@@ -460,3 +475,29 @@ router.post('/new-account', async (req, res) => {
 });
 
 module.exports = router;
+
+// Super admin: list all orgs with expiry status
+const authRouter = require('express').Router();
+// (re-using existing router export, adding to it)
+
+router.get('/orgs', requireAuth, (req, res) => {
+  if (!req.user.is_super_admin) return res.status(403).json({ error: 'Super admin only' });
+  const orgs = all(`
+    SELECT o.id, o.name, o.slug, o.created_at, o.expires_at,
+           COUNT(DISTINCT ou.user_id) as user_count
+    FROM organizations o
+    LEFT JOIN org_users ou ON ou.org_id = o.id
+    GROUP BY o.id ORDER BY o.created_at DESC
+  `, []);
+  res.json(orgs);
+});
+
+// Super admin: set/update expiry date for an org
+router.put('/orgs/:orgId/expiry', requireAuth, (req, res) => {
+  if (!req.user.is_super_admin) return res.status(403).json({ error: 'Super admin only' });
+  const { expires_at } = req.body;
+  // Reset warning flags when expiry is updated
+  run('UPDATE organizations SET expires_at=?, expiry_warned=0 WHERE id=?',
+    [expires_at || null, req.params.orgId]);
+  res.json({ success: true });
+});

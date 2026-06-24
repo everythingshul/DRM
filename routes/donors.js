@@ -302,14 +302,20 @@ router.post('/:id/donations', async (req, res) => {
     const org = get('SELECT * FROM organizations WHERE id = ?', [req.orgId]);
 
     // Send receipt — default ON, only skip if explicitly set to false
+    let receiptSent = false;
     if (send_receipt !== false && send_receipt !== 'false') {
       const { sendReceiptEmail } = require('../utils/scheduler');
-      await sendReceiptEmail(donor, donation, org).catch(e => console.error('[receipt] Failed:', e.message));
+      try {
+        await sendReceiptEmail(donor, donation, org);
+        receiptSent = true;
+      } catch(e) {
+        console.error('[receipt] Failed:', e.message);
+      }
     } else {
       console.log(`[receipt] Skipped by user choice for donation ${id}`);
     }
 
-    res.json({ success: true, donation });
+    res.json({ success: true, donation, receipt_sent: receiptSent });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message || 'Server error' });

@@ -5,6 +5,7 @@ const { v4: uuidv4 } = require('uuid');
 const { all, get, run } = require('../db/schema');
 const { requireAuth, requireOrg, requireOrgAdmin } = require('../middleware/auth');
 const nodemailer = require('nodemailer');
+const mailer    = require('../utils/mailer');
 const XLSX = require('xlsx');
 
 router.use(requireAuth, requireOrg);
@@ -27,23 +28,24 @@ router.get('/email-settings', requireOrgAdmin, (req, res) => {
 });
 
 router.put('/email-settings', requireOrgAdmin, (req, res) => {
-  const { smtp_email, smtp_password, smtp_host, smtp_port, from_name, receipt_template, marketing_template, donation_emails_paused } = req.body;
+  const { smtp_email, smtp_password, smtp_host, smtp_port, from_name, receipt_template, marketing_template, donation_emails_paused, postmark_key } = req.body;
   const existing = get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]);
 
   if (!existing) {
-    run(`INSERT INTO email_settings (id, org_id, smtp_email, smtp_password, smtp_host, smtp_port, from_name, receipt_template, marketing_template, donation_emails_paused)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [uuidv4(), req.orgId, smtp_email, smtp_password || '', smtp_host || 'smtp.gmail.com', smtp_port || 587, from_name || '', receipt_template || '', marketing_template || '', donation_emails_paused ? 1 : 0]);
+    run(`INSERT INTO email_settings (id, org_id, smtp_email, smtp_password, smtp_host, smtp_port, from_name, receipt_template, marketing_template, donation_emails_paused, postmark_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [uuidv4(), req.orgId, smtp_email, smtp_password || '', smtp_host || 'smtp.gmail.com', smtp_port || 587, from_name || '', receipt_template || '', marketing_template || '', donation_emails_paused ? 1 : 0, postmark_key || '']);
   } else {
     const newPass = smtp_password ? smtp_password : existing.smtp_password;
+    const newPmKey = postmark_key !== undefined ? postmark_key : existing.postmark_key;
     run(`UPDATE email_settings SET smtp_email = ?, smtp_password = ?, smtp_host = ?, smtp_port = ?, from_name = ?,
-         receipt_template = ?, marketing_template = ?, donation_emails_paused = ?, updated_at = CURRENT_TIMESTAMP
+         receipt_template = ?, marketing_template = ?, donation_emails_paused = ?, postmark_key = ?, updated_at = CURRENT_TIMESTAMP
          WHERE org_id = ?`,
       [smtp_email ?? existing.smtp_email, newPass, smtp_host ?? existing.smtp_host, smtp_port ?? existing.smtp_port,
        from_name ?? existing.from_name, receipt_template ?? existing.receipt_template,
        marketing_template ?? existing.marketing_template,
        donation_emails_paused !== undefined ? (donation_emails_paused ? 1 : 0) : existing.donation_emails_paused,
-       req.orgId]);
+       newPmKey, req.orgId]);
   }
   res.json({ success: true });
 });
@@ -51,30 +53,46 @@ router.put('/email-settings', requireOrgAdmin, (req, res) => {
 // Send test email
 router.post('/email-settings/test', requireOrgAdmin, async (req, res) => {
   try {
-    const { to, subject, html } = req.body;
+    const { to } = req.body;
     const settings = get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]);
-    if (!settings?.smtp_email) return res.status(400).json({ error: 'Email not configured. Enter your SMTP email and save first.' });
-    if (!settings?.smtp_password) return res.status(400).json({ error: 'App Password not set. Enter it and save before testing.' });
+    const org = get('SELECT * FROM organizations WHERE id=?', [req.orgId]);
 
-    const transporter = nodemailer.createTransport({
-      host: settings.smtp_host || 'smtp.gmail.com',
-      port: settings.smtp_port || 587,
-      secure: false,
-      auth: { user: settings.smtp_email, pass: settings.smtp_password }
-    });
+    let transporter;
+    if (settings?.postmark_key) {
+      // Use Postmark
+      transporter = nodemailer.createTransport({
+        host: 'smtp.postmarkapp.com',
+        port: 587,
+        secure: false,
+        auth: { user: settings.postmark_key, pass: settings.postmark_key }
+      });
+    } else {
+      if (!settings?.smtp_email) return res.status(400).json({ error: 'Email not configured. Add a Postmark API key (recommended) or Gmail SMTP credentials.' });
+      if (!settings?.smtp_password) return res.status(400).json({ error: 'App Password not set. Enter it and save before testing.' });
+      transporter = nodemailer.createTransport({
+        host: settings.smtp_host || 'smtp.gmail.com',
+        port: settings.smtp_port || 587,
+        secure: false,
+        auth: { user: settings.smtp_email, pass: settings.smtp_password }
+      });
+    }
 
-    // Verify connection/auth before attempting to send — surfaces the real reason
     try {
       await transporter.verify();
     } catch (verifyErr) {
-      return res.status(400).json({ error: `SMTP connection failed: ${verifyErr.message}. Check your email and App Password (not your regular Gmail password).` });
+      return res.status(400).json({ error: `Connection failed: ${verifyErr.message}` });
     }
 
-    await transporter.sendMail({
-      from: `"${settings.from_name || 'DRM'}" <${settings.smtp_email}>`,
-      to: to || settings.smtp_email,
-      subject: subject || 'DRM Test Email',
-      html: html || '<p>This is a test email from your DRM system.</p>'
+    const fromName = settings?.from_name || org?.name || 'DRM';
+    const fromEmail = settings?.smtp_email || 'receipts@everythingshul.com';
+    await mailer.sendMail({
+      transporter, orgId: req.orgId,
+      to: to || settings?.smtp_email,
+      from: `"${fromName}" <${fromEmail}>`,
+      subject: 'DRM Test Email',
+      html: '<p>This is a test email from your DRM system. If you received this, email sending is working correctly.</p>',
+      type: 'test',
+      headers: settings?.postmark_key ? { 'X-PM-Message-Stream': 'outbound' } : {}
     });
 
     res.json({ success: true });
@@ -83,12 +101,15 @@ router.post('/email-settings/test', requireOrgAdmin, async (req, res) => {
   }
 });
 
-// ── Email status — quick check whether SMTP is fully configured ───────────────
+// ── Email status — quick check whether email is fully configured ──────────────
 router.get('/email-settings/status', (req, res) => {
-  const settings = get('SELECT smtp_email, smtp_password, donation_emails_paused FROM email_settings WHERE org_id = ?', [req.orgId]);
+  const settings = get('SELECT smtp_email, smtp_password, donation_emails_paused, postmark_key FROM email_settings WHERE org_id = ?', [req.orgId]);
+  const hasPostmark = !!(settings?.postmark_key);
+  const hasGmail   = !!(settings?.smtp_email && settings?.smtp_password);
   res.json({
-    configured: !!(settings?.smtp_email && settings?.smtp_password),
-    has_email: !!settings?.smtp_email,
+    configured: hasPostmark || hasGmail,
+    postmark:   hasPostmark,
+    has_email:  !!settings?.smtp_email,
     has_password: !!settings?.smtp_password,
     paused: !!settings?.donation_emails_paused
   });
@@ -847,4 +868,107 @@ router.delete('/donations/:donationId/notes/:noteIdx', (req, res) => {
     run('UPDATE donations SET donation_notes=? WHERE id=? AND org_id=?', [JSON.stringify(notes), req.params.donationId, req.orgId]);
     res.json({ success: true, notes });
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Debug: test the exact same receipt email path as a real donation ──────────
+// This lets us compare test vs donation trigger precisely
+router.post('/email-settings/test-receipt', requireOrgAdmin, async (req, res) => {
+  try {
+    const { donor_id } = req.body;
+    const { sendReceiptEmail } = require('../utils/scheduler');
+    const { get } = require('../db/schema');
+
+    const org = get('SELECT * FROM organizations WHERE id=?', [req.orgId]);
+    const settings = get('SELECT * FROM email_settings WHERE org_id=?', [req.orgId]);
+
+    // Log exactly what sendReceiptEmail will see
+    console.log('[test-receipt] org.id:', org?.id);
+    console.log('[test-receipt] settings found:', !!settings);
+    console.log('[test-receipt] smtp_email:', settings?.smtp_email);
+    console.log('[test-receipt] smtp_password set:', !!settings?.smtp_password);
+    console.log('[test-receipt] donation_emails_paused:', settings?.donation_emails_paused);
+
+    let donor;
+    if (donor_id) {
+      donor = get('SELECT * FROM donors WHERE id=? AND org_id=?', [donor_id, req.orgId]);
+    } else {
+      // Use the current user's email as a fake donor for testing
+      donor = { id: 'test', first_name: 'Test', last_name: 'Recipient',
+        email: req.user?.email || settings?.smtp_email,
+        donation_emails_paused: 0, hebrew_full_name: '', title: '' };
+    }
+    console.log('[test-receipt] donor.email:', donor?.email);
+
+    const fakeDonation = { id: 'test-don-' + Date.now(), amount: 100,
+      donation_date: new Date().toISOString(), transaction_id: 'ES-TEST-001',
+      method: 'check', payment_method_id: null };
+
+    await sendReceiptEmail(donor, fakeDonation, org);
+    res.json({ success: true, message: 'Check Render logs for [receipt] entries' });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Email log ──────────────────────────────────────────────────────────────────
+router.get('/email-log', (req, res) => {
+  const { type, status, q, limit = 100 } = req.query;
+  let sql = `
+    SELECT el.*, d.first_name, d.last_name
+    FROM email_log el
+    LEFT JOIN donors d ON el.donor_id = d.id
+    WHERE el.org_id = ?`;
+  const params = [req.orgId];
+  if (type)   { sql += ' AND el.type = ?';          params.push(type); }
+  if (status) { sql += ' AND el.status = ?';        params.push(status); }
+  if (q)      { sql += ' AND (el.to_email LIKE ? OR el.subject LIKE ?)';
+                params.push('%'+q+'%', '%'+q+'%'); }
+  sql += ' ORDER BY el.sent_at DESC LIMIT ?';
+  params.push(parseInt(limit) || 100);
+  res.json(all(sql, params));
+});
+
+// ── Email log: get full HTML body of a logged email ────────────────────────────
+router.get('/email-log/:id/body', (req, res) => {
+  const row = get('SELECT html_body, subject FROM email_log WHERE id=? AND org_id=?',
+    [req.params.id, req.orgId]);
+  if (!row) return res.status(404).json({ error: 'Email not found' });
+  if (!row.html_body) return res.status(404).json({ error: 'No body stored for this email' });
+  // Return as HTML so it can be rendered in an iframe
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.send(row.html_body);
+});
+
+// ── Email log: forward a logged email to a new address ────────────────────────
+router.post('/email-log/:id/forward', requireOrgAdmin, async (req, res) => {
+  try {
+    const { to } = req.body;
+    if (!to) return res.status(400).json({ error: 'Recipient address required' });
+
+    const row = get('SELECT * FROM email_log WHERE id=? AND org_id=?',
+      [req.params.id, req.orgId]);
+    if (!row) return res.status(404).json({ error: 'Email not found' });
+    if (!row.html_body) return res.status(400).json({ error: 'No body stored — cannot forward' });
+
+    const settings = get('SELECT * FROM email_settings WHERE org_id=?', [req.orgId]);
+    const { buildTransporter, fromAddr, pmHeaders, sendMail } = require('../utils/mailer');
+    const transporter = buildTransporter(settings);
+    if (!transporter) return res.status(400).json({ error: 'Email not configured. Set up SMTP or Postmark in Email Settings.' });
+
+    const org = get('SELECT * FROM organizations WHERE id=?', [req.orgId]);
+    await sendMail({
+      transporter, orgId: req.orgId,
+      to, from: fromAddr(settings, org?.name),
+      subject: `Fwd: ${row.subject}`,
+      html: row.html_body,
+      type: row.type,
+      donorId: row.donor_id, donationId: row.donation_id,
+      headers: pmHeaders(settings)
+    });
+
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
 });

@@ -8,6 +8,7 @@
     "dev": "node server.js"
   },
   "dependencies": {
+    "@pdf-lib/fontkit": "^1.1.1",
     "bcryptjs": "^2.4.3",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
@@ -21,7 +22,7 @@
     "node-cron": "^3.0.3",
     "nodemailer": "^6.9.7",
     "pdf-lib": "^1.17.1",
-    "@pdf-lib/fontkit": "^1.1.1",
+    "postmark": "^4.0.7",
     "sql.js": "^1.10.3",
     "stripe": "^14.7.0",
     "uuid": "^9.0.1",

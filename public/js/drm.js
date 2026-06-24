@@ -375,13 +375,6 @@ function showApp() {
     item.onclick = () => { if (window.innerWidth <= 768) closeSidebar(); navigateTo(item.dataset.page); };
   });
   $('logout-btn').onclick = async () => { try { await API.post('/auth/logout', {}); } catch {} localStorage.removeItem('drm_token'); showLogin(); };
-  $('add-org-btn').onclick = () => Modal.open('New Organization', `
-    <label>Organization Name</label>
-    <input id="no-name" placeholder="My Organization">
-    <div class="bg mt">
-      <button class="btn btn-primary btn-sm" onclick="createOrg()">Create</button>
-      <button class="btn btn-ghost btn-sm" onclick="Modal.close()">Cancel</button>
-    </div>`, { sm: true });
   // Navigate to hash if present, else dashboard
   const initPage = location.hash.replace('#','') || 'dashboard';
   const validPages = ['dashboard','donors','donations','verification','failures','bank','emails','kvitel','reports','settings'];
@@ -1211,7 +1204,8 @@ const DonorDetail = {
         send_receipt: $('md-send-receipt')?.checked !== false
       });
       if (label && r.donation?.id) await API.put(`/api/orgs/${API.orgId}/donations/${r.donation.id}/label`, {label}).catch(()=>{});
-      toast('Recorded'); Modal.close(); this.open(did);
+      const receiptMsg = r.receipt_sent ? ' · Receipt sent' : (($('md-send-receipt')?.checked !== false) ? ' · Receipt failed (check Render logs)' : '');
+      toast(`Recorded${receiptMsg}`); Modal.close(); this.open(did);
     } catch(e) { toast(e.message, 'err'); }
   },
 
@@ -1797,6 +1791,7 @@ async function renderEmails(el) {
 
       <div class="tabs">
         <div class="tab on" data-tc="em-templates">Templates</div>
+        <div class="tab" data-tc="em-log">Sent Emails</div>
         <div class="tab" data-tc="em-smtp">SMTP Settings</div>
         <div class="tab" data-tc="em-sched">Scheduled Sends</div>
       </div>
@@ -1839,31 +1834,37 @@ async function renderEmails(el) {
           <label class="tgl"><input type="checkbox" id="em-pause" ${cfg?.donation_emails_paused?'checked':''}>
           <span class="tgl-s"></span></label></div>
         <hr class="divider">
-        <div class="r2">
-          <div><label>SMTP Email (Gmail address)</label><input id="em-email" type="email" value="${cfg?.smtp_email||''}" autocomplete="email"></div>
-          <div><label>From Name</label><input id="em-name" value="${cfg?.from_name||''}"></div>
+
+        <div style="background:var(--blue-pale);border:1.5px solid var(--blue);border-radius:6px;padding:12px 14px;margin-bottom:14px">
+          <div style="font-weight:700;color:var(--navy);margin-bottom:4px">🚀 Recommended: Postmark (best deliverability, avoids spam)</div>
+          <div style="font-size:12px;color:var(--gray-6);margin-bottom:8px">
+            Postmark is a free transactional email service. Sign up at <strong>postmarkapp.com</strong>, create a server,
+            add and verify your sending domain (everythingshul.com or your shul's domain — they walk you through SPF/DKIM),
+            then paste your Server API Token below. First 100 emails/month free, then $1.50/1000.
+          </div>
+          <label>Postmark Server API Token <span style="font-size:11px;color:var(--gray-5)">(leave blank to keep existing)</span></label>
+          <input id="em-pmkey" type="password" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="">
+          <small style="font-size:11px;color:var(--gray-5)">If set, Postmark is used instead of Gmail SMTP — much better inbox placement.</small>
         </div>
+
+        <div style="font-size:12px;font-weight:600;color:var(--gray-7);margin-bottom:8px">Or: Gmail SMTP (works but may land in spam for non-Gmail recipients)</div>
         <div class="r2">
-          <div><label>SMTP Host</label><input id="em-host" value="${cfg?.smtp_host||'smtp.gmail.com'}"></div>
-          <div><label>Port</label><input id="em-port" type="number" value="${cfg?.smtp_port||587}"></div>
+          <div><label>Your Gmail Address</label><input id="em-email" type="email" value="${cfg?.smtp_email||''}" autocomplete="email" placeholder="you@gmail.com"></div>
+          <div><label>From Name</label><input id="em-name" value="${cfg?.from_name||''}" placeholder="Your Shul Name"></div>
         </div>
-        <label>App Password <span style="font-size:11px;color:var(--gray-5)">(leave blank to keep existing)</span></label>
-        <input id="em-pass" type="password" placeholder="Gmail App Password">
-        <small style="color:var(--gray-5);font-size:11px">Gmail → Google Account → Security → 2-Step Verification → App Passwords. This is NOT your regular Gmail password.</small>
+        <label>Gmail App Password <span style="font-size:11px;color:var(--gray-5)">(leave blank to keep existing)</span></label>
+        <input id="em-pass" type="password" placeholder="16-character App Password (NOT your Gmail password)">
+        <small style="color:var(--gray-5);font-size:11px">Gmail → Google Account → Security → 2-Step Verification → App Passwords → Create</small>
+
         <div class="bg mt">
           <button class="btn btn-primary" onclick="_saveEmailSettings()">Save</button>
           <button class="btn btn-ghost btn-sm" onclick="_testEmail()">Send Test Email</button>
         </div>
-        <hr class="divider">
-        <div style="font-size:12px;color:var(--gray-5);line-height:1.7">
-          <strong style="color:var(--gray-7)">Avoiding spam folders:</strong><br>
-          • Gmail SMTP relay (smtp.gmail.com) authenticates as your real Gmail address, which already has strong sender reputation — this is the single biggest factor.<br>
-          • Ask first-time recipients to add your address to their contacts, or reply once — this trains their spam filter.<br>
-          • Avoid spam-trigger words in subject lines ("free", "act now", excessive exclamation marks/caps).<br>
-          • Keep a reasonable send volume — Gmail's free SMTP relay has daily limits (~500/day for regular accounts, ~2000/day for Workspace) and sudden spikes can trigger filtering.<br>
-          • For high-volume sending (hundreds of receipts/day), consider a dedicated transactional email service (Postmark, SendGrid, Amazon SES) with your own domain and SPF/DKIM/DMARC records — this gives the most reliable inbox placement.
-        </div>
       </div></div>
+
+      <div id="em-log" class="tc">
+        <div id="em-log-body"><div class="spinner"></div></div>
+      </div>
 
       <div id="em-sched" class="tc">
         <div id="em-sched-list"><div class="spinner"></div></div>
@@ -1871,10 +1872,130 @@ async function renderEmails(el) {
 
     tabsInit('#page-emails');
     _loadEmailStatus();
+    // Load email log when tab clicked
+    document.querySelector('#page-emails .tab[data-tc="em-log"]')
+      ?.addEventListener('click', _loadEmailLog);
 
     // Load scheduled emails on tab click
     document.querySelector('#page-emails .tab[data-tc="em-sched"]').addEventListener('click', _loadSchedEmails);
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message||'Error'}</div>`; }
+}
+
+async function _loadEmailLog() {
+  const c = $('em-log-body'); if(!c) return;
+  c.innerHTML = '<div class="spinner"></div>';
+  try {
+    const [log] = await Promise.all([
+      API.get(`/api/orgs/${API.orgId}/email-log?limit=200`)
+    ]);
+
+    const typeLabels = {
+      receipt: 'Donation Receipt',
+      charge_success: 'Charge Success',
+      charge_failed: 'Charge Failed',
+      expiry_warning: 'Expiry Warning',
+      scheduled: 'Scheduled Email',
+      test: 'Test Email',
+      invite: 'Account Invite'
+    };
+    const typePills = {
+      receipt: 'pill-blue',
+      charge_success: 'pill-green',
+      charge_failed: 'pill-red',
+      expiry_warning: 'pill-amber',
+      scheduled: 'pill-blue',
+      test: 'pill-gray',
+      invite: 'pill-gray'
+    };
+
+    c.innerHTML = `
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+        <div class="sw" style="flex:1;min-width:180px">
+          <input id="elog-q" placeholder="Search by recipient or subject…" oninput="_filterEmailLog()" autocomplete="off">
+        </div>
+        <select id="elog-type" onchange="_filterEmailLog()">
+          <option value="">All types</option>
+          ${Object.entries(typeLabels).map(([v,l])=>`<option value="${v}">${l}</option>`).join('')}
+        </select>
+        <select id="elog-status" onchange="_filterEmailLog()">
+          <option value="">All statuses</option>
+          <option value="sent">Sent</option>
+          <option value="failed">Failed</option>
+        </select>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden">
+        <div class="tw"><table>
+          <thead><tr>
+            <th>Sent At</th><th>To</th><th>Subject</th>
+            <th>Type</th><th>Status</th><th>Donor</th><th></th>
+          </tr></thead>
+          <tbody id="elog-tb">${_emailLogRows(log, typeLabels, typePills)}</tbody>
+        </table></div>
+      </div>`;
+    window._emailLogAll = log;
+    window._emailLogMeta = { typeLabels, typePills };
+  } catch(e) { c.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+
+function _emailLogRows(rows, typeLabels, typePills) {
+  if(!rows.length) return '<tr><td colspan="7"><div class="empty">No emails sent yet</div></td></tr>';
+  return rows.map(r => `<tr>
+    <td style="font-size:11px;white-space:nowrap;color:var(--gray-5)">${fmtDT(r.sent_at)}</td>
+    <td style="font-size:12px">${r.to_email}</td>
+    <td style="font-size:12px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.subject}">${r.subject}</td>
+    <td><span class="pill ${typePills[r.type]||'pill-gray'}" style="font-size:10px">${typeLabels[r.type]||r.type}</span></td>
+    <td>${r.status==='sent'
+      ? '<span class="pill pill-green" style="font-size:10px">✓ Sent</span>'
+      : `<span class="pill pill-red" style="font-size:10px" title="${(r.error||'').replace(/"/g,"'")}">✗ Failed</span>`}</td>
+    <td style="font-size:12px">${r.first_name?`<a href="#" onclick="event.preventDefault();DonorDetail.open('${r.donor_id}')" style="color:var(--navy)">${r.first_name} ${r.last_name}</a>`:'—'}</td>
+    <td><div class="actions">
+      <button class="btn btn-ghost btn-sm" onclick="_emailLogPreview('${r.id}')">Preview</button>
+      <button class="btn btn-ghost btn-sm" onclick="_emailLogForward('${r.id}')">Forward</button>
+    </div></td>
+  </tr>`).join('');
+}
+function _emailLogPreview(id) {
+  const row = (window._emailLogAll||[]).find(r=>r.id===id);
+  const subject = row?.subject || 'Email Preview';
+  Modal.open(subject, `
+    <div style="border:1px solid var(--gray-1);border-radius:6px;overflow:hidden;height:520px">
+      <iframe src="/api/orgs/${API.orgId}/email-log/${id}/body"
+        style="width:100%;height:100%;border:none"
+        sandbox="allow-same-origin"></iframe>
+    </div>
+    <div class="bg mt">
+      <button class="btn btn-primary btn-sm" onclick="_emailLogForward('${id}')">Forward</button>
+      <button class="btn btn-ghost btn-sm" onclick="Modal.close()">Close</button>
+    </div>`, {lg:true, tall:true});
+}
+
+function _emailLogForward(id) {
+  Modal.open('Forward Email', `
+    <label>Forward to *</label>
+    <input id="fwd-to" type="email" placeholder="recipient@example.com" autocomplete="email">
+    <div class="bg mt">
+      <button class="btn btn-primary" id="fwd-btn" onclick="
+        const to=val('fwd-to').trim();
+        if(!to){toast('Enter an email address','err');return;}
+        const btn=$('fwd-btn');
+        btn.textContent='Sending…';btn.disabled=true;
+        API.post('/api/orgs/${API.orgId}/email-log/${id}/forward',{to})
+          .then(()=>{toast('Forwarded ✓');Modal.close();})
+          .catch(e=>{toast(e.message||'Forward failed','err');btn.textContent='Forward';btn.disabled=false;})
+      ">Forward</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+function _filterEmailLog() {
+  const q = (val('elog-q')||'').toLowerCase();
+  const type = val('elog-type'), status = val('elog-status');
+  const meta = window._emailLogMeta || {typeLabels:{},typePills:{}};
+  const rows = (window._emailLogAll||[]).filter(r =>
+    (!q || r.to_email.toLowerCase().includes(q) || r.subject.toLowerCase().includes(q)) &&
+    (!type || r.type === type) &&
+    (!status || r.status === status));
+  const tb = $('elog-tb'); if(tb) tb.innerHTML = _emailLogRows(rows, meta.typeLabels, meta.typePills);
 }
 
 async function _loadSchedEmails() {
@@ -2007,7 +2128,7 @@ function _edRenderShell(name, subject) {
           </div>`).join('')}
 
         <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;letter-spacing:.5px;margin:16px 0 8px">Merge Tags</div>
-        ${['{{first_name}}','{{last_name}}','{{title}}','{{hebrew_name}}','{{amount}}','{{date}}','{{transaction_id}}','{{method}}','{{org_name}}'].map(tag =>
+        ${['{{first_name}}','{{last_name}}','{{title}}','{{hebrew_title}}','{{hebrew_name}}','{{amount}}','{{date}}','{{transaction_id}}','{{method}}','{{org_name}}'].map(tag =>
           `<div onclick="navigator.clipboard.writeText('${tag}').then(()=>toast('Copied'))"
             style="font-size:11px;font-family:monospace;background:#fff;border:1px solid var(--gray-1);
             border-radius:4px;padding:4px 8px;margin-bottom:3px;cursor:pointer;color:var(--blue)"
@@ -2433,12 +2554,13 @@ async function _saveEmailSettings() {
   if (btn) { btn.textContent = 'Saving…'; btn.disabled = true; }
   try {
     await API.put(API.o.email(), {
-      smtp_email: email,
+      smtp_email: email || undefined,
       smtp_password: val('em-pass') || undefined, // undefined = keep existing if blank
-      smtp_host: val('em-host') || 'smtp.gmail.com',
-      smtp_port: parseInt(val('em-port')) || 587,
+      smtp_host: 'smtp.gmail.com',
+      smtp_port: 587,
       from_name: val('em-name') || '',
-      donation_emails_paused: $('em-pause')?.checked ? 1 : 0
+      donation_emails_paused: $('em-pause')?.checked ? 1 : 0,
+      postmark_key: val('em-pmkey') || undefined // undefined = keep existing if blank
     });
     toast('Email settings saved ✓');
     const passInput = $('em-pass'); if (passInput) passInput.value = '';
@@ -2453,12 +2575,14 @@ async function _loadEmailStatus() {
   const c = $('em-status'); if (!c) return;
   try {
     const s = await API.get(`/api/orgs/${API.orgId}/email-settings/status`);
-    if (s.configured) {
-      c.innerHTML = `<div class="alert alert-ok" style="font-size:12px">✓ SMTP configured (${s.has_email?'email set':''}${s.paused?' — currently paused':''}). Click "Send Test Email" to verify it actually delivers.</div>`;
+    if (s.postmark) {
+      c.innerHTML = `<div class="alert alert-ok" style="font-size:12px">✓ Postmark configured${s.paused?' (paused)':''}. Best deliverability — emails should reach inbox reliably.</div>`;
+    } else if (s.configured) {
+      c.innerHTML = `<div class="alert alert-ok" style="font-size:12px">✓ Gmail SMTP configured${s.paused?' (paused)':''}. Emails will send but may land in spam for non-Gmail recipients. Consider adding a Postmark key above.</div>`;
     } else if (s.has_email && !s.has_password) {
-      c.innerHTML = `<div class="alert alert-warn" style="font-size:12px">⚠ Email address saved but no App Password set. Receipts will NOT send until you add it.</div>`;
+      c.innerHTML = `<div class="alert alert-warn" style="font-size:12px">⚠ Gmail address saved but no App Password set. Receipts will NOT send. Add App Password and Save, or use Postmark.</div>`;
     } else {
-      c.innerHTML = `<div class="alert alert-warn" style="font-size:12px">⚠ Email not configured yet. Donation receipts will not be sent until you fill this in and Save.</div>`;
+      c.innerHTML = `<div class="alert alert-err" style="font-size:12px">✗ Email not configured. Donation receipts are NOT sending. Add Postmark API key (recommended) or Gmail credentials above and Save.</div>`;
     }
   } catch { c.innerHTML = ''; }
 }
