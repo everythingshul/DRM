@@ -404,7 +404,7 @@ function navigateTo(page) {
 function reloadPage() { const el = $('page-' + _currentPage); if(el) renderPage(_currentPage, el); }
 window.addEventListener('popstate', () => {
   const page = location.hash.replace('#','') || 'dashboard';
-  const valid = ['dashboard','donors','donations','verification','failures','bank','emails','kvitel','reports','settings'];
+  const valid = ['dashboard','donors','donations','verification','failures','bank','emails','kvitel','reports','settings','whatsapp'];
   if (valid.includes(page)) { const el=$('page-'+page); if(el) el.innerHTML=''; navigateTo(page); }
 });
 
@@ -418,6 +418,7 @@ function renderPage(page, el) {
     bank:         renderBank,
     emails:       renderEmails,
     kvitel:       renderKvitel,
+    whatsapp:     renderWhatsApp,
     reports:      renderReports,
     settings:     renderSettings,
   };
@@ -3346,3 +3347,452 @@ async function _saveUnlinkedDonation() {
 }
 
 document.addEventListener('DOMContentLoaded', init);
+
+// ══════════════════════════════════════════════════════════════════════════════
+// WhatsApp Broadcasting
+// ══════════════════════════════════════════════════════════════════════════════
+
+async function renderWhatsApp(el) {
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const [settings, groups, broadcasts] = await Promise.all([
+      API.get(`/api/orgs/${API.orgId}/whatsapp/settings`).catch(()=>({})),
+      API.get(`/api/orgs/${API.orgId}/whatsapp/groups`).catch(()=>[]),
+      API.get(`/api/orgs/${API.orgId}/whatsapp/broadcasts`).catch(()=>[])
+    ]);
+    const configured = !!(settings.account_sid && settings.from_number);
+
+    el.innerHTML = `
+      <div class="ph">
+        <div><div class="ph-title">WhatsApp</div>
+          <div class="ph-sub">Broadcast messages to your community via WhatsApp Business</div>
+        </div>
+        <div class="bg">
+          ${configured ? `<button class="btn btn-primary btn-sm" onclick="_waNewBroadcast()">+ New Broadcast</button>` : ''}
+        </div>
+      </div>
+
+      ${!configured ? `
+        <div class="alert alert-warn" style="margin-bottom:16px">
+          <strong>WhatsApp not configured yet.</strong> Enter your Twilio credentials below to get started.<br>
+          <span style="font-size:12px">Sign up at <strong>twilio.com</strong> → get Account SID + Auth Token → enable WhatsApp Sandbox → paste below.</span>
+        </div>` : ''}
+
+      <div class="tabs">
+        <div class="tab on" data-tc="wa-broadcasts">Broadcasts</div>
+        <div class="tab" data-tc="wa-groups">Contact Groups</div>
+        <div class="tab" data-tc="wa-settings">Settings</div>
+      </div>
+
+      <!-- Broadcasts -->
+      <div id="wa-broadcasts" class="tc on">
+        ${!configured ? `<div class="card"><div class="empty">Configure WhatsApp credentials in the Settings tab first.</div></div>` :
+        !broadcasts.length ? `<div class="card" style="text-align:center;padding:48px">
+          <div style="font-size:48px;margin-bottom:12px">💬</div>
+          <h3 style="color:var(--navy)">No broadcasts yet</h3>
+          <p style="color:var(--gray-5);margin-bottom:16px">Create a contact group, then send a mass WhatsApp message.</p>
+          <button class="btn btn-primary" onclick="_waNewBroadcast()">+ Create First Broadcast</button>
+        </div>` : `
+        <div style="display:flex;flex-direction:column;gap:10px">
+          ${broadcasts.map(b => `
+            <div class="card" style="padding:14px 16px">
+              <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+                <div style="flex:1">
+                  <div style="font-weight:700;font-size:14px;color:var(--navy)">${b.name||'Broadcast'}</div>
+                  <div style="font-size:12px;color:var(--gray-5);margin-top:2px">${fmtDT(b.created_at)} · ${b.group_name||'No group'}</div>
+                  <div style="font-size:13px;color:var(--gray-7);margin-top:6px;padding:8px 10px;background:var(--gray-05);border-radius:6px;white-space:pre-wrap">${b.message.slice(0,200)}${b.message.length>200?'…':''}</div>
+                </div>
+                <div style="flex-shrink:0;text-align:right">
+                  ${b.status==='sent'?`<span class="pill pill-green">Sent</span>`:
+                    b.status==='sending'?`<span class="pill pill-amber">Sending…</span>`:
+                    b.status==='scheduled'?`<span class="pill pill-blue">Scheduled</span>`:
+                    `<span class="pill pill-gray">Draft</span>`}
+                  <div style="font-size:11px;color:var(--gray-5);margin-top:4px">
+                    ${b.status==='sent'||b.status==='sending'?`✓ ${b.sent} sent · ✗ ${b.failed} failed · ${b.total} total`:`${b.total} contacts`}
+                  </div>
+                </div>
+              </div>
+              <div class="bg mt" style="justify-content:flex-end">
+                ${b.status==='sent'||b.status==='sending'?`<button class="btn btn-ghost btn-sm" onclick="_waViewLog('${b.id}','${b.name||'Broadcast'}')">📋 Message Log</button>`:''}
+                ${b.status==='draft'||b.status==='scheduled'?`
+                  <button class="btn btn-primary btn-sm" onclick="_waSend('${b.id}','${b.total}')">▶ Send Now</button>
+                  <button class="btn btn-ghost btn-sm" onclick="_waEditBroadcast('${b.id}')">Edit</button>
+                  <button class="btn btn-icon" style="color:var(--red)" onclick="_waDeleteBroadcast('${b.id}')">✕</button>
+                `:''}
+              </div>
+            </div>`).join('')}
+        </div>`}
+      </div>
+
+      <!-- Groups -->
+      <div id="wa-groups" class="tc">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <strong>Contact Groups</strong>
+          <button class="btn btn-primary btn-sm" onclick="_waNewGroup()">+ New Group</button>
+        </div>
+        ${!groups.length ? `<div class="card"><div class="empty">No groups yet. Create a group, then add contacts or import from your donor list.</div></div>` :
+        `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">
+          ${groups.map(g => `
+            <div class="card">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                <div>
+                  <div style="font-weight:700;font-size:14px;color:var(--navy)">${g.name}</div>
+                  ${g.description?`<div style="font-size:12px;color:var(--gray-5)">${g.description}</div>`:''}
+                  <div style="font-size:13px;margin-top:6px"><strong>${g.contact_count||0}</strong> contacts</div>
+                </div>
+                <button class="btn btn-icon" style="color:var(--red)" onclick="_waDeleteGroup('${g.id}','${g.name}')">✕</button>
+              </div>
+              <div class="bg mt">
+                <button class="btn btn-blue btn-sm" onclick="_waManageContacts('${g.id}','${g.name}')">Manage Contacts</button>
+                <button class="btn btn-ghost btn-sm" onclick="_waImportDonors('${g.id}','${g.name}')">Import Donors</button>
+                <button class="btn btn-ghost btn-sm" onclick="_waImportList('${g.id}','${g.name}')">Import List</button>
+              </div>
+            </div>`).join('')}
+        </div>`}
+      </div>
+
+      <!-- Settings -->
+      <div id="wa-settings" class="tc">
+        <div class="card">
+          <div id="wa-status" style="margin-bottom:12px">
+            ${configured
+              ? `<div class="alert alert-ok" style="font-size:12px">✓ Twilio configured · WhatsApp number: ${settings.from_number}</div>`
+              : `<div class="alert alert-warn" style="font-size:12px">⚠ Not configured yet. Fill in your Twilio credentials below.</div>`}
+          </div>
+          <div class="card-title" style="margin-bottom:12px">Twilio / WhatsApp Credentials</div>
+          <label>Account SID</label>
+          <input id="wa-sid" value="${settings.account_sid||''}" placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" autocomplete="off">
+          <label style="margin-top:10px">Auth Token <span style="font-size:11px;color:var(--gray-5)">(leave blank to keep existing)</span></label>
+          <input id="wa-token" type="password" placeholder="Your Twilio Auth Token" autocomplete="off">
+          <label style="margin-top:10px">WhatsApp From Number</label>
+          <input id="wa-from" value="${settings.from_number||''}" placeholder="whatsapp:+14155238886" autocomplete="off">
+          <small style="font-size:11px;color:var(--gray-5)">Format: <code>whatsapp:+1XXXXXXXXXX</code>. Use the Twilio Sandbox number during testing, or your approved number in production.</small>
+          <div class="bg mt">
+            <button class="btn btn-primary" onclick="_waSaveSettings()">Save</button>
+            <button class="btn btn-ghost btn-sm" onclick="_waTestConnection()">Test Connection</button>
+          </div>
+          <hr class="divider">
+          <div style="font-size:12px;color:var(--gray-5);line-height:1.8">
+            <strong style="color:var(--gray-7)">Quick setup guide:</strong><br>
+            1. Sign up at <strong>twilio.com</strong> (free)<br>
+            2. Console → Messaging → Try it out → Send a WhatsApp message → follow the sandbox join instructions<br>
+            3. Copy <strong>Account SID</strong> and <strong>Auth Token</strong> from your Twilio Console home page<br>
+            4. Use <code>whatsapp:+14155238886</code> as the From Number for the sandbox<br>
+            5. Contacts must send <code>join [your-sandbox-word]</code> to the sandbox number before they can receive messages<br>
+            <strong style="color:var(--gray-7);margin-top:8px;display:block">For production:</strong>
+            Apply for a WhatsApp Business number in Twilio → use that number as the From Number → no sandbox join required.
+          </div>
+        </div>
+      </div>`;
+
+    tabsInit('#page-whatsapp');
+  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+
+// ── Settings ───────────────────────────────────────────────────────────────────
+async function _waSaveSettings() {
+  const btn = document.querySelector('#wa-settings .btn-primary');
+  if (btn) { btn.textContent='Saving…'; btn.disabled=true; }
+  try {
+    await API.put(`/api/orgs/${API.orgId}/whatsapp/settings`, {
+      account_sid: val('wa-sid').trim(),
+      auth_token:  val('wa-token') || undefined,
+      from_number: val('wa-from').trim()
+    });
+    toast('Settings saved ✓');
+    renderWhatsApp($('page-whatsapp'));
+  } catch(e) { toast(e.message||'Save failed','err'); }
+  finally { if(btn){btn.textContent='Save';btn.disabled=false;} }
+}
+
+async function _waTestConnection() {
+  const btn = document.querySelectorAll('#wa-settings .btn-ghost')[0];
+  if (btn) { btn.textContent='Testing…'; btn.disabled=true; }
+  try {
+    const r = await API.post(`/api/orgs/${API.orgId}/whatsapp/settings/test`, {});
+    toast(`✓ Connected! Account: ${r.account_name} (${r.status})`);
+  } catch(e) { toast(e.message||'Connection failed','err'); }
+  finally { if(btn){btn.textContent='Test Connection';btn.disabled=false;} }
+}
+
+// ── Groups ─────────────────────────────────────────────────────────────────────
+function _waNewGroup() {
+  Modal.open('New Contact Group', `
+    <label>Group Name *</label>
+    <input id="wag-name" placeholder="e.g. Shabbat Reminders, Boro Park Members…" autocomplete="off">
+    <label style="margin-top:10px">Description (optional)</label>
+    <input id="wag-desc" placeholder="What is this group for?" autocomplete="off">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_waCreateGroup()">Create Group</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+async function _waCreateGroup() {
+  const name = val('wag-name').trim();
+  if (!name) { toast('Group name required','err'); return; }
+  try {
+    await API.post(`/api/orgs/${API.orgId}/whatsapp/groups`, { name, description: val('wag-desc') });
+    toast('Group created ✓'); Modal.close(); renderWhatsApp($('page-whatsapp'));
+  } catch(e) { toast(e.message,'err'); }
+}
+
+async function _waDeleteGroup(id, name) {
+  confirmDlg(`Delete group "${name}" and all its contacts?`, async () => {
+    await API.del(`/api/orgs/${API.orgId}/whatsapp/groups/${id}`);
+    toast('Deleted'); renderWhatsApp($('page-whatsapp'));
+  });
+}
+
+// ── Manage contacts ────────────────────────────────────────────────────────────
+async function _waManageContacts(gid, gname) {
+  const contacts = await API.get(`/api/orgs/${API.orgId}/whatsapp/groups/${gid}/contacts`);
+  Modal.open(`Contacts — ${gname}`, `
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <input id="wac-name" placeholder="Name *" style="flex:1" autocomplete="off">
+      <input id="wac-phone" placeholder="Phone * (e.g. 9175551234)" style="flex:1" autocomplete="off">
+      <button class="btn btn-blue btn-sm" onclick="_waAddContact('${gid}')">Add</button>
+    </div>
+    <div id="wac-list" style="max-height:340px;overflow-y:auto">
+      ${contacts.length ? `
+        <table width="100%" style="font-size:13px;border-collapse:collapse">
+          <thead><tr><th style="text-align:left;padding:4px 6px;border-bottom:1px solid var(--gray-1)">Name</th><th style="text-align:left;padding:4px 6px;border-bottom:1px solid var(--gray-1)">Phone</th><th></th></tr></thead>
+          <tbody>${contacts.map(c=>`<tr>
+            <td style="padding:6px;border-bottom:1px solid var(--gray-1)">${c.name}</td>
+            <td style="padding:6px;border-bottom:1px solid var(--gray-1);font-family:monospace;font-size:12px">${c.phone}</td>
+            <td style="padding:6px;border-bottom:1px solid var(--gray-1)"><button class="btn btn-icon" style="color:var(--red)" onclick="_waRemoveContact('${gid}','${c.id}')">✕</button></td>
+          </tr>`).join('')}</tbody>
+        </table>` : '<p style="color:var(--gray-5);font-size:13px">No contacts yet. Add one above or import.</p>'}
+    </div>
+    <div class="bg mt">
+      <button class="btn btn-ghost btn-sm" onclick="Modal.close();renderWhatsApp($('page-whatsapp'))">Done</button>
+    </div>`, {lg:true});
+  window._waCurrentGid = gid;
+}
+
+async function _waAddContact(gid) {
+  const name = val('wac-name').trim(), phone = val('wac-phone').trim();
+  if (!name||!phone) { toast('Name and phone required','err'); return; }
+  try {
+    await API.post(`/api/orgs/${API.orgId}/whatsapp/groups/${gid}/contacts`, {name, phone});
+    toast('Contact added ✓');
+    document.getElementById('wac-name').value=''; document.getElementById('wac-phone').value='';
+    _waManageContacts(gid, '');
+  } catch(e) { toast(e.message,'err'); }
+}
+
+async function _waRemoveContact(gid, cid) {
+  await API.del(`/api/orgs/${API.orgId}/whatsapp/groups/${gid}/contacts/${cid}`);
+  toast('Removed'); _waManageContacts(gid, '');
+}
+
+// ── Import from donor list ─────────────────────────────────────────────────────
+async function _waImportDonors(gid, gname) {
+  const nhs = await API.get(API.o.neighborhoods()).catch(()=>[]);
+  const labelLists = await API.get(`/api/orgs/${API.orgId}/label-lists`).catch(()=>({donor_labels:[]}));
+  Modal.open(`Import Donors → ${gname}`, `
+    <p style="font-size:13px;color:var(--gray-5);margin-bottom:12px">Import donors who have a cell or home phone number.</p>
+    <div class="tabs"><div class="tab on" data-tc="imp-all">All Donors</div><div class="tab" data-tc="imp-nh">By Neighborhood</div><div class="tab" data-tc="imp-lbl">By Label</div></div>
+    <div id="imp-all" class="tc on" style="padding:12px 0">
+      <p style="font-size:13px">Import ALL donors with a phone number into this group.</p>
+      <button class="btn btn-primary" onclick="_waDoImportDonors('${gid}',{all_donors:true})">Import All</button>
+    </div>
+    <div id="imp-nh" class="tc" style="padding:12px 0">
+      <label>Neighborhood</label>
+      <select id="imp-nh-sel">
+        <option value="">— Select neighborhood —</option>
+        ${nhs.map(n=>`<option value="${n.id}">${n.name_he||n.name}</option>`).join('')}
+      </select>
+      <button class="btn btn-primary mt" onclick="_waDoImportDonors('${gid}',{neighborhood_id:val('imp-nh-sel')})">Import</button>
+    </div>
+    <div id="imp-lbl" class="tc" style="padding:12px 0">
+      <label>Donor Label</label>
+      <select id="imp-lbl-sel">
+        <option value="">— Select label —</option>
+        ${(labelLists.donor_labels||[]).map(l=>`<option value="${l}">${l}</option>`).join('')}
+      </select>
+      <button class="btn btn-primary mt" onclick="_waDoImportDonors('${gid}',{label:val('imp-lbl-sel')})">Import</button>
+    </div>`, {sm:true});
+  tabsInit('#modal-body');
+}
+
+async function _waDoImportDonors(gid, params) {
+  try {
+    const r = await API.post(`/api/orgs/${API.orgId}/whatsapp/groups/${gid}/import-donors`, params);
+    toast(`✓ Imported ${r.added} contacts (${r.skipped} skipped — no phone)`);
+    Modal.close(); renderWhatsApp($('page-whatsapp'));
+  } catch(e) { toast(e.message,'err'); }
+}
+
+// ── Import from pasted/uploaded list ──────────────────────────────────────────
+function _waImportList(gid, gname) {
+  Modal.open(`Import List → ${gname}`, `
+    <p style="font-size:13px;color:var(--gray-5);margin-bottom:10px">
+      Paste or type contacts — one per line, format: <code>Name, Phone</code><br>
+      Or upload a CSV with columns: Name, Phone
+    </p>
+    <div class="tabs"><div class="tab on" data-tc="il-paste">Paste</div><div class="tab" data-tc="il-csv">Upload CSV</div></div>
+    <div id="il-paste" class="tc on" style="padding:10px 0">
+      <textarea id="il-text" style="width:100%;min-height:160px;font-size:12px;font-family:monospace" placeholder="Moshe Cohen, +19175551234
+Yaakov Levi, 3475559876
+Rivka Goldberg, +1 212 555 0101"></textarea>
+      <button class="btn btn-primary mt" onclick="_waPastedImport('${gid}')">Import</button>
+    </div>
+    <div id="il-csv" class="tc" style="padding:10px 0">
+      <label>Upload CSV file</label>
+      <input type="file" id="il-file" accept=".csv,.txt" style="margin-bottom:10px">
+      <button class="btn btn-primary" onclick="_waCsvImport('${gid}')">Upload & Import</button>
+    </div>`, {sm:true});
+  tabsInit('#modal-body');
+}
+
+async function _waPastedImport(gid) {
+  const lines = (val('il-text')||'').split('\n').map(l=>l.trim()).filter(Boolean);
+  const contacts = lines.map(line => {
+    const parts = line.split(/,\s*/);
+    return { name: parts[0]?.trim(), phone: parts[1]?.trim() };
+  }).filter(c=>c.name&&c.phone);
+  if (!contacts.length) { toast('No valid contacts found. Format: Name, Phone','err'); return; }
+  try {
+    const r = await API.post(`/api/orgs/${API.orgId}/whatsapp/groups/${gid}/import-list`, {contacts});
+    toast(`✓ Imported ${r.added} · ${r.skipped} skipped`);
+    Modal.close(); renderWhatsApp($('page-whatsapp'));
+  } catch(e) { toast(e.message,'err'); }
+}
+
+async function _waCsvImport(gid) {
+  const file = document.getElementById('il-file')?.files?.[0];
+  if (!file) { toast('Select a CSV file','err'); return; }
+  const text = await file.text();
+  const lines = text.split('\n').map(l=>l.trim()).filter(Boolean);
+  // Skip header if it contains "name" or "phone"
+  const start = lines[0]?.toLowerCase().includes('name') ? 1 : 0;
+  const contacts = lines.slice(start).map(line => {
+    const parts = line.split(',').map(s=>s.replace(/^"|"$/g,'').trim());
+    return { name: parts[0], phone: parts[1] };
+  }).filter(c=>c.name&&c.phone);
+  if (!contacts.length) { toast('No valid contacts found in CSV','err'); return; }
+  try {
+    const r = await API.post(`/api/orgs/${API.orgId}/whatsapp/groups/${gid}/import-list`, {contacts});
+    toast(`✓ Imported ${r.added} from CSV · ${r.skipped} skipped`);
+    Modal.close(); renderWhatsApp($('page-whatsapp'));
+  } catch(e) { toast(e.message,'err'); }
+}
+
+// ── Broadcasts ─────────────────────────────────────────────────────────────────
+async function _waNewBroadcast() {
+  const groups = await API.get(`/api/orgs/${API.orgId}/whatsapp/groups`).catch(()=>[]);
+  if (!groups.length) {
+    toast('Create a contact group first','err'); return;
+  }
+  Modal.open('New Broadcast', `
+    <label>Name (internal)</label>
+    <input id="wab-name" placeholder="e.g. Shabbat Reminder June 21" autocomplete="off">
+    <label style="margin-top:10px">Send To *</label>
+    <select id="wab-group">
+      ${groups.map(g=>`<option value="${g.id}">${g.name} (${g.contact_count||0} contacts)</option>`).join('')}
+    </select>
+    <label style="margin-top:10px">Message *</label>
+    <textarea id="wab-msg" style="width:100%;min-height:120px" placeholder="Type your message here…\n\nTip: Keep it short, clear and friendly. WhatsApp messages work best under 300 characters."></textarea>
+    <div id="wab-chars" style="font-size:11px;color:var(--gray-5);text-align:right;margin-top:2px">0 characters</div>
+    <div class="trow mt" style="padding:8px 0;border-top:1px solid var(--gray-1)">
+      <div style="font-size:13px">Schedule for later</div>
+      <label class="tgl"><input type="checkbox" id="wab-sched-on" onchange="document.getElementById('wab-sched-row').style.display=this.checked?'':'none'"><span class="tgl-s"></span></label>
+    </div>
+    <div id="wab-sched-row" style="display:none">
+      <label>Send At</label>
+      <input type="datetime-local" id="wab-sched-dt" value="${toLocalDT(new Date().toISOString())}">
+    </div>
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_waCreateBroadcast(false)">Save as Draft</button>
+      <button class="btn btn-blue" onclick="_waCreateBroadcast(true)">Send Now</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+  document.getElementById('wab-msg')?.addEventListener('input', function(){
+    const c=document.getElementById('wab-chars');
+    if(c)c.textContent=this.value.length+' characters';
+  });
+}
+
+async function _waCreateBroadcast(sendNow) {
+  const msg = val('wab-msg').trim();
+  if (!msg) { toast('Message required','err'); return; }
+  const gid = val('wab-group');
+  if (!gid) { toast('Select a group','err'); return; }
+  const schedOn = document.getElementById('wab-sched-on')?.checked;
+  const schedDt = schedOn ? val('wab-sched-dt') : null;
+  try {
+    const r = await API.post(`/api/orgs/${API.orgId}/whatsapp/broadcasts`, {
+      name: val('wab-name')||null,
+      message: msg, group_id: gid,
+      scheduled_at: schedDt||null
+    });
+    if (sendNow && !schedOn) {
+      toast('Sending…');
+      Modal.close();
+      await _waSend(r.broadcast.id, r.broadcast.total, true);
+    } else {
+      toast(schedOn?'Scheduled ✓':'Draft saved ✓');
+      Modal.close(); renderWhatsApp($('page-whatsapp'));
+    }
+  } catch(e) { toast(e.message,'err'); }
+}
+
+async function _waSend(id, total, skipConfirm) {
+  if (!skipConfirm) {
+    confirmDlg(`Send this broadcast to ${total} contacts now?`, async()=>{
+      await _waDoSend(id);
+    });
+  } else {
+    await _waDoSend(id);
+  }
+}
+
+async function _waDoSend(id) {
+  try {
+    const r = await API.post(`/api/orgs/${API.orgId}/whatsapp/broadcasts/${id}/send`, {});
+    toast(`✓ Sending to ${r.total} contacts… Check the message log for delivery status.`);
+    setTimeout(()=>renderWhatsApp($('page-whatsapp')), 1500);
+  } catch(e) { toast(e.message||'Send failed','err'); }
+}
+
+async function _waDeleteBroadcast(id) {
+  confirmDlg('Delete this broadcast draft?', async()=>{
+    await API.del(`/api/orgs/${API.orgId}/whatsapp/broadcasts/${id}`);
+    toast('Deleted'); renderWhatsApp($('page-whatsapp'));
+  });
+}
+
+// ── Message log ────────────────────────────────────────────────────────────────
+async function _waViewLog(bid, bname) {
+  const msgs = await API.get(`/api/orgs/${API.orgId}/whatsapp/broadcasts/${bid}/messages`);
+  const sent   = msgs.filter(m=>m.status==='sent').length;
+  const failed = msgs.filter(m=>m.status==='failed').length;
+  Modal.open(`Message Log — ${bname}`, `
+    <div class="bg" style="margin-bottom:10px;font-size:13px">
+      <span class="pill pill-green">✓ ${sent} sent</span>
+      <span class="pill pill-red">✗ ${failed} failed</span>
+      <span style="color:var(--gray-5)">${msgs.length} total</span>
+    </div>
+    <div style="max-height:420px;overflow-y:auto">
+      <table width="100%" style="font-size:12px;border-collapse:collapse">
+        <thead><tr>
+          <th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--gray-1)">Name</th>
+          <th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--gray-1)">Phone</th>
+          <th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--gray-1)">Status</th>
+          <th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--gray-1)">Time</th>
+        </tr></thead>
+        <tbody>${msgs.map(m=>`<tr>
+          <td style="padding:6px 8px;border-bottom:1px solid var(--gray-1)">${m.to_name||'—'}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid var(--gray-1);font-family:monospace">${m.to_number}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid var(--gray-1)">
+            ${m.status==='sent'
+              ? '<span class="pill pill-green" style="font-size:10px">✓ Sent</span>'
+              : `<span class="pill pill-red" style="font-size:10px" title="${m.error||''}">✗ Failed</span>`}
+          </td>
+          <td style="padding:6px 8px;border-bottom:1px solid var(--gray-1);color:var(--gray-5)">${fmtDT(m.sent_at)}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>
+    <div class="bg mt"><button class="btn btn-ghost" onclick="Modal.close()">Close</button></div>`, {lg:true});
+}

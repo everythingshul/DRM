@@ -169,6 +169,53 @@ function createTables() {
       donation_id TEXT,
       sent_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS whatsapp_settings (
+      id TEXT PRIMARY KEY, org_id TEXT UNIQUE NOT NULL,
+      account_sid TEXT, auth_token TEXT,
+      from_number TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS whatsapp_groups (
+      id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
+      name TEXT NOT NULL, description TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS whatsapp_contacts (
+      id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
+      group_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      phone TEXT NOT NULL,
+      donor_id TEXT,
+      opted_in INTEGER DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(group_id, phone)
+    );
+    CREATE TABLE IF NOT EXISTS whatsapp_broadcasts (
+      id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
+      name TEXT,
+      message TEXT NOT NULL,
+      group_id TEXT,
+      status TEXT DEFAULT 'draft',
+      total INTEGER DEFAULT 0,
+      sent INTEGER DEFAULT 0,
+      failed INTEGER DEFAULT 0,
+      scheduled_at DATETIME,
+      sent_at DATETIME,
+      created_by TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS whatsapp_messages (
+      id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
+      broadcast_id TEXT NOT NULL,
+      contact_id TEXT,
+      to_number TEXT NOT NULL,
+      to_name TEXT,
+      body TEXT NOT NULL,
+      status TEXT DEFAULT 'pending',
+      twilio_sid TEXT,
+      error TEXT,
+      sent_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
     CREATE TABLE IF NOT EXISTS bank_connections (
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL, bank_name TEXT DEFAULT 'Chase',
       api_key TEXT, api_secret TEXT, last_sync DATETIME, is_active INTEGER DEFAULT 1,
@@ -201,6 +248,11 @@ function runMigrations() {
     `ALTER TABLE donations ADD COLUMN label TEXT`,
     `ALTER TABLE organizations ADD COLUMN expires_at DATETIME DEFAULT NULL`,
     `ALTER TABLE organizations ADD COLUMN expiry_warned INTEGER DEFAULT 0`,
+    `CREATE TABLE IF NOT EXISTS whatsapp_settings (id TEXT PRIMARY KEY, org_id TEXT UNIQUE NOT NULL, account_sid TEXT, auth_token TEXT, from_number TEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
+    `CREATE TABLE IF NOT EXISTS whatsapp_groups (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
+    `CREATE TABLE IF NOT EXISTS whatsapp_contacts (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, group_id TEXT NOT NULL, name TEXT NOT NULL, phone TEXT NOT NULL, donor_id TEXT, opted_in INTEGER DEFAULT 1, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
+    `CREATE TABLE IF NOT EXISTS whatsapp_broadcasts (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, name TEXT, message TEXT NOT NULL, group_id TEXT, status TEXT DEFAULT 'draft', total INTEGER DEFAULT 0, sent INTEGER DEFAULT 0, failed INTEGER DEFAULT 0, scheduled_at DATETIME, sent_at DATETIME, created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
+    `CREATE TABLE IF NOT EXISTS whatsapp_messages (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, broadcast_id TEXT NOT NULL, contact_id TEXT, to_number TEXT NOT NULL, to_name TEXT, body TEXT NOT NULL, status TEXT DEFAULT 'pending', twilio_sid TEXT, error TEXT, sent_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
     `CREATE TABLE IF NOT EXISTS email_log (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, to_email TEXT NOT NULL, subject TEXT NOT NULL, html_body TEXT, type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'sent', error TEXT, donor_id TEXT, donation_id TEXT, sent_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
     `ALTER TABLE email_log ADD COLUMN html_body TEXT`,
     // Rebuild donations table to remove old CHECK constraint on status (if it exists)

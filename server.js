@@ -16,6 +16,7 @@ const orgRouter      = require('./routes/org');
 const kvitelRouter   = require('./routes/kvitel');
 const paymentsRouter  = require('./routes/payments');
 const { router: emailTplRouter } = require('./routes/email-templates');
+const whatsappRouter = require('./routes/whatsapp');
 const { startScheduler } = require('./utils/scheduler');
 
 const app = express();
@@ -59,6 +60,7 @@ app.use('/api/orgs/:orgId', orgRouter);
 app.use('/api/orgs/:orgId/kvitel', kvitelRouter);
 app.use('/api/orgs/:orgId/payments', paymentsRouter);
 app.use('/api/orgs/:orgId/email-templates', emailTplRouter);
+app.use('/api/orgs/:orgId/whatsapp', whatsappRouter);
 
 app.get('/api/setup-status', (req, res) => {
   res.json({ needsSetup: all('SELECT id FROM users LIMIT 1', []).length === 0 });
