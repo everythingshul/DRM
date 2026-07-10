@@ -322,34 +322,28 @@ function showSetup() {
 function showLogin() {
   _show('login-screen'); _hide('setup-screen'); _hide('app'); _hide('newacct-screen');
   const form = $('login-form');
-  // Clone to remove old event listeners
-  const fresh = form.cloneNode(true);
-  form.parentNode.replaceChild(fresh, form);
-  fresh.onsubmit = async e => {
+  form.onsubmit = async e => {
     e.preventDefault();
     const err = $('login-err'); err.style.display = 'none';
+    const email = val('l-email').trim();
+    const password = val('l-pass');
+    if (!email || !password) { err.textContent = 'Enter email and password'; err.style.display = 'block'; return; }
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ email: val('l-email'), password: val('l-pass') })
+        body: JSON.stringify({ email, password })
       });
-      if (res.status === 403) {
-        const d = await res.json();
-        if (d.error === 'expired') {
-          err.innerHTML = `<strong>Account Expired</strong><br>${d.message}`;
-          err.style.display = 'block'; return;
-        }
-      }
-      if (!res.ok) {
-        const d = await res.json();
-        throw new Error(d.error || 'Login failed');
-      }
       const data = await res.json();
+      if (res.status === 403 && data.error === 'expired') {
+        err.innerHTML = `<strong>Account Expired</strong><br>${data.message}`;
+        err.style.display = 'block'; return;
+      }
+      if (!res.ok) { throw new Error(data.error || 'Login failed'); }
       DRM.user = data.user; _allOrgs = data.orgs;
       if (data.token) localStorage.setItem('drm_token', data.token);
-      _redirecting = false; // reset so API calls work again
+      _redirecting = false;
       if (data.orgs.length) await setOrg(data.activeOrg || data.orgs[0]);
       showApp();
     } catch(e) { err.textContent = e.message; err.style.display = 'block'; }
