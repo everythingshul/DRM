@@ -12,10 +12,30 @@ let db;
 async function initDb() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   const existed = fs.existsSync(DB_PATH);
-  db = new Database(DB_PATH);
-  db.pragma('journal_mode = WAL');   // Write-Ahead Logging: safe concurrent reads
-  db.pragma('foreign_keys = ON');
-  console.log(`[db] ${existed ? 'Loaded' : 'Created'} DB at ${DB_PATH} (${existed ? fs.statSync(DB_PATH).size+' bytes' : 'new'})`);
+
+  if (existed) {
+    try {
+      db = new Database(DB_PATH);
+      db.pragma('journal_mode = WAL');
+      db.pragma('foreign_keys = ON');
+      console.log(`[db] Loaded DB at ${DB_PATH} (${fs.statSync(DB_PATH).size} bytes)`);
+    } catch(e) {
+      // Corrupted — move aside and start fresh rather than crashing
+      const backup = `${DB_PATH}.corrupted.${Date.now()}`;
+      console.error(`[db] Corrupted DB (${e.message}) — moving to ${backup} and starting fresh`);
+      fs.renameSync(DB_PATH, backup);
+      db = new Database(DB_PATH);
+      db.pragma('journal_mode = WAL');
+      db.pragma('foreign_keys = ON');
+      console.log(`[db] Created fresh DB at ${DB_PATH}`);
+    }
+  } else {
+    db = new Database(DB_PATH);
+    db.pragma('journal_mode = WAL');
+    db.pragma('foreign_keys = ON');
+    console.log(`[db] Created new DB at ${DB_PATH}`);
+  }
+
   createTables();
   runMigrations();
   return db;

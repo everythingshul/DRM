@@ -2,7 +2,7 @@ services:
   - type: web
     name: drm-everything-shul
     env: node
-    buildCommand: npm install
+    buildCommand: npm install && npm rebuild better-sqlite3
     startCommand: node server.js
     disk:
       name: drm-data
