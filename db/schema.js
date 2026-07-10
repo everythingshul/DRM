@@ -1,54 +1,64 @@
-// db/schema.js — better-sqlite3 (writes directly to disk, no corruption risk)
+// db/schema.js — sql.js with synchronous disk write on every transaction
 'use strict';
-const Database = require('better-sqlite3');
-const path     = require('path');
-const fs       = require('fs');
+const initSqlJs = require('sql.js');
+const path      = require('path');
+const fs        = require('fs');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
 const DB_PATH  = path.join(DATA_DIR, 'drm.db');
 
 let db;
 
+function saveDb() {
+  try {
+    const data = db.export();
+    fs.writeFileSync(DB_PATH, Buffer.from(data));
+  } catch(e) {
+    console.error('[db] saveDb error:', e.message);
+  }
+}
+
 async function initDb() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  const existed = fs.existsSync(DB_PATH);
+  const SQL = await initSqlJs();
 
-  if (existed) {
+  if (fs.existsSync(DB_PATH)) {
     try {
-      db = new Database(DB_PATH);
-      db.pragma('journal_mode = WAL');
-      db.pragma('foreign_keys = ON');
-      console.log(`[db] Loaded DB at ${DB_PATH} (${fs.statSync(DB_PATH).size} bytes)`);
+      const data = fs.readFileSync(DB_PATH);
+      db = new SQL.Database(data);
+      db.run('PRAGMA foreign_keys=ON');
+      // Quick integrity check
+      const result = db.exec("PRAGMA integrity_check");
+      const ok = result[0]?.values[0]?.[0] === 'ok';
+      if (!ok) throw new Error('integrity check failed');
+      console.log(`[db] Loaded DB from ${DB_PATH} (${data.length} bytes)`);
     } catch(e) {
-      // Corrupted — move aside and start fresh rather than crashing
+      // Corrupted — move aside and start fresh
       const backup = `${DB_PATH}.corrupted.${Date.now()}`;
-      console.error(`[db] Corrupted DB (${e.message}) — moving to ${backup} and starting fresh`);
-      fs.renameSync(DB_PATH, backup);
-      db = new Database(DB_PATH);
-      db.pragma('journal_mode = WAL');
-      db.pragma('foreign_keys = ON');
+      console.error(`[db] Corrupted DB (${e.message}) — saving to ${backup} and starting fresh`);
+      try { fs.renameSync(DB_PATH, backup); } catch {}
+      const SQL2 = await initSqlJs();
+      db = new SQL2.Database();
+      db.run('PRAGMA foreign_keys=ON');
       console.log(`[db] Created fresh DB at ${DB_PATH}`);
     }
   } else {
-    db = new Database(DB_PATH);
-    db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = ON');
+    db = new SQL.Database();
+    db.run('PRAGMA foreign_keys=ON');
     console.log(`[db] Created new DB at ${DB_PATH}`);
   }
 
   createTables();
   runMigrations();
+  saveDb(); // initial save
   return db;
 }
 
-// better-sqlite3 is synchronous — no saveDb() needed, writes happen on every run()
-function saveDb() { /* no-op — better-sqlite3 writes directly to disk */ }
-
 function run(sql, params = []) {
   try {
-    const stmt = db.prepare(sql);
-    const info = stmt.run(params);
-    return { changes: info.changes, lastInsertRowid: info.lastInsertRowid };
+    db.run(sql, params);
+    saveDb(); // write to disk immediately after every change
+    return { changes: db.getRowsModified() };
   } catch(e) {
     console.error('DB run error:', e.message, '| SQL:', sql.slice(0,80));
     throw e;
@@ -57,7 +67,15 @@ function run(sql, params = []) {
 
 function get(sql, params = []) {
   try {
-    return db.prepare(sql).get(params);
+    const stmt = db.prepare(sql);
+    stmt.bind(params);
+    if (stmt.step()) {
+      const row = stmt.getAsObject();
+      stmt.free();
+      return row;
+    }
+    stmt.free();
+    return null;
   } catch(e) {
     console.error('DB get error:', e.message, '| SQL:', sql.slice(0,80));
     throw e;
@@ -66,7 +84,12 @@ function get(sql, params = []) {
 
 function all(sql, params = []) {
   try {
-    return db.prepare(sql).all(params);
+    const stmt  = db.prepare(sql);
+    const rows  = [];
+    stmt.bind(params);
+    while (stmt.step()) rows.push(stmt.getAsObject());
+    stmt.free();
+    return rows;
   } catch(e) {
     console.error('DB all error:', e.message, '| SQL:', sql.slice(0,80));
     throw e;
@@ -74,7 +97,7 @@ function all(sql, params = []) {
 }
 
 function createTables() {
-  db.exec(`
+  db.run(`
     CREATE TABLE IF NOT EXISTS organizations (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL,
       settings TEXT DEFAULT '{}', created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -239,8 +262,7 @@ function createTables() {
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
       group_id TEXT NOT NULL, name TEXT NOT NULL, phone TEXT NOT NULL,
       donor_id TEXT, opted_in INTEGER DEFAULT 1,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(group_id, phone)
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS whatsapp_broadcasts (
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
@@ -261,18 +283,16 @@ function createTables() {
 }
 
 function runMigrations() {
-  // All migrations are now handled by CREATE TABLE IF NOT EXISTS above.
-  // Add any ALTER TABLE statements here for columns added after initial deploy.
-  const safeAlter = (sql) => { try { db.exec(sql); } catch(e) { /* column exists */ } };
-  safeAlter("ALTER TABLE donors ADD COLUMN autopay_minute INTEGER DEFAULT 0");
-  safeAlter("ALTER TABLE donors ADD COLUMN hebrew_title TEXT");
-  safeAlter("ALTER TABLE donations ADD COLUMN label TEXT");
-  safeAlter("ALTER TABLE email_settings ADD COLUMN postmark_key TEXT DEFAULT ''");
-  safeAlter("ALTER TABLE organizations ADD COLUMN expires_at DATETIME DEFAULT NULL");
-  safeAlter("ALTER TABLE organizations ADD COLUMN expiry_warned INTEGER DEFAULT 0");
-  safeAlter("ALTER TABLE kvitel_settings ADD COLUMN neighborhood_font TEXT DEFAULT 'Frank Ruhl Libre'");
-  safeAlter("ALTER TABLE kvitel_settings ADD COLUMN neighborhood_size REAL DEFAULT 14");
-  safeAlter("ALTER TABLE kvitel_settings ADD COLUMN neighborhood_bold INTEGER DEFAULT 1");
+  const safe = (sql) => { try { db.run(sql); saveDb(); } catch(e) { /* already exists */ } };
+  safe("ALTER TABLE donors ADD COLUMN autopay_minute INTEGER DEFAULT 0");
+  safe("ALTER TABLE donors ADD COLUMN hebrew_title TEXT");
+  safe("ALTER TABLE donations ADD COLUMN label TEXT");
+  safe("ALTER TABLE email_settings ADD COLUMN postmark_key TEXT DEFAULT ''");
+  safe("ALTER TABLE organizations ADD COLUMN expires_at DATETIME DEFAULT NULL");
+  safe("ALTER TABLE organizations ADD COLUMN expiry_warned INTEGER DEFAULT 0");
+  safe("ALTER TABLE kvitel_settings ADD COLUMN neighborhood_font TEXT DEFAULT 'Frank Ruhl Libre'");
+  safe("ALTER TABLE kvitel_settings ADD COLUMN neighborhood_size REAL DEFAULT 14");
+  safe("ALTER TABLE kvitel_settings ADD COLUMN neighborhood_bold INTEGER DEFAULT 1");
 }
 
 module.exports = { initDb, all, get, run, saveDb };
