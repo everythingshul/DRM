@@ -20,7 +20,6 @@ const API = {
       headers: {
         'Content-Type': 'application/json',
         'x-org-id': API.orgId || '',
-        // Send token in header as fallback if cookie doesn't work
         ...(token ? { 'Authorization': 'Bearer ' + token } : {})
       },
       credentials: 'include'
@@ -29,11 +28,12 @@ const API = {
     let res;
     try { res = await fetch(url, opts); } catch(e) { throw new Error('Network error: ' + e.message); }
     if (res.status === 401) {
-      // Don't redirect if already on login, to prevent loops
+      // Clear any stale token before redirecting
+      localStorage.removeItem('drm_token');
       if (!_redirecting) {
         _redirecting = true;
         showLogin();
-        _redirecting = false;
+        // Don't reset _redirecting — keep it true until user logs in successfully
       }
       throw new Error('Session expired');
     }
@@ -299,6 +299,9 @@ async function init() {
     if (me.orgs.length) await setOrg(me.orgs[0]);
     showApp();
   } catch {
+    // Token invalid or expired — clear it and show login fresh
+    localStorage.removeItem('drm_token');
+    _redirecting = false;
     showLogin();
   }
 }
@@ -319,15 +322,35 @@ function showSetup() {
 function showLogin() {
   _show('login-screen'); _hide('setup-screen'); _hide('app'); _hide('newacct-screen');
   const form = $('login-form');
-  form.onsubmit = async e => {
+  // Clone to remove old event listeners
+  const fresh = form.cloneNode(true);
+  form.parentNode.replaceChild(fresh, form);
+  fresh.onsubmit = async e => {
     e.preventDefault();
     const err = $('login-err'); err.style.display = 'none';
     try {
-      const res = await API.post('/auth/login', { email: val('l-email'), password: val('l-pass') });
-      DRM.user = res.user; _allOrgs = res.orgs;
-      // Store token in localStorage as fallback for environments where cookies don't persist
-      if (res.token) localStorage.setItem('drm_token', res.token);
-      if (res.orgs.length) await setOrg(res.activeOrg || res.orgs[0]);
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ email: val('l-email'), password: val('l-pass') })
+      });
+      if (res.status === 403) {
+        const d = await res.json();
+        if (d.error === 'expired') {
+          err.innerHTML = `<strong>Account Expired</strong><br>${d.message}`;
+          err.style.display = 'block'; return;
+        }
+      }
+      if (!res.ok) {
+        const d = await res.json();
+        throw new Error(d.error || 'Login failed');
+      }
+      const data = await res.json();
+      DRM.user = data.user; _allOrgs = data.orgs;
+      if (data.token) localStorage.setItem('drm_token', data.token);
+      _redirecting = false; // reset so API calls work again
+      if (data.orgs.length) await setOrg(data.activeOrg || data.orgs[0]);
       showApp();
     } catch(e) { err.textContent = e.message; err.style.display = 'block'; }
   };
