@@ -407,6 +407,10 @@ function showApp() {
     item.onclick = () => { if (window.innerWidth <= 768) closeSidebar(); navigateTo(item.dataset.page); };
   });
   $('logout-btn').onclick = async () => { try { await API.post('/auth/logout', {}); } catch {} localStorage.removeItem('drm_token'); showLogin(); };
+  // Show recovery link for super admins
+  if (DRM.user?.is_super_admin) {
+    document.querySelectorAll('.nav-super-admin').forEach(el => el.style.display = '');
+  }
   // Navigate to hash if present, else dashboard
   const initPage = location.hash.replace('#','') || 'dashboard';
   const validPages = ['dashboard','donors','donations','verification','failures','bank','emails','kvitel','reports','settings'];
@@ -436,7 +440,7 @@ function navigateTo(page) {
 function reloadPage() { const el = $('page-' + _currentPage); if(el) renderPage(_currentPage, el); }
 window.addEventListener('popstate', () => {
   const page = location.hash.replace('#','') || 'dashboard';
-  const valid = ['dashboard','donors','donations','verification','failures','bank','emails','kvitel','reports','settings','whatsapp'];
+  const valid = ['dashboard','donors','donations','verification','failures','bank','emails','kvitel','reports','settings','whatsapp','recovery'];
   if (valid.includes(page)) { const el=$('page-'+page); if(el) el.innerHTML=''; navigateTo(page); }
 });
 
@@ -451,6 +455,7 @@ function renderPage(page, el) {
     emails:       renderEmails,
     kvitel:       renderKvitel,
     whatsapp:     renderWhatsApp,
+    recovery:     renderRecovery,
     reports:      renderReports,
     settings:     renderSettings,
   };
@@ -3898,4 +3903,118 @@ async function _waViewLog(bid, bname) {
       </table>
     </div>
     <div class="bg mt"><button class="btn btn-ghost" onclick="Modal.close()">Close</button></div>`, {lg:true});
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Data Recovery Page (super admin only)
+// ══════════════════════════════════════════════════════════════════════════════
+
+async function renderRecovery(el) {
+  if (!DRM.user?.is_super_admin) {
+    el.innerHTML = '<div class="alert alert-err">Super admin access required.</div>';
+    return;
+  }
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const { files, data_dir } = await API.get('/api/recovery/files');
+    el.innerHTML = `
+      <div class="ph">
+        <div><div class="ph-title">Data Recovery</div>
+          <div class="ph-sub">Restore data from a corrupted database backup</div>
+        </div>
+      </div>
+      ${!files.length ? `
+        <div class="card">
+          <div class="alert alert-warn">No corrupted backup files found in <code>${data_dir}</code>.<br>
+          Recovery files are named <code>drm.db.corrupted.TIMESTAMP</code>.</div>
+        </div>` : `
+        <div class="card">
+          <div class="card-title" style="margin-bottom:12px">Found ${files.length} backup file${files.length>1?'s':''}</div>
+          ${files.map(f => `
+            <div style="border:1px solid var(--gray-2);border-radius:8px;padding:14px 16px;margin-bottom:12px">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+                <div>
+                  <div style="font-family:monospace;font-size:13px;font-weight:600;color:var(--navy)">${f.name}</div>
+                  <div style="font-size:12px;color:var(--gray-5);margin-top:2px">
+                    Size: ${(f.size/1024).toFixed(1)} KB · Modified: ${fmtDT(f.mtime)}
+                  </div>
+                </div>
+                <div class="bg">
+                  <button class="btn btn-ghost btn-sm" onclick="_recoveryPreview('${f.name}')">Preview Contents</button>
+                  <button class="btn btn-primary btn-sm" onclick="_recoveryImport('${f.name}')">Import All Data</button>
+                </div>
+              </div>
+              <div id="preview-${f.name.replace(/\./g,'-')}" style="margin-top:10px;display:none"></div>
+            </div>`).join('')}
+        </div>`}
+      <div class="card" style="margin-top:12px">
+        <div style="font-size:12px;color:var(--gray-5);line-height:1.8">
+          <strong style="color:var(--gray-7)">How recovery works:</strong><br>
+          • Preview shows how many records are in each table of the backup file<br>
+          • Import copies everything into your live database — existing records are kept, duplicates skipped<br>
+          • Your current account and any data you've entered since recovery will be preserved<br>
+          • After import, your donors, donations, settings and all data will be restored
+        </div>
+      </div>`;
+  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+
+async function _recoveryPreview(filename) {
+  const safeId = filename.replace(/\./g,'-');
+  const c = $('preview-'+safeId);
+  if (!c) return;
+  c.style.display = 'block';
+  c.innerHTML = '<div class="spinner" style="margin:8px 0"></div>';
+  try {
+    const r = await API.get(`/api/recovery/preview/${encodeURIComponent(filename)}`);
+    const rows = Object.entries(r.counts)
+      .filter(([,n]) => n > 0 && n !== 'error')
+      .map(([t,n]) => `<tr><td style="padding:4px 8px;font-size:13px">${t}</td><td style="padding:4px 8px;font-weight:700;color:var(--navy)">${n}</td></tr>`)
+      .join('');
+    c.innerHTML = `
+      <div style="background:var(--gray-05);border-radius:6px;padding:10px 12px">
+        <div style="font-size:12px;font-weight:600;color:var(--gray-7);margin-bottom:6px">Records found in backup:</div>
+        <table style="border-collapse:collapse">
+          <tbody>${rows || '<tr><td style="color:var(--gray-5);font-size:13px">No recoverable data found</td></tr>'}</tbody>
+        </table>
+      </div>`;
+  } catch(e) { c.innerHTML = `<div class="alert alert-err" style="font-size:12px">${e.message}</div>`; }
+}
+
+async function _recoveryImport(filename) {
+  confirmDlg(
+    `Import all data from "${filename}" into the live database?\n\nThis will restore your donors, donations, settings and all other data. Existing records will be kept. This cannot be undone.`,
+    async () => {
+      const el = $('page-recovery');
+      if (el) el.innerHTML = `
+        <div class="card" style="text-align:center;padding:48px">
+          <div class="spinner" style="margin:0 auto 16px"></div>
+          <div style="font-size:16px;font-weight:600;color:var(--navy)">Importing data…</div>
+          <div style="font-size:13px;color:var(--gray-5);margin-top:8px">This may take a moment. Do not close this page.</div>
+        </div>`;
+      try {
+        const r = await API.post(`/api/recovery/import/${encodeURIComponent(filename)}`, {});
+        const summary = Object.entries(r.results)
+          .filter(([,n]) => n > 0)
+          .map(([t,n]) => `<tr><td style="padding:4px 8px;font-size:13px">${t}</td><td style="padding:4px 8px;font-weight:700;color:var(--green)">${n} restored</td></tr>`)
+          .join('');
+        if (el) el.innerHTML = `
+          <div class="ph"><div><div class="ph-title">Recovery Complete ✓</div></div></div>
+          <div class="card">
+            <div class="alert alert-ok" style="margin-bottom:16px">
+              <strong>Data successfully restored!</strong> Your donors, donations and settings are back.
+            </div>
+            <table style="border-collapse:collapse;margin-bottom:16px">
+              <tbody>${summary}</tbody>
+            </table>
+            <div class="bg">
+              <button class="btn btn-primary" onclick="navigateTo('donors')">Go to Donors</button>
+              <button class="btn btn-ghost" onclick="navigateTo('dashboard')">Dashboard</button>
+            </div>
+          </div>`;
+      } catch(e) {
+        if (el) el.innerHTML = `<div class="alert alert-err">Import failed: ${e.message}</div>`;
+      }
+    }
+  );
 }
