@@ -289,7 +289,23 @@ async function init() {
   try { status = await fetch('/api/setup-status').then(r => r.json()); }
   catch(e) { console.error('Setup status error:', e); showLogin(); return; }
 
-  if (status?.needsSetup) { showSetup(); return; }
+  // Only show setup if truly first run AND no existing token
+  // (a token means they've logged in before — disk may have reset on Render)
+  const existingToken = localStorage.getItem('drm_token');
+  if (status?.needsSetup && !existingToken) { showSetup(); return; }
+  if (status?.needsSetup && existingToken) {
+    // DB was reset but user has a token — show login with a helpful message
+    localStorage.removeItem('drm_token');
+    showLogin();
+    setTimeout(() => {
+      const err = $('login-err');
+      if (err) {
+        err.textContent = 'Your session was reset. Please sign in again.';
+        err.style.display = 'block';
+      }
+    }, 100);
+    return;
+  }
 
   // Try to restore existing session
   try {
@@ -299,7 +315,6 @@ async function init() {
     if (me.orgs.length) await setOrg(me.orgs[0]);
     showApp();
   } catch {
-    // Token invalid or expired — clear it and show login fresh
     localStorage.removeItem('drm_token');
     _redirecting = false;
     showLogin();
@@ -2826,7 +2841,7 @@ async function renderSettings(el) {
     
     el.innerHTML = `
       <div class="ph"><div class="ph-title">Settings</div></div>
-      <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-labels">Labels</div><div class="tab" data-tc="st-tz">Timezone</div><div class="tab" data-tc="st-log">Login Log</div></div>
+      <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-labels">Labels</div><div class="tab" data-tc="st-tz">Timezone</div><div class="tab" data-tc="st-log">Login Log</div><div class="tab" data-tc="st-backup">Backup</div></div>
       <div id="st-users" class="tc on"><div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
           <strong>Users</strong>
@@ -2860,6 +2875,9 @@ async function renderSettings(el) {
           <button class="btn btn-primary" onclick="_saveTz()">Save Timezone</button>
         </div>
       </div></div>
+      <div id="st-backup" class="tc">
+        <div class="card" id="st-backup-card"><div class="spinner"></div></div>
+      </div>
       <div id="st-log" class="tc"><div class="card">
         <div class="card-title">Login Audit Log</div>
         <div class="scroll-box"><table><thead><tr><th>Time</th><th>User</th><th>Action</th><th>IP</th></tr></thead>
@@ -2867,6 +2885,7 @@ async function renderSettings(el) {
         </table></div>
       </div></div>`;
     tabsInit('#page-settings');
+    document.querySelector('#page-settings .tab[data-tc="st-backup"]')?.addEventListener('click', _loadBackupStatus);
     // Load label lists when Labels tab is clicked
     document.querySelector('#page-settings .tab[data-tc="st-labels"]').addEventListener('click', _loadLabelSettings);
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
@@ -2940,6 +2959,73 @@ async function _loadLabelSettings() {
     renderLabelList('donation-lbl-list', donationLbls, 'donation');
   } catch(e) { c.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
+async function _loadBackupStatus() {
+  const c = $('st-backup-card'); if(!c) return;
+  c.innerHTML = '<div class="spinner"></div>';
+  try {
+    const s = await API.get(`/api/orgs/${API.orgId}/backup/status`);
+    const fmtSize = bytes => bytes > 1024*1024 ? (bytes/1024/1024).toFixed(1)+' MB' : (bytes/1024).toFixed(1)+' KB';
+    c.innerHTML = `
+      <div class="card-title">Database Backup</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+        <div class="stat-card">
+          <div class="stat-val">${fmtSize(s.db_size)}</div>
+          <div class="stat-lbl">Current DB size</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-val">${s.backup_count}</div>
+          <div class="stat-lbl">Backups stored (last 30 days)</div>
+        </div>
+      </div>
+      ${s.latest_backup ? `<div class="alert alert-ok" style="font-size:12px;margin-bottom:12px">
+        ✓ Latest backup: <strong>${s.latest_backup.date}</strong> · ${fmtSize(s.latest_backup.size)}
+      </div>` : `<div class="alert alert-warn" style="font-size:12px;margin-bottom:12px">
+        No backups yet. Click "Run Backup Now" to create one.
+      </div>`}
+
+      <div class="bg" style="margin-bottom:16px">
+        <button class="btn btn-primary" id="backup-run-btn" onclick="_runBackupNow()">Run Backup Now</button>
+        <button class="btn btn-ghost btn-sm" onclick="_loadBackupStatus()">Refresh</button>
+      </div>
+
+      ${s.backups.length ? `
+        <div class="card-title" style="margin-bottom:8px">Available Backups</div>
+        <div class="tw"><table>
+          <thead><tr><th>Date</th><th>Size</th><th></th></tr></thead>
+          <tbody>${s.backups.map(b=>`<tr>
+            <td style="font-size:13px">${b.date}</td>
+            <td style="font-size:12px;color:var(--gray-5)">${fmtSize(b.size)}</td>
+            <td><a class="btn btn-ghost btn-sm" href="/api/orgs/${API.orgId}/backup/download/${b.name}"
+              download="${b.name}">&#8681; Download</a></td>
+          </tr>`).join('')}</tbody>
+        </table></div>` : ''}
+
+      <hr class="divider">
+      <div style="font-size:12px;color:var(--gray-5);line-height:1.8">
+        <strong style="color:var(--gray-7)">Backup schedule:</strong><br>
+        • Automatic backup runs every night at 2am<br>
+        • Last 30 daily backups are kept on disk at <code>/data/backups/</code><br>
+        • Download any backup to keep a local copy<br>
+        <strong style="color:var(--gray-7);margin-top:6px;display:block">Optional off-site backup (recommended):</strong>
+        Set these environment variables in Render to also upload backups to S3/Cloudflare R2:<br>
+        <code>BACKUP_S3_BUCKET</code>, <code>BACKUP_S3_KEY</code>, <code>BACKUP_S3_SECRET</code>, <code>BACKUP_S3_ENDPOINT</code>
+      </div>`;
+  } catch(e) { c.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+
+async function _runBackupNow() {
+  const btn = $('backup-run-btn');
+  if (btn) { btn.textContent='Backing up…'; btn.disabled=true; }
+  try {
+    await API.post(`/api/orgs/${API.orgId}/backup/run`, {});
+    toast('Backup created ✓');
+    _loadBackupStatus();
+  } catch(e) {
+    toast(e.message||'Backup failed','err');
+    if (btn) { btn.textContent='Run Backup Now'; btn.disabled=false; }
+  }
+}
+
 function _uploadLogo() {
   Modal.open('Upload Receipt Logo', `
     <p style="font-size:13px;color:var(--gray-5);margin-bottom:10px">Upload your organization logo to appear on PDF receipts.</p>

@@ -972,3 +972,70 @@ router.post('/email-log/:id/forward', requireOrgAdmin, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// ── Database backup status + manual trigger ────────────────────────────────────
+router.get('/backup/status', requireOrgAdmin, (req, res) => {
+  const fs   = require('fs');
+  const path = require('path');
+  const DATA_DIR   = process.env.DATA_DIR || path.join(__dirname, '../data');
+  const BACKUP_DIR = path.join(DATA_DIR, 'backups');
+  const DB_PATH    = path.join(DATA_DIR, 'drm.db');
+
+  const dbSize = fs.existsSync(DB_PATH) ? fs.statSync(DB_PATH).size : 0;
+  let backups = [];
+  if (fs.existsSync(BACKUP_DIR)) {
+    backups = fs.readdirSync(BACKUP_DIR)
+      .filter(f => f.startsWith('drm-') && f.endsWith('.db'))
+      .map(f => {
+        const s = fs.statSync(path.join(BACKUP_DIR, f));
+        return { name: f, size: s.size, date: f.replace('drm-','').replace('.db',''), mtime: s.mtime };
+      })
+      .sort((a,b) => b.date.localeCompare(a.date));
+  }
+
+  res.json({
+    db_size: dbSize,
+    db_path: DB_PATH,
+    backup_count: backups.length,
+    latest_backup: backups[0] || null,
+    backups: backups.slice(0, 10) // last 10
+  });
+});
+
+router.post('/backup/run', requireOrgAdmin, async (req, res) => {
+  try {
+    const { runDailyBackup } = require('../utils/scheduler');
+    if (typeof runDailyBackup !== 'function') {
+      // Call it directly if not exported
+      const fs   = require('fs');
+      const path = require('path');
+      const DATA_DIR   = process.env.DATA_DIR || path.join(__dirname, '../data');
+      const DB_PATH    = path.join(DATA_DIR, 'drm.db');
+      const BACKUP_DIR = path.join(DATA_DIR, 'backups');
+      if (!fs.existsSync(DB_PATH)) return res.status(400).json({ error: 'No DB file found' });
+      if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+      const date = new Date().toISOString().slice(0,10)+'-'+Date.now().toString(36);
+      const dest = path.join(BACKUP_DIR, `drm-${date}.db`);
+      fs.copyFileSync(DB_PATH, dest);
+      return res.json({ success: true, file: dest, size: fs.statSync(dest).size });
+    }
+    await runDailyBackup();
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Download a backup file ────────────────────────────────────────────────────
+router.get('/backup/download/:filename', requireOrgAdmin, (req, res) => {
+  const fs   = require('fs');
+  const path = require('path');
+  const DATA_DIR   = process.env.DATA_DIR || path.join(__dirname, '../data');
+  const BACKUP_DIR = path.join(DATA_DIR, 'backups');
+  const filename   = req.params.filename.replace(/[^a-zA-Z0-9\-_.]/g, ''); // sanitize
+  const filepath   = path.join(BACKUP_DIR, filename);
+  if (!fs.existsSync(filepath)) return res.status(404).json({ error: 'Backup not found' });
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(fs.readFileSync(filepath));
+});

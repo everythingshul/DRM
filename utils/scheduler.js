@@ -516,6 +516,100 @@ async function processScheduledOneTimeCharges() {
   for (const charge of due) await processScheduledCharge(charge);
 }
 
+async function runDailyBackup() {
+  const fs   = require('fs');
+  const path = require('path');
+  const DATA_DIR   = process.env.DATA_DIR || path.join(__dirname, '../data');
+  const DB_PATH    = path.join(DATA_DIR, 'drm.db');
+  const BACKUP_DIR = path.join(DATA_DIR, 'backups');
+
+  if (!fs.existsSync(DB_PATH)) {
+    console.log('[backup] No DB file found, skipping backup');
+    return;
+  }
+
+  if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+
+  const date  = new Date().toISOString().slice(0, 10);
+  const dest  = path.join(BACKUP_DIR, `drm-${date}.db`);
+
+  // Copy the file
+  fs.copyFileSync(DB_PATH, dest);
+  const size = fs.statSync(dest).size;
+  console.log(`[backup] ✓ Daily backup saved: ${dest} (${(size/1024).toFixed(1)} KB)`);
+
+  // Keep only the last 30 backups
+  const files = fs.readdirSync(BACKUP_DIR)
+    .filter(f => f.startsWith('drm-') && f.endsWith('.db'))
+    .sort(); // oldest first
+  if (files.length > 30) {
+    const toDelete = files.slice(0, files.length - 30);
+    for (const f of toDelete) {
+      fs.unlinkSync(path.join(BACKUP_DIR, f));
+      console.log(`[backup] Removed old backup: ${f}`);
+    }
+  }
+
+  // Optional: upload to S3-compatible storage (Cloudflare R2, AWS S3, etc.)
+  const S3_BUCKET   = process.env.BACKUP_S3_BUCKET;
+  const S3_KEY      = process.env.BACKUP_S3_KEY;
+  const S3_SECRET   = process.env.BACKUP_S3_SECRET;
+  const S3_ENDPOINT = process.env.BACKUP_S3_ENDPOINT; // e.g. https://xxx.r2.cloudflarestorage.com
+  if (S3_BUCKET && S3_KEY && S3_SECRET) {
+    try {
+      const https  = require('https');
+      const crypto = require('crypto');
+      const fileBuffer = fs.readFileSync(dest);
+      const s3Key  = `backups/drm-${date}.db`;
+      // Simple S3 PUT using AWS Signature V4
+      const host   = S3_ENDPOINT
+        ? S3_ENDPOINT.replace('https://','').replace('http://','')
+        : `${S3_BUCKET}.s3.amazonaws.com`;
+      const region = process.env.BACKUP_S3_REGION || 'auto';
+      const now    = new Date();
+      const dateStr= now.toISOString().replace(/[:\-]|\.\d{3}/g,'').slice(0,15)+'Z';
+      const dateOnly=dateStr.slice(0,8);
+      const payloadHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+      const canonicalHeaders = `host:${host}
+x-amz-content-sha256:${payloadHash}
+x-amz-date:${dateStr}
+`;
+      const signedHeaders    = 'host;x-amz-content-sha256;x-amz-date';
+      const canonicalRequest = `PUT
+/${s3Key}
+
+${canonicalHeaders}
+${signedHeaders}
+${payloadHash}`;
+      const credScope  = `${dateOnly}/${region}/s3/aws4_request`;
+      const strToSign  = `AWS4-HMAC-SHA256
+${dateStr}
+${credScope}
+${crypto.createHash('sha256').update(canonicalRequest).digest('hex')}`;
+      const hmac = (key, data) => crypto.createHmac('sha256', key).update(data).digest();
+      const sigKey = hmac(hmac(hmac(hmac('AWS4'+S3_SECRET, dateOnly), region), 's3'), 'aws4_request');
+      const sig    = crypto.createHmac('sha256', sigKey).update(strToSign).digest('hex');
+      const auth   = `AWS4-HMAC-SHA256 Credential=${S3_KEY}/${credScope},SignedHeaders=${signedHeaders},Signature=${sig}`;
+      await new Promise((resolve, reject) => {
+        const req = https.request({
+          method: 'PUT', hostname: host, path: `/${s3Key}`,
+          headers: { 'Authorization': auth, 'x-amz-date': dateStr,
+            'x-amz-content-sha256': payloadHash, 'Content-Length': fileBuffer.length,
+            'Content-Type': 'application/octet-stream' }
+        }, res => {
+          res.on('data',()=>{}); res.on('end',()=>{
+            if (res.statusCode < 300) { console.log(`[backup] ✓ Uploaded to S3: ${s3Key}`); resolve(); }
+            else reject(new Error(`S3 status ${res.statusCode}`));
+          });
+        });
+        req.on('error', reject);
+        req.write(fileBuffer);
+        req.end();
+      });
+    } catch(e) { console.error(`[backup] S3 upload failed: ${e.message}`); }
+  }
+}
+
 function startScheduler() {
   cron.schedule('* * * * *', async () => {
     try {
@@ -536,7 +630,16 @@ function startScheduler() {
     catch(e) { console.error('Expiry warning error:', e.message); }
   });
 
+  // Daily backup at 2am
+  cron.schedule('0 2 * * *', async () => {
+    try { await runDailyBackup(); }
+    catch(e) { console.error('Backup error:', e.message); }
+  });
+
+  // Run one backup on startup so there's always a fresh copy
+  setTimeout(() => runDailyBackup().catch(e => console.error('Startup backup error:', e.message)), 10000);
+
   console.log('✅ Scheduler started');
 }
 
-module.exports = { startScheduler, sendReceiptEmail, sendChargeNotificationToOwner };
+module.exports = { startScheduler, sendReceiptEmail, sendChargeNotificationToOwner, runDailyBackup };
