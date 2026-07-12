@@ -229,7 +229,10 @@ router.post('/orgs/:orgId/users/invite', requireAuth, requireOrg, requireOrgAdmi
     const emailSettings = get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]);
     // Use the org's configured SMTP (admin email + app password)
     // Falls back to SIGNUP_SMTP_EMAIL env var if org SMTP not configured
-    const orgEmailCfg = get('SELECT * FROM email_settings WHERE org_id=?', [req.orgId]) || get('SELECT es.* FROM email_settings es JOIN org_users ou ON es.org_id=ou.org_id WHERE ou.user_id=? LIMIT 1', [req.user.id]);
+    const orgEmailCfg = req.orgId
+      ? (get('SELECT * FROM email_settings WHERE org_id=?', [req.orgId]) ||
+         get('SELECT es.* FROM email_settings es JOIN org_users ou ON es.org_id=ou.org_id WHERE ou.user_id=? LIMIT 1', [req.user.id]))
+      : get('SELECT es.* FROM email_settings es JOIN org_users ou ON es.org_id=ou.org_id WHERE ou.user_id=? LIMIT 1', [req.user.id]);
     const signupEmail = orgEmailCfg?.smtp_email || process.env.SIGNUP_SMTP_EMAIL;
     const signupPass  = orgEmailCfg?.smtp_password || process.env.SIGNUP_SMTP_PASSWORD;
     const appUrl = process.env.APP_URL || 'https://drm.everythingshul.com';
