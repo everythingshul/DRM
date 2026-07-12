@@ -703,14 +703,28 @@ const Donors = {
       if (r.error) throw new Error(r.error);
       const res = $('imp-res');
       if (res) {
-        res.innerHTML = `
-          <div class="alert alert-ok" style="font-size:13px">
-            <strong>✓ Import complete</strong><br>
-            Imported: <strong>${r.imported}</strong> new donors<br>
-            ${r.duplicates ? `Skipped: <strong>${r.duplicates}</strong> duplicates (name, email, or phone already exists)<br>` : ''}
-            ${r.skipped ? `Errors: <strong>${r.skipped}</strong> rows had issues<br>` : ''}
-            ${r.errors?.length ? `<details style="margin-top:6px"><summary style="cursor:pointer;font-size:11px">Show errors</summary><pre style="font-size:11px;margin-top:4px">${r.errors.join('\n')}</pre></details>` : ''}
-          </div>`;
+        const flaggedHtml = r.flagged?.length ? `
+          <details style="margin-top:8px">
+            <summary style="cursor:pointer;font-size:12px;color:var(--amber)">
+              ⚠ ${r.flagged.length} possible duplicate${r.flagged.length>1?'s':''} imported — review recommended
+            </summary>
+            <div style="margin-top:6px;max-height:160px;overflow-y:auto">
+              ${r.flagged.map(f=>`<div style="font-size:11px;padding:3px 0;border-bottom:1px solid var(--gray-1)">
+                <strong>${f.name}</strong> — matched on: ${f.reasons.join(', ')}
+              </div>`).join('')}
+            </div>
+          </details>` : '';
+        const errHtml = r.errors?.length ? `
+          <details style="margin-top:6px">
+            <summary style="cursor:pointer;font-size:11px;color:var(--red)">${r.errors.length} row${r.errors.length>1?'s':''} skipped</summary>
+            <pre style="font-size:11px;margin-top:4px;white-space:pre-wrap">${r.errors.join('\n')}</pre>
+          </details>` : '';
+        res.innerHTML = `<div class="alert alert-ok" style="font-size:13px">
+          <strong>✓ Import complete</strong><br>
+          <strong>${r.imported}</strong> donor${r.imported!==1?'s':''} imported
+          ${r.flagged?.length ? `· <span style="color:var(--amber)">${r.flagged.length} flagged as possible duplicates</span>` : ''}
+          ${flaggedHtml}${errHtml}
+        </div>`;
         res.style.display = 'block';
       }
       if (btn){btn.textContent='Import';btn.disabled=false;}

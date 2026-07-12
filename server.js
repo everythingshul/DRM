@@ -103,52 +103,76 @@ app.post('/api/orgs/:orgId/import/donors',
       const emailSet = new Set(existing.filter(d=>d.email).map(d => d.email.toLowerCase()));
       const cellSet  = new Set(existing.filter(d=>d.cell).map(d => d.cell.replace(/\D/g,'')));
 
-      let imported = 0, duplicates = 0, errors = [];
+      let imported = 0, flagged = [], errors = [];
+
+      // Build lookup sets from existing donors for duplicate detection
+      const hebrewSet  = new Set(existing.filter(d=>d.hebrew_full_name).map(d=>d.hebrew_full_name.trim().toLowerCase()));
+      const emailSet2  = new Set(existing.filter(d=>d.email).map(d=>d.email.toLowerCase()));
+      const cellSet2   = new Set(existing.filter(d=>d.cell).map(d=>d.cell.replace(/\D/g,'')));
+      const homeSet    = new Set(existing.filter(d=>d.home_phone).map(d=>d.home_phone.replace(/\D/g,'')));
+      const addrSet    = new Set(existing.filter(d=>d.street&&d.zip).map(d=>`${d.street.toLowerCase().trim()}|${d.zip.trim()}`));
+
       for (const row of rows) {
-        const fn = (row['First Name'] || row['first_name'] || '').toString().trim();
-        const ln = (row['Last Name']  || row['last_name']  || '').toString().trim();
-        if (!fn || !ln) { errors.push(`Row skipped: missing First Name or Last Name`); continue; }
+        const fn      = (row['First Name']  || row['first_name']  || '').toString().trim();
+        const ln      = (row['Last Name']   || row['last_name']   || '').toString().trim();
+        const hebrew  = (row['Hebrew Name'] || row['hebrew_name'] || '').toString().trim();
+        const email   = (row['Email']       || row['email']       || '').toString().trim().toLowerCase() || null;
+        const cellRaw = (row['Cell']        || row['cell']        || row['Phone'] || '').toString().replace(/\D/g,'');
+        const cell    = cellRaw || null;
+        const homeRaw = (row['Home Phone']  || row['home_phone']  || '').toString().replace(/\D/g,'');
+        const home    = homeRaw || null;
+        const street  = (row['Street']      || row['street']      || '').toString().trim();
+        const zip     = (row['Zip']         || row['zip']         || '').toString().trim();
 
-        const email = (row['Email'] || row['email'] || '').toString().trim().toLowerCase() || null;
-        const cell  = (row['Cell']  || row['cell']  || row['Phone'] || '').toString().replace(/\D/g,'') || null;
+        // Require at least a last name to import
+        if (!ln) { errors.push(`Row skipped — no last name: ${JSON.stringify(row)}`); continue; }
+        const displayName = [fn, ln].filter(Boolean).join(' ') || ln;
 
-        // Duplicate check: match on name OR email OR cell
-        const nameKey = `${fn.toLowerCase()}|${ln.toLowerCase()}`;
-        const isDup = nameSet.has(nameKey)
-          || (email && emailSet.has(email))
-          || (cell && cellSet.has(cell));
-
-        if (isDup) { duplicates++; continue; }
+        // Duplicate detection — flag on any field match, still import
+        const dupReasons = [];
+        if (hebrew && hebrewSet.has(hebrew.toLowerCase()))        dupReasons.push('Hebrew name');
+        if (email  && emailSet2.has(email))                       dupReasons.push('Email');
+        if (cell   && cellSet2.has(cell))                         dupReasons.push('Cell phone');
+        if (home   && homeSet.has(home))                          dupReasons.push('Home phone');
+        if (street && zip && addrSet.has(`${street.toLowerCase()}|${zip}`)) dupReasons.push('Address');
 
         try {
+          const newId = uuidv4();
           run(`INSERT INTO donors
             (id,org_id,title,first_name,last_name,hebrew_title,hebrew_full_name,
              email,cell,home_phone,street,apt,city,state,zip,notes,created_at)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
-            [uuidv4(), req.params.orgId,
-             (row['Title']||row['title']||'').toString().trim()||null, fn, ln,
+            [newId, req.params.orgId,
+             (row['Title']||row['title']||'').toString().trim()||null,
+             fn||null, ln,
              (row['Hebrew Title']||'').toString().trim()||null,
-             (row['Hebrew Name']||row['hebrew_name']||'').toString().trim()||null,
-             email,
-             cell ? (cell.length===10?'+1'+cell:'+'+cell) : null,
-             (row['Home Phone']||'').toString().replace(/\D/g,'')||null,
-             (row['Street']||row['street']||'').toString().trim()||null,
+             hebrew||null, email,
+             cell ? (cell.length===10?'+1'+cell:cell.length===11&&cell[0]==='1'?'+'+cell:'+'+cell) : null,
+             home ? (home.length===10?'+1'+home:home.length===11&&home[0]==='1'?'+'+home:'+'+home) : null,
+             street||null,
              (row['Apt']||row['apt']||'').toString().trim()||null,
              (row['City']||row['city']||'').toString().trim()||null,
              (row['State']||row['state']||'').toString().trim()||null,
-             (row['Zip']||row['zip']||'').toString().trim()||null,
+             zip||null,
              (row['Notes']||row['notes']||'').toString().trim()||null
             ]);
-          // Track for within-batch duplicate detection
-          nameSet.add(nameKey);
-          if (email) emailSet.add(email);
-          if (cell) cellSet.add(cell);
+
+          // Add to sets so within-batch duplicates are also caught
+          if (hebrew) hebrewSet.add(hebrew.toLowerCase());
+          if (email)  emailSet2.add(email);
+          if (cell)   cellSet2.add(cell);
+          if (home)   homeSet.add(home);
+          if (street && zip) addrSet.add(`${street.toLowerCase()}|${zip}`);
+
           imported++;
-        } catch(e) { errors.push(`${fn} ${ln}: ${e.message}`); }
+          if (dupReasons.length) {
+            flagged.push({ name: displayName, reasons: dupReasons });
+          }
+        } catch(e) { errors.push(`${displayName}: ${e.message}`); }
       }
 
       try { fs.unlinkSync(req.file.path); } catch {}
-      res.json({ success: true, imported, duplicates, skipped: errors.length, errors: errors.slice(0,20) });
+      res.json({ success: true, imported, flagged, errors: errors.slice(0,50) });
     } catch(e) {
       try { if(req.file) fs.unlinkSync(req.file.path); } catch {}
       res.status(500).json({ error: e.message });
