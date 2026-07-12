@@ -226,7 +226,7 @@ router.post('/orgs/:orgId/users/invite', requireAuth, requireOrg, requireOrgAdmi
     const setupToken = generateToken({ userId: user.id, setupMode: true, orgId: req.orgId });
 
     // Get email settings for this org's signup SMTP
-    const emailSettings = get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]);
+    const emailSettings = req.orgId ? get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]) : null;
     // Use the org's configured SMTP (admin email + app password)
     // Falls back to SIGNUP_SMTP_EMAIL env var if org SMTP not configured
     const orgEmailCfg = req.orgId
@@ -387,7 +387,7 @@ router.post('/invite-account', requireAuth, async (req, res) => {
 
     // Use the org's configured SMTP (admin email + app password)
     // Falls back to SIGNUP_SMTP_EMAIL env var if org SMTP not configured
-    const orgEmailCfg = get('SELECT * FROM email_settings WHERE org_id=?', [req.orgId]) || get('SELECT es.* FROM email_settings es JOIN org_users ou ON es.org_id=ou.org_id WHERE ou.user_id=? LIMIT 1', [req.user.id]);
+    const orgEmailCfg = get('SELECT es.* FROM email_settings es JOIN org_users ou ON es.org_id=ou.org_id WHERE ou.user_id=? LIMIT 1', [req.user.id]);
     const signupEmail = orgEmailCfg?.smtp_email || process.env.SIGNUP_SMTP_EMAIL;
     const signupPass  = orgEmailCfg?.smtp_password || process.env.SIGNUP_SMTP_PASSWORD;
     let emailSent = false;
