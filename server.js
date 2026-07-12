@@ -57,6 +57,32 @@ const upload = multer({
 app.use('/api/auth', authRouter);
 app.use('/api', authRouter);  // also mount here for /api/orgs/:orgId/users etc.
 app.use('/api/orgs/:orgId/donors', donorsRouter);
+// ── Download import template ──────────────────────────────────────────────────
+app.get('/api/orgs/:orgId/import/donors/template',
+  (req, res, next) => {
+    const { requireAuth, requireOrg } = require('./middleware/auth');
+    requireAuth(req, res, () => requireOrg(req, res, next));
+  },
+  (req, res) => {
+    try {
+      const wb = XLSX.utils.book_new();
+      const headers = [['Title','First Name','Last Name','Hebrew Title','Hebrew Name',
+        'Email','Cell','Home Phone','Street','Apt','City','State','Zip','Neighborhood','Labels','Notes']];
+      const sample = [['R\'','Moshe','Cohen','הרב','משה כהן',
+        'moshe@example.com','9175551234','7185551234',
+        '123 Main St','Apt 2','Brooklyn','NY','11201','Boro Park','Major Donor','Sample donor']];
+      const ws = XLSX.utils.aoa_to_sheet([...headers, ...sample]);
+      ws['!cols'] = headers[0].map(h => ({ wch: Math.max(h.length + 4, 14) }));
+      XLSX.utils.book_append_sheet(wb, ws, 'Donors');
+      const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename="donor-import-template.xlsx"');
+      res.send(buf);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  }
+);
+
+// ── Import donors from Excel ───────────────────────────────────────────────────
 app.post('/api/orgs/:orgId/import/donors',
   (req, res, next) => {
     const { requireAuth, requireOrg, requireOrgAdmin } = require('./middleware/auth');
@@ -65,27 +91,68 @@ app.post('/api/orgs/:orgId/import/donors',
   upload.single('file'),
   (req, res) => {
     try {
-      if (!req.file) return res.status(400).json({ error: 'No file' });
-      const rows = XLSX.utils.sheet_to_json(
-        XLSX.readFile(req.file.path).Sheets[XLSX.readFile(req.file.path).SheetNames[0]]
-      );
-      let imported = 0, errors = [];
+      if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+      const wb   = XLSX.readFile(req.file.path);
+      const ws   = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+      if (!rows.length) return res.status(400).json({ error: 'File is empty' });
+
+      // Load existing donors for duplicate detection
+      const existing = all('SELECT first_name, last_name, email, cell FROM donors WHERE org_id=?', [req.params.orgId]);
+      const nameSet  = new Set(existing.map(d => `${d.first_name?.toLowerCase()}|${d.last_name?.toLowerCase()}`));
+      const emailSet = new Set(existing.filter(d=>d.email).map(d => d.email.toLowerCase()));
+      const cellSet  = new Set(existing.filter(d=>d.cell).map(d => d.cell.replace(/\D/g,'')));
+
+      let imported = 0, duplicates = 0, errors = [];
       for (const row of rows) {
-        const fn = row['First Name'] || row['first_name'] || '';
-        const ln = row['Last Name'] || row['last_name'] || '';
-        if (!fn || !ln) { errors.push('Row skipped: no name'); continue; }
+        const fn = (row['First Name'] || row['first_name'] || '').toString().trim();
+        const ln = (row['Last Name']  || row['last_name']  || '').toString().trim();
+        if (!fn || !ln) { errors.push(`Row skipped: missing First Name or Last Name`); continue; }
+
+        const email = (row['Email'] || row['email'] || '').toString().trim().toLowerCase() || null;
+        const cell  = (row['Cell']  || row['cell']  || row['Phone'] || '').toString().replace(/\D/g,'') || null;
+
+        // Duplicate check: match on name OR email OR cell
+        const nameKey = `${fn.toLowerCase()}|${ln.toLowerCase()}`;
+        const isDup = nameSet.has(nameKey)
+          || (email && emailSet.has(email))
+          || (cell && cellSet.has(cell));
+
+        if (isDup) { duplicates++; continue; }
+
         try {
-          run(`INSERT INTO donors (id,org_id,first_name,last_name,hebrew_full_name,email,cell,street,city,state,zip)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-            [uuidv4(), req.params.orgId, fn, ln,
-             row['Hebrew Name']||null, row['Email']||null, row['Cell']||null,
-             row['Street']||null, row['City']||null, row['State']||null, row['Zip']||null]);
+          run(`INSERT INTO donors
+            (id,org_id,title,first_name,last_name,hebrew_title,hebrew_full_name,
+             email,cell,home_phone,street,apt,city,state,zip,notes,created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
+            [uuidv4(), req.params.orgId,
+             (row['Title']||row['title']||'').toString().trim()||null, fn, ln,
+             (row['Hebrew Title']||'').toString().trim()||null,
+             (row['Hebrew Name']||row['hebrew_name']||'').toString().trim()||null,
+             email,
+             cell ? (cell.length===10?'+1'+cell:'+'+cell) : null,
+             (row['Home Phone']||'').toString().replace(/\D/g,'')||null,
+             (row['Street']||row['street']||'').toString().trim()||null,
+             (row['Apt']||row['apt']||'').toString().trim()||null,
+             (row['City']||row['city']||'').toString().trim()||null,
+             (row['State']||row['state']||'').toString().trim()||null,
+             (row['Zip']||row['zip']||'').toString().trim()||null,
+             (row['Notes']||row['notes']||'').toString().trim()||null
+            ]);
+          // Track for within-batch duplicate detection
+          nameSet.add(nameKey);
+          if (email) emailSet.add(email);
+          if (cell) cellSet.add(cell);
           imported++;
-        } catch(e) { errors.push(e.message); }
+        } catch(e) { errors.push(`${fn} ${ln}: ${e.message}`); }
       }
-      fs.unlinkSync(req.file.path);
-      res.json({ success: true, imported, errors });
-    } catch(e) { res.status(500).json({ error: e.message }); }
+
+      try { fs.unlinkSync(req.file.path); } catch {}
+      res.json({ success: true, imported, duplicates, skipped: errors.length, errors: errors.slice(0,20) });
+    } catch(e) {
+      try { if(req.file) fs.unlinkSync(req.file.path); } catch {}
+      res.status(500).json({ error: e.message });
+    }
   }
 );
 

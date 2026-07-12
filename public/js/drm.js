@@ -674,20 +674,52 @@ const Donors = {
   del(id, name) { confirmDlg(`Delete "${name}"?`, async () => { await API.del(API.o.donor(id)); toast('Deleted'); Donors.load(); }); },
   exportXlsx() { API.dl(`/api/orgs/${API.orgId}/reports/donors?format=xlsx`, 'donors.xlsx').catch(e=>toast(e.message||'Unknown error','err')); },
   importXlsx() {
-    Modal.open('Import Donors', `<p style="color:var(--gray-5);margin-bottom:10px;font-size:13px">Excel columns: First Name, Last Name, Hebrew Name, Email, Cell, Street, City, State, Zip</p>
-      <input type="file" id="imp-f" accept=".xlsx,.xls">
-      <div class="bg mt"><button class="btn btn-primary" onclick="Donors.doImport()">Import</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, { sm: true });
+    Modal.open('Import Donors', `
+      <div class="alert alert-info" style="font-size:12px;margin-bottom:12px">
+        <strong>Step 1:</strong> Download the template, fill it in, then upload it below.<br>
+        Duplicates are detected automatically by name, email, or phone — they'll be skipped.
+      </div>
+      <div class="bg" style="margin-bottom:14px">
+        <a class="btn btn-outline btn-sm" href="/api/orgs/${API.orgId}/import/donors/template" download="donor-import-template.xlsx">
+          &#8681; Download Template
+        </a>
+      </div>
+      <label>Upload filled Excel file</label>
+      <input type="file" id="imp-f" accept=".xlsx,.xls" style="margin-bottom:4px">
+      <div id="imp-res" style="display:none;margin-top:10px"></div>
+      <div class="bg mt">
+        <button class="btn btn-primary" id="imp-btn" onclick="Donors.doImport()">Import</button>
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+      </div>`, { sm: true });
   },
   async doImport() {
     const f = $('imp-f')?.files[0]; if (!f) { toast('Select a file','err'); return; }
+    const btn = $('imp-btn'); if(btn){btn.textContent='Importing…';btn.disabled=true;}
     const fd = new FormData(); fd.append('file', f);
     try {
-      const r = await fetch(`/api/orgs/${API.orgId}/import/donors`, { method:'POST', body:fd, credentials:'include', headers:{'x-org-id':API.orgId} }).then(r=>r.json());
-      toast(`Imported ${r.imported}${r.errors?.length?` (${r.errors.length} errors)`:''}`);
-      Modal.close(); this.load();
-    } catch(e) { toast(e.message||'Unknown error','err'); }
+      const r = await fetch(`/api/orgs/${API.orgId}/import/donors`,
+        { method:'POST', body:fd, credentials:'include', headers:{'x-org-id':API.orgId} }
+      ).then(r=>r.json());
+      if (r.error) throw new Error(r.error);
+      const res = $('imp-res');
+      if (res) {
+        res.innerHTML = `
+          <div class="alert alert-ok" style="font-size:13px">
+            <strong>✓ Import complete</strong><br>
+            Imported: <strong>${r.imported}</strong> new donors<br>
+            ${r.duplicates ? `Skipped: <strong>${r.duplicates}</strong> duplicates (name, email, or phone already exists)<br>` : ''}
+            ${r.skipped ? `Errors: <strong>${r.skipped}</strong> rows had issues<br>` : ''}
+            ${r.errors?.length ? `<details style="margin-top:6px"><summary style="cursor:pointer;font-size:11px">Show errors</summary><pre style="font-size:11px;margin-top:4px">${r.errors.join('\n')}</pre></details>` : ''}
+          </div>`;
+        res.style.display = 'block';
+      }
+      if (btn){btn.textContent='Import';btn.disabled=false;}
+      this.load();
+    } catch(e) {
+      toast(e.message||'Import failed','err');
+      if (btn){btn.textContent='Import';btn.disabled=false;}
+    }
   },
-
   form(donor) {
     const ie = !!donor;
     Modal.open(ie?'Edit Donor':'Add Donor', '<div class="spinner"></div>', { lg: true, cb: async () => {
