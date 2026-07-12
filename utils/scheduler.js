@@ -557,57 +557,24 @@ async function runDailyBackup() {
   const S3_ENDPOINT = process.env.BACKUP_S3_ENDPOINT; // e.g. https://xxx.r2.cloudflarestorage.com
   if (S3_BUCKET && S3_KEY && S3_SECRET) {
     try {
-      const https  = require('https');
-      const crypto = require('crypto');
+      const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
       const fileBuffer = fs.readFileSync(dest);
-      const s3Key  = `backups/drm-${date}.db`;
-      // Simple S3 PUT using AWS Signature V4
-      const host   = S3_ENDPOINT
-        ? S3_ENDPOINT.replace('https://','').replace('http://','')
-        : `${S3_BUCKET}.s3.amazonaws.com`;
-      const region = process.env.BACKUP_S3_REGION || 'auto';
-      const now    = new Date();
-      const dateStr= now.toISOString().replace(/[:\-]|\.\d{3}/g,'').slice(0,15)+'Z';
-      const dateOnly=dateStr.slice(0,8);
-      const payloadHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
-      const canonicalHeaders = `host:${host}
-x-amz-content-sha256:${payloadHash}
-x-amz-date:${dateStr}
-`;
-      const signedHeaders    = 'host;x-amz-content-sha256;x-amz-date';
-      const canonicalRequest = `PUT
-/${s3Key}
-
-${canonicalHeaders}
-${signedHeaders}
-${payloadHash}`;
-      const credScope  = `${dateOnly}/${region}/s3/aws4_request`;
-      const strToSign  = `AWS4-HMAC-SHA256
-${dateStr}
-${credScope}
-${crypto.createHash('sha256').update(canonicalRequest).digest('hex')}`;
-      const hmac = (key, data) => crypto.createHmac('sha256', key).update(data).digest();
-      const sigKey = hmac(hmac(hmac(hmac('AWS4'+S3_SECRET, dateOnly), region), 's3'), 'aws4_request');
-      const sig    = crypto.createHmac('sha256', sigKey).update(strToSign).digest('hex');
-      const auth   = `AWS4-HMAC-SHA256 Credential=${S3_KEY}/${credScope},SignedHeaders=${signedHeaders},Signature=${sig}`;
-      await new Promise((resolve, reject) => {
-        const req = https.request({
-          method: 'PUT', hostname: host, path: `/${s3Key}`,
-          headers: { 'Authorization': auth, 'x-amz-date': dateStr,
-            'x-amz-content-sha256': payloadHash, 'Content-Length': fileBuffer.length,
-            'Content-Type': 'application/octet-stream' }
-        }, res => {
-          res.on('data',()=>{}); res.on('end',()=>{
-            if (res.statusCode < 300) { console.log(`[backup] ✓ Uploaded to S3: ${s3Key}`); resolve(); }
-            else reject(new Error(`S3 status ${res.statusCode}`));
-          });
-        });
-        req.on('error', reject);
-        req.write(fileBuffer);
-        req.end();
+      const s3 = new S3Client({
+        region: process.env.BACKUP_S3_REGION || 'auto',
+        endpoint: S3_ENDPOINT || undefined,
+        credentials: { accessKeyId: S3_KEY, secretAccessKey: S3_SECRET },
+        forcePathStyle: true  // required for R2
       });
-    } catch(e) { console.error(`[backup] S3 upload failed: ${e.message}`); }
+      await s3.send(new PutObjectCommand({
+        Bucket: S3_BUCKET,
+        Key: `backups/drm-${date}.db`,
+        Body: fileBuffer,
+        ContentType: 'application/octet-stream'
+      }));
+      console.log(`[backup] ✓ Uploaded to R2: backups/drm-${date}.db`);
+    } catch(e) { console.error(`[backup] R2 upload failed: ${e.message}`); }
   }
+
 }
 
 function startScheduler() {
