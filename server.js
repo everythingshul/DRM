@@ -124,9 +124,9 @@ app.post('/api/orgs/:orgId/import/donors',
         const street  = (row['Street']      || row['street']      || '').toString().trim();
         const zip     = (row['Zip']         || row['zip']         || '').toString().trim();
 
-        // Require at least a last name to import
-        if (!ln) { errors.push(`Row skipped — no last name: ${JSON.stringify(row)}`); continue; }
-        const displayName = [fn, ln].filter(Boolean).join(' ') || ln;
+        // Require at least a first or last name
+        if (!fn && !ln) { errors.push(`Row ${rows.indexOf(row)+2} skipped — no name`); continue; }
+        const displayName = [fn, ln].filter(Boolean).join(' ');
 
         // Duplicate detection — flag on any field match, still import
         const dupReasons = [];
@@ -144,7 +144,7 @@ app.post('/api/orgs/:orgId/import/donors',
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
             [newId, req.params.orgId,
              (row['Title']||row['title']||'').toString().trim()||null,
-             fn||null, ln,
+             fn||ln||'Unknown', ln||fn||'Unknown',
              (row['Hebrew Title']||'').toString().trim()||null,
              hebrew||null, email,
              cell ? (cell.length===10?'+1'+cell:cell.length===11&&cell[0]==='1'?'+'+cell:'+'+cell) : null,
