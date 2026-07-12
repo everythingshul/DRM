@@ -57,17 +57,6 @@ const upload = multer({
 app.use('/api/auth', authRouter);
 app.use('/api', authRouter);  // also mount here for /api/orgs/:orgId/users etc.
 app.use('/api/orgs/:orgId/donors', donorsRouter);
-app.use('/api/orgs/:orgId', orgRouter);
-app.use('/api/orgs/:orgId/kvitel', kvitelRouter);
-app.use('/api/orgs/:orgId/payments', paymentsRouter);
-app.use('/api/orgs/:orgId/email-templates', emailTplRouter);
-app.use('/api/orgs/:orgId/whatsapp', whatsappRouter);
-app.use('/api/recovery', recoveryRouter);
-
-app.get('/api/setup-status', (req, res) => {
-  res.json({ needsSetup: all('SELECT id FROM users LIMIT 1', []).length === 0 });
-});
-
 app.post('/api/orgs/:orgId/import/donors',
   (req, res, next) => {
     const { requireAuth, requireOrg, requireOrgAdmin } = require('./middleware/auth');
@@ -99,6 +88,18 @@ app.post('/api/orgs/:orgId/import/donors',
     } catch(e) { res.status(500).json({ error: e.message }); }
   }
 );
+
+app.use('/api/orgs/:orgId', orgRouter);
+app.use('/api/orgs/:orgId/kvitel', kvitelRouter);
+app.use('/api/orgs/:orgId/payments', paymentsRouter);
+app.use('/api/orgs/:orgId/email-templates', emailTplRouter);
+app.use('/api/orgs/:orgId/whatsapp', whatsappRouter);
+app.use('/api/recovery', recoveryRouter);
+
+app.get('/api/setup-status', (req, res) => {
+  res.json({ needsSetup: all('SELECT id FROM users LIMIT 1', []).length === 0 });
+});
+
 
 // SPA — all non-API, non-file routes serve index.html
 app.get('*', (req, res, next) => {

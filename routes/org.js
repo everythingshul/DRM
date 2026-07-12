@@ -316,10 +316,7 @@ router.get('/reports/donors', (req, res) => {
 });
 
 // Import donors from xlsx
-router.post('/import/donors', (req, res) => {
-  // Handled via file upload in main server
-  res.json({ error: 'Use multipart upload endpoint' });
-});
+
 
 // --- BANK CONNECTIONS ---
 router.get('/bank', (req, res) => {
