@@ -129,7 +129,7 @@ function createTables() {
     );
     CREATE TABLE IF NOT EXISTS donors (
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
-      title TEXT, first_name TEXT NOT NULL, last_name TEXT NOT NULL,
+      title TEXT, first_name TEXT, last_name TEXT,
       hebrew_title TEXT, hebrew_full_name TEXT, neighborhood_id TEXT,
       cell TEXT, home_phone TEXT, email TEXT,
       street TEXT, apt TEXT, city TEXT, state TEXT, zip TEXT,
@@ -284,6 +284,35 @@ function createTables() {
 
 function runMigrations() {
   const safe = (sql) => { try { db.run(sql); saveDb(); } catch(e) { /* already exists */ } };
+
+  // Remove NOT NULL from first_name/last_name to allow partial imports
+  // SQLite requires table recreation to drop NOT NULL constraints
+  try {
+    const col = db.exec("PRAGMA table_info(donors)");
+    const cols = col[0]?.values || [];
+    const fnCol = cols.find(c => c[1] === 'first_name');
+    // If first_name is NOT NULL (notnull=1), recreate the table without that constraint
+    if (fnCol && fnCol[3] === 1) {
+      db.run(`CREATE TABLE IF NOT EXISTS donors_new (
+        id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
+        title TEXT, first_name TEXT, last_name TEXT,
+        hebrew_title TEXT, hebrew_full_name TEXT, neighborhood_id TEXT,
+        cell TEXT, home_phone TEXT, email TEXT,
+        street TEXT, apt TEXT, city TEXT, state TEXT, zip TEXT,
+        labels TEXT DEFAULT '[]',
+        notes TEXT, kvitel TEXT, kvitel_enabled INTEGER DEFAULT 0,
+        autopay_enabled INTEGER DEFAULT 0, autopay_paused INTEGER DEFAULT 0,
+        autopay_day INTEGER DEFAULT 1, autopay_hour INTEGER DEFAULT 9, autopay_minute INTEGER DEFAULT 0,
+        donation_emails_paused INTEGER DEFAULT 0, marketing_emails_paused INTEGER DEFAULT 0,
+        info_verified_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`);
+      db.run(`INSERT INTO donors_new SELECT * FROM donors`);
+      db.run(`DROP TABLE donors`);
+      db.run(`ALTER TABLE donors_new RENAME TO donors`);
+      saveDb();
+      console.log('[db] Migration: removed NOT NULL from donors.first_name and donors.last_name');
+    }
+  } catch(e) { console.error('[db] Migration error (donors NOT NULL):', e.message); }
   safe("ALTER TABLE donors ADD COLUMN autopay_minute INTEGER DEFAULT 0");
   safe("ALTER TABLE donors ADD COLUMN hebrew_title TEXT");
   safe("ALTER TABLE donations ADD COLUMN label TEXT");

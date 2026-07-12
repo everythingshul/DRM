@@ -124,9 +124,10 @@ app.post('/api/orgs/:orgId/import/donors',
         const street  = (row['Street']      || row['street']      || '').toString().trim();
         const zip     = (row['Zip']         || row['zip']         || '').toString().trim();
 
-        // Require at least a first or last name
-        if (!fn && !ln) { errors.push(`Row ${rows.indexOf(row)+2} skipped — no name`); continue; }
-        const displayName = [fn, ln].filter(Boolean).join(' ');
+        // Skip only completely empty rows
+        const allEmpty = !fn && !ln && !email && !cell && !hebrew && !street;
+        if (allEmpty) continue; // silently skip blank rows
+        const displayName = [fn, ln].filter(Boolean).join(' ') || email || cell || 'Unknown';
 
         // Duplicate detection — flag on any field match, still import
         const dupReasons = [];
@@ -144,7 +145,7 @@ app.post('/api/orgs/:orgId/import/donors',
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
             [newId, req.params.orgId,
              (row['Title']||row['title']||'').toString().trim()||null,
-             fn||ln||'Unknown', ln||fn||'Unknown',
+             fn||'', ln||'',
              (row['Hebrew Title']||'').toString().trim()||null,
              hebrew||null, email,
              cell ? (cell.length===10?'+1'+cell:cell.length===11&&cell[0]==='1'?'+'+cell:'+'+cell) : null,
