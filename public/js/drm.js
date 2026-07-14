@@ -1932,11 +1932,7 @@ async function renderEmails(el) {
           <small style="font-size:11px;color:var(--gray-5)">When set, all emails send via Brevo API (HTTPS) — ignores SMTP settings below.</small>
         </div>
 
-        <div style="background:var(--blue-pale);border:1.5px solid var(--blue);border-radius:6px;padding:12px 14px;margin-bottom:14px">
-          <div style="font-weight:700;color:var(--navy);margin-bottom:4px">🚀 Postmark (100 emails/month free)</div>
-          <label>Postmark Server API Token <span style="font-size:11px;color:var(--gray-5)">(leave blank to keep existing)</span></label>
-          <input id="em-pmkey" type="password" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="">
-        </div>
+
 
 
         <div style="font-size:12px;font-weight:600;color:var(--gray-7);margin-bottom:8px">Or: Gmail / Brevo / Resend / Any SMTP</div>
@@ -2656,7 +2652,6 @@ async function _saveEmailSettings() {
       smtp_port: parseInt(val('em-port')) || 587,
       from_name: val('em-name') || '',
       donation_emails_paused: $('em-pause')?.checked ? 1 : 0,
-      postmark_key: val('em-pmkey') || undefined,
       brevo_api_key: val('em-brevokey') || undefined
     });
     toast('Email settings saved ✓');
@@ -2674,12 +2669,10 @@ async function _loadEmailStatus() {
     const s = await API.get(`/api/orgs/${API.orgId}/email-settings/status`);
     if (s.brevo) {
       c.innerHTML = `<div class="alert alert-ok" style="font-size:12px">✓ Brevo API configured${s.paused?' (paused)':''}. Emails send via HTTPS — reliable delivery.</div>`;
-    } else if (s.postmark) {
-      c.innerHTML = `<div class="alert alert-ok" style="font-size:12px">✓ Postmark configured${s.paused?' (paused)':''}. Best deliverability — emails should reach inbox reliably.</div>`;
     } else if (s.configured) {
-      c.innerHTML = `<div class="alert alert-ok" style="font-size:12px">✓ Gmail SMTP configured${s.paused?' (paused)':''}. Emails will send but may land in spam for non-Gmail recipients. Consider adding a Postmark key above.</div>`;
+      c.innerHTML = `<div class="alert alert-ok" style="font-size:12px">✓ Gmail SMTP configured${s.paused?' (paused)':''}.</div>`;
     } else if (s.has_email && !s.has_password) {
-      c.innerHTML = `<div class="alert alert-warn" style="font-size:12px">⚠ Gmail address saved but no App Password set. Receipts will NOT send. Add App Password and Save, or use Postmark.</div>`;
+      c.innerHTML = `<div class="alert alert-warn" style="font-size:12px">⚠ Gmail address saved but no App Password set. Receipts will NOT send until you add it.</div>`;
     } else {
       c.innerHTML = `<div class="alert alert-err" style="font-size:12px">✗ Email not configured. Donation receipts are NOT sending. Add Postmark API key (recommended) or Gmail credentials above and Save.</div>`;
     }

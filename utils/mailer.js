@@ -92,14 +92,6 @@ async function sendMail(opts) {
  */
 function buildTransporter(settings) {
   if (!settings) return null;
-  // Postmark
-  if (settings.postmark_key) {
-    return nodemailer.createTransport({
-      host: 'smtp.postmarkapp.com', port: 587, secure: false,
-      auth: { user: settings.postmark_key, pass: settings.postmark_key }
-    });
-  }
-  // Gmail / Brevo / Resend / any SMTP
   if (settings.smtp_email && settings.smtp_password) {
     const port = parseInt(settings.smtp_port) || 587;
     return nodemailer.createTransport({
@@ -118,8 +110,5 @@ function fromAddr(settings, orgName) {
   return `"${name}" <${addr}>`;
 }
 
-function pmHeaders(settings) {
-  return settings?.postmark_key ? { 'X-PM-Message-Stream': 'outbound' } : {};
-}
 
 module.exports = { sendMail, buildTransporter, fromAddr, pmHeaders, sendViaBrevoApi };

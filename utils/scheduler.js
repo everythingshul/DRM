@@ -8,28 +8,19 @@ const mailer    = require('./mailer');
 const { ccSale: chargeToken } = require('./sola');
 
 function getTransporter(settings) {
-  // Postmark: if API key is set, use it (best deliverability, avoids spam folders)
-  if (settings?.postmark_key) {
-    return nodemailer.createTransport({
-      host: 'smtp.postmarkapp.com',
-      port: 587,
-      secure: false,
-      auth: { user: settings.postmark_key, pass: settings.postmark_key }
-    });
-  }
-  // Gmail SMTP fallback
   if (!settings?.smtp_email) {
-    console.log('[email] No email provider configured — skipping. Add Postmark API key or Gmail SMTP in Email Settings.');
+    console.log('[email] No SMTP email configured — skipping.');
     return null;
   }
   if (!settings?.smtp_password) {
-    console.log('[email] No SMTP password configured — skipping. Add Gmail App Password in Email Settings.');
+    console.log('[email] No SMTP password configured — skipping.');
     return null;
   }
+  const port = parseInt(settings.smtp_port) || 587;
   return nodemailer.createTransport({
     host: settings.smtp_host || 'smtp.gmail.com',
-    port: settings.smtp_port || 587,
-    secure: false,
+    port: port,
+    secure: port === 465,
     auth: { user: settings.smtp_email, pass: settings.smtp_password }
   });
 }
@@ -66,10 +57,12 @@ async function sendReceiptEmail(donor, donation, org) {
     const provider = settings.postmark_key ? 'smtp.postmarkapp.com:587 (Postmark)' : `${settings.smtp_host||'smtp.gmail.com'}:${settings.smtp_port||587} (Gmail)`;
     console.log(`[receipt] Attempting to send to ${donor.email} via ${provider}`);
 
-    // Use Brevo API if key set (avoids SMTP port blocking on hosting providers)
     const useBrevoApi = !!settings.brevo_api_key;
     const transporter = useBrevoApi ? null : mailer.buildTransporter(settings);
-    if (!useBrevoApi && !transporter) { console.log('[receipt] No email provider configured — check Email Settings'); return; }
+    if (!useBrevoApi && !transporter) {
+      console.log('[receipt] No email provider configured — add Brevo API key or Gmail SMTP in Email Settings');
+      return;
+    }
 
     // Use default receipt template from designer if set, else fall back to plain
     const defaultTpl = get('SELECT * FROM email_templates WHERE org_id=? AND is_default_receipt=1', [org.id]);

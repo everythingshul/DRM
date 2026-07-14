@@ -89,13 +89,11 @@ router.post('/email-settings/test', requireOrgAdmin, async (req, res) => {
 // ── Email status — quick check whether email is fully configured ──────────────
 router.get('/email-settings/status', (req, res) => {
   const settings = get('SELECT smtp_email, smtp_password, donation_emails_paused, postmark_key, brevo_api_key FROM email_settings WHERE org_id = ?', [req.orgId]);
-  const hasBrevo    = !!(settings?.brevo_api_key);
-  const hasPostmark = !!(settings?.postmark_key);
-  const hasGmail    = !!(settings?.smtp_email && settings?.smtp_password);
+  const hasBrevo = !!(settings?.brevo_api_key);
+  const hasGmail = !!(settings?.smtp_email && settings?.smtp_password);
   res.json({
-    configured: hasBrevo || hasPostmark || hasGmail,
+    configured: hasBrevo || hasGmail,
     brevo:      hasBrevo,
-    postmark:   hasPostmark,
     has_email:  !!settings?.smtp_email,
     has_password: !!settings?.smtp_password,
     paused: !!settings?.donation_emails_paused
