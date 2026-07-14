@@ -2662,7 +2662,8 @@ async function _saveEmailSettings() {
       smtp_port: parseInt(val('em-port')) || 587,
       from_name: val('em-name') || '',
       donation_emails_paused: $('em-pause')?.checked ? 1 : 0,
-      postmark_key: val('em-pmkey') || undefined
+      postmark_key: val('em-pmkey') || undefined,
+      brevo_api_key: val('em-brevokey') || undefined
     });
     toast('Email settings saved ✓');
     const passInput = $('em-pass'); if (passInput) passInput.value = '';

@@ -1,7 +1,41 @@
 // utils/mailer.js — centralised email sender with automatic DB logging
 'use strict';
 const nodemailer = require('nodemailer');
+const https     = require('https');
 const { v4: uuidv4 } = require('uuid');
+
+// Send via Brevo API (port 443 — never blocked by hosting providers)
+async function sendViaBrevoApi(apiKey, { from, fromName, to, subject, html }) {
+  const body = JSON.stringify({
+    sender:   { email: from, name: fromName },
+    to:       [{ email: to }],
+    subject,
+    htmlContent: html
+  });
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'api.brevo.com',
+      path:     '/v3/smtp/email',
+      method:   'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Accept':        'application/json',
+        'api-key':       apiKey,
+        'Content-Length': Buffer.byteLength(body)
+      }
+    }, res => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) resolve(JSON.parse(data || '{}'));
+        else reject(new Error(`Brevo API error ${res.statusCode}: ${data.slice(0,200)}`));
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
 
 /**
  * Send an email and write a record to email_log.
@@ -21,14 +55,23 @@ const { v4: uuidv4 } = require('uuid');
  */
 async function sendMail(opts) {
   const { transporter, orgId, to, from, subject, html, type,
-          donorId = null, donationId = null, headers = {} } = opts;
+          donorId = null, donationId = null, headers = {},
+          brevoApiKey = null, fromEmail = null, fromName = null } = opts;
 
-  // Always use the lazy require so we never have a circular dep at load time
   const { run } = require('../db/schema');
   const logId = uuidv4();
 
   try {
-    await transporter.sendMail({ from, to, subject, html, headers });
+    if (brevoApiKey) {
+      // Use Brevo API over HTTPS (port 443 — works on all hosting providers)
+      await sendViaBrevoApi(brevoApiKey, {
+        from: fromEmail || from.replace(/.*<(.+)>/, '$1').trim(),
+        fromName: fromName || from.replace(/"?([^"<]+)"?\s*<.*/, '$1').trim(),
+        to, subject, html
+      });
+    } else {
+      await transporter.sendMail({ from, to, subject, html, headers });
+    }
     run(`INSERT INTO email_log (id,org_id,to_email,subject,html_body,type,status,donor_id,donation_id)
          VALUES (?,?,?,?,?,?,'sent',?,?)`,
       [logId, orgId, to, subject, html||null, type, donorId, donationId]);
@@ -79,4 +122,4 @@ function pmHeaders(settings) {
   return settings?.postmark_key ? { 'X-PM-Message-Stream': 'outbound' } : {};
 }
 
-module.exports = { sendMail, buildTransporter, fromAddr, pmHeaders };
+module.exports = { sendMail, buildTransporter, fromAddr, pmHeaders, sendViaBrevoApi };

@@ -28,7 +28,7 @@ router.get('/email-settings', requireOrgAdmin, (req, res) => {
 });
 
 router.put('/email-settings', requireOrgAdmin, (req, res) => {
-  const { smtp_email, smtp_password, smtp_host, smtp_port, from_name, receipt_template, marketing_template, donation_emails_paused, postmark_key } = req.body;
+  const { smtp_email, smtp_password, smtp_host, smtp_port, from_name, receipt_template, marketing_template, donation_emails_paused, postmark_key, brevo_api_key } = req.body;
   const existing = get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]);
 
   if (!existing) {
@@ -38,8 +38,9 @@ router.put('/email-settings', requireOrgAdmin, (req, res) => {
   } else {
     const newPass = smtp_password ? smtp_password : existing.smtp_password;
     const newPmKey = postmark_key !== undefined ? postmark_key : existing.postmark_key;
+    const newBrevoKey = brevo_api_key !== undefined ? brevo_api_key : (existing.brevo_api_key || '');
     run(`UPDATE email_settings SET smtp_email = ?, smtp_password = ?, smtp_host = ?, smtp_port = ?, from_name = ?,
-         receipt_template = ?, marketing_template = ?, donation_emails_paused = ?, postmark_key = ?, updated_at = CURRENT_TIMESTAMP
+         receipt_template = ?, marketing_template = ?, donation_emails_paused = ?, postmark_key = ?, brevo_api_key = ?, updated_at = CURRENT_TIMESTAMP
          WHERE org_id = ?`,
       [smtp_email ?? existing.smtp_email, newPass, smtp_host ?? existing.smtp_host, smtp_port ?? existing.smtp_port,
        from_name ?? existing.from_name, receipt_template ?? existing.receipt_template,

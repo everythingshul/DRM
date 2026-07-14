@@ -182,7 +182,7 @@ function createTables() {
       smtp_email TEXT, smtp_password TEXT, smtp_host TEXT DEFAULT 'smtp.gmail.com',
       smtp_port INTEGER DEFAULT 587, from_name TEXT,
       receipt_template TEXT DEFAULT '', marketing_template TEXT DEFAULT '',
-      donation_emails_paused INTEGER DEFAULT 0, postmark_key TEXT DEFAULT '',
+      donation_emails_paused INTEGER DEFAULT 0, postmark_key TEXT DEFAULT '', brevo_api_key TEXT DEFAULT '',
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS scheduled_emails (

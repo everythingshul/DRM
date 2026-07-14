@@ -66,8 +66,10 @@ async function sendReceiptEmail(donor, donation, org) {
     const provider = settings.postmark_key ? 'smtp.postmarkapp.com:587 (Postmark)' : `${settings.smtp_host||'smtp.gmail.com'}:${settings.smtp_port||587} (Gmail)`;
     console.log(`[receipt] Attempting to send to ${donor.email} via ${provider}`);
 
-    const transporter = mailer.buildTransporter(settings);
-    if (!transporter) { console.log('[receipt] No email provider configured — check Email Settings'); return; }
+    // Use Brevo API if key set (avoids SMTP port blocking on hosting providers)
+    const useBrevoApi = !!settings.brevo_api_key;
+    const transporter = useBrevoApi ? null : mailer.buildTransporter(settings);
+    if (!useBrevoApi && !transporter) { console.log('[receipt] No email provider configured — check Email Settings'); return; }
 
     // Use default receipt template from designer if set, else fall back to plain
     const defaultTpl = get('SELECT * FROM email_templates WHERE org_id=? AND is_default_receipt=1', [org.id]);
@@ -125,7 +127,10 @@ async function sendReceiptEmail(donor, donation, org) {
       subject, html,
       type: 'receipt',
       donorId: donor.id, donationId: donation.id,
-      headers: mailer.pmHeaders(settings)
+      headers: mailer.pmHeaders(settings),
+      brevoApiKey: settings.brevo_api_key || null,
+      fromEmail: settings.smtp_email || null,
+      fromName: settings.from_name || org.name
     });
     run('UPDATE donations SET receipt_sent = 1 WHERE id = ?', [donation.id]);
   } catch (e) {
