@@ -300,12 +300,11 @@ function runMigrations() {
         cell TEXT, home_phone TEXT, email TEXT,
         street TEXT, apt TEXT, city TEXT, state TEXT, zip TEXT,
         labels TEXT DEFAULT '[]',
-        notes TEXT, kvitel TEXT, kvitel_enabled INTEGER DEFAULT 0, sola_customer_id TEXT,
+        notes TEXT, kvitel TEXT, kvitel_enabled INTEGER DEFAULT 0,
         autopay_enabled INTEGER DEFAULT 0, autopay_paused INTEGER DEFAULT 0,
         autopay_day INTEGER DEFAULT 1, autopay_hour INTEGER DEFAULT 9, autopay_minute INTEGER DEFAULT 0,
         donation_emails_paused INTEGER DEFAULT 0, marketing_emails_paused INTEGER DEFAULT 0,
-        info_verified_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        sola_customer_id TEXT
+        info_verified_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`);
       db.run(`INSERT INTO donors_new SELECT * FROM donors`);
       db.run(`DROP TABLE donors`);
@@ -317,12 +316,14 @@ function runMigrations() {
   safe("ALTER TABLE donors ADD COLUMN autopay_minute INTEGER DEFAULT 0");
   safe("ALTER TABLE donors ADD COLUMN hebrew_title TEXT");
   safe("ALTER TABLE donations ADD COLUMN label TEXT");
-  safeAlter("ALTER TABLE email_settings ADD COLUMN postmark_key TEXT DEFAULT ''");
+  safe("ALTER TABLE email_settings ADD COLUMN postmark_key TEXT DEFAULT ''");
   safe("ALTER TABLE organizations ADD COLUMN expires_at DATETIME DEFAULT NULL");
   safe("ALTER TABLE organizations ADD COLUMN expiry_warned INTEGER DEFAULT 0");
   safe("ALTER TABLE kvitel_settings ADD COLUMN neighborhood_font TEXT DEFAULT 'Frank Ruhl Libre'");
   safe("ALTER TABLE kvitel_settings ADD COLUMN neighborhood_size REAL DEFAULT 14");
   safe("ALTER TABLE kvitel_settings ADD COLUMN neighborhood_bold INTEGER DEFAULT 1");
+  safe("ALTER TABLE donors ADD COLUMN sola_customer_id TEXT");
+  safe("ALTER TABLE email_settings ADD COLUMN brevo_api_key TEXT DEFAULT ''");
 }
 
 module.exports = { initDb, all, get, run, saveDb };
