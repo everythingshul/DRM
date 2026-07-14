@@ -115,15 +115,12 @@ async function sendReceiptEmail(donor, donation, org) {
     }
 
     await mailer.sendMail({
-      transporter, orgId: org.id,
+      settings, orgId: org.id,
       to: donor.email,
       from: `"${settings.from_name || org.name}" <${settings.smtp_email || 'noreply@everythingshul.com'}>`,
       subject, html,
       type: 'receipt',
-      donorId: donor.id, donationId: donation.id,
-      brevoApiKey: settings.brevo_api_key || null,
-      fromEmail: settings.smtp_email || null,
-      fromName: settings.from_name || org.name
+      donorId: donor.id, donationId: donation.id
     });
     run('UPDATE donations SET receipt_sent = 1 WHERE id = ?', [donation.id]);
   } catch (e) {

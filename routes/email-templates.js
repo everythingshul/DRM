@@ -314,10 +314,10 @@ router.post('/:id/test-send', requireOrgAdmin, async (req, res) => {
     });
 
     await mailer.sendMail({
-      transporter, orgId: req.orgId,
+      settings, orgId: req.orgId,
       to, from: mailer.fromAddr(settings, org?.name),
       subject: '[TEST] ' + t.subject, html,
-      type: 'test',
+      type: 'test'
     });
 
     res.json({ success: true });

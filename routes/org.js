@@ -22,33 +22,51 @@ router.put('/info', requireOrgAdmin, (req, res) => {
 
 // --- EMAIL SETTINGS ---
 router.get('/email-settings', requireOrgAdmin, (req, res) => {
-  const settings = get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]);
-  if (settings) delete settings.smtp_password; // never expose password
-  res.json(settings);
+  const s = get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]);
+  if (s) { delete s.smtp_password; delete s.brevo_api_key; }
+  res.json(s || {});
 });
 
 router.put('/email-settings', requireOrgAdmin, (req, res) => {
-  const { smtp_email, smtp_password, smtp_host, smtp_port, from_name, receipt_template, marketing_template, donation_emails_paused, postmark_key, brevo_api_key } = req.body;
-  const existing = get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]);
+  try {
+    const body = req.body;
+    const ex = get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]);
 
-  if (!existing) {
-    run(`INSERT INTO email_settings (id, org_id, smtp_email, smtp_password, smtp_host, smtp_port, from_name, receipt_template, marketing_template, donation_emails_paused, postmark_key)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [uuidv4(), req.orgId, smtp_email, smtp_password || '', smtp_host || 'smtp.gmail.com', smtp_port || 587, from_name || '', receipt_template || '', marketing_template || '', donation_emails_paused ? 1 : 0, postmark_key || '']);
-  } else {
-    const newPass = smtp_password ? smtp_password : existing.smtp_password;
-    const newPmKey = postmark_key !== undefined ? postmark_key : existing.postmark_key;
-    const newBrevoKey = brevo_api_key !== undefined ? brevo_api_key : (existing.brevo_api_key || '');
-    run(`UPDATE email_settings SET smtp_email = ?, smtp_password = ?, smtp_host = ?, smtp_port = ?, from_name = ?,
-         receipt_template = ?, marketing_template = ?, donation_emails_paused = ?, postmark_key = ?, brevo_api_key = ?, updated_at = CURRENT_TIMESTAMP
-         WHERE org_id = ?`,
-      [smtp_email ?? existing.smtp_email, newPass, smtp_host ?? existing.smtp_host, smtp_port ?? existing.smtp_port,
-       from_name ?? existing.from_name, receipt_template ?? existing.receipt_template,
-       marketing_template ?? existing.marketing_template,
-       donation_emails_paused !== undefined ? (donation_emails_paused ? 1 : 0) : existing.donation_emails_paused,
-       newPmKey, newBrevoKey, req.orgId]);
+    // Fields that keep existing value when blank/undefined
+    const email      = body.smtp_email      !== undefined ? body.smtp_email      : (ex?.smtp_email || '');
+    const pass       = body.smtp_password                ? body.smtp_password    : (ex?.smtp_password || '');
+    const host       = body.smtp_host       !== undefined ? body.smtp_host       : (ex?.smtp_host || 'smtp.gmail.com');
+    const port       = body.smtp_port       !== undefined ? body.smtp_port       : (ex?.smtp_port || 587);
+    const fromName   = body.from_name       !== undefined ? body.from_name       : (ex?.from_name || '');
+    const recTpl     = body.receipt_template!== undefined ? body.receipt_template: (ex?.receipt_template || '');
+    const mktTpl     = body.marketing_template!==undefined? body.marketing_template:(ex?.marketing_template||'');
+    const paused     = body.donation_emails_paused !== undefined ? (body.donation_emails_paused ? 1 : 0) : (ex?.donation_emails_paused || 0);
+    const brevoKey   = body.brevo_api_key               ? body.brevo_api_key    : (ex?.brevo_api_key || '');
+
+    if (!ex) {
+      run(`INSERT INTO email_settings
+           (id, org_id, smtp_email, smtp_password, smtp_host, smtp_port,
+            from_name, receipt_template, marketing_template,
+            donation_emails_paused, postmark_key, brevo_api_key)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [uuidv4(), req.orgId, email, pass, host, port,
+         fromName, recTpl, mktTpl, paused, '', brevoKey]);
+    } else {
+      run(`UPDATE email_settings
+           SET smtp_email=?, smtp_password=?, smtp_host=?, smtp_port=?,
+               from_name=?, receipt_template=?, marketing_template=?,
+               donation_emails_paused=?, postmark_key=?, brevo_api_key=?,
+               updated_at=CURRENT_TIMESTAMP
+           WHERE org_id=?`,
+        [email, pass, host, port,
+         fromName, recTpl, mktTpl, paused, '', brevoKey,
+         req.orgId]);
+    }
+    res.json({ success: true });
+  } catch(e) {
+    console.error('email-settings save error:', e.message);
+    res.status(500).json({ error: e.message });
   }
-  res.json({ success: true });
 });
 
 // Send test email
@@ -56,28 +74,21 @@ router.post('/email-settings/test', requireOrgAdmin, async (req, res) => {
   try {
     const { to } = req.body;
     const settings = get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]);
-    const org = get('SELECT * FROM organizations WHERE id=?', [req.orgId]);
+    const org      = get('SELECT * FROM organizations WHERE id=?', [req.orgId]);
+    if (!settings?.brevo_api_key && (!settings?.smtp_email || !settings?.smtp_password)) {
+      return res.status(400).json({ error: 'Email not configured. Enter your Brevo API key and save first.' });
+    }
     const fromName  = settings?.from_name || org?.name || 'DRM';
     const fromEmail = settings?.smtp_email || 'noreply@everythingshul.com';
     const toAddr    = to || settings?.smtp_email;
     const html      = '<p>This is a test email from your DRM system. If you received this, email is working correctly.</p>';
-
-    if (settings?.brevo_api_key) {
-      // Use Brevo API over HTTPS — works on Render (no SMTP port blocking)
-      try {
-        await mailer.sendViaBrevoApi(settings.brevo_api_key, { from: fromEmail, fromName, to: toAddr, subject: 'DRM Test Email', html });
-      } catch(e) { return res.status(400).json({ error: `Brevo API error: ${e.message}` }); }
-    } else {
-      if (!settings?.smtp_email)    return res.status(400).json({ error: 'Email not configured. Add a Brevo API key (recommended) above.' });
-      if (!settings?.smtp_password) return res.status(400).json({ error: 'Password not set.' });
-      const port = parseInt(settings.smtp_port) || 587;
-      const transporter = nodemailer.createTransport({ host: settings.smtp_host || 'smtp.gmail.com', port, secure: port === 465, auth: { user: settings.smtp_email, pass: settings.smtp_password } });
-      try { await transporter.verify(); } catch(e) { return res.status(400).json({ error: `Connection failed: ${e.message}` }); }
-      await mailer.sendMail({ transporter, orgId: req.orgId, to: toAddr, from: `"${fromName}" <${fromEmail}>`, subject: 'DRM Test Email', html, type: 'test' });
-    }
-
+    await mailer.sendMail({
+      settings, orgId: req.orgId,
+      to: toAddr, from: `"${fromName}" <${fromEmail}>`,
+      subject: 'DRM Test Email', html, type: 'test'
+    });
     res.json({ success: true });
-  } catch (e) {
+  } catch(e) {
     res.status(500).json({ error: e.message });
   }
 });
