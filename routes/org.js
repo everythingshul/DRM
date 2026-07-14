@@ -42,6 +42,7 @@ router.put('/email-settings', requireOrgAdmin, (req, res) => {
     const mktTpl     = body.marketing_template!==undefined? body.marketing_template:(ex?.marketing_template||'');
     const paused     = body.donation_emails_paused !== undefined ? (body.donation_emails_paused ? 1 : 0) : (ex?.donation_emails_paused || 0);
     const brevoKey   = body.brevo_api_key               ? body.brevo_api_key    : (ex?.brevo_api_key || '');
+    console.log('[email-settings] save: brevo_key_in_body=', !!body.brevo_api_key, 'ex_brevo=', !!(ex?.brevo_api_key), 'final=', !!brevoKey);
 
     if (!ex) {
       run(`INSERT INTO email_settings

@@ -324,6 +324,12 @@ function runMigrations() {
   safe("ALTER TABLE kvitel_settings ADD COLUMN neighborhood_bold INTEGER DEFAULT 1");
   safe("ALTER TABLE donors ADD COLUMN sola_customer_id TEXT");
   safe("ALTER TABLE email_settings ADD COLUMN brevo_api_key TEXT DEFAULT ''");
+  // Verify column exists
+  try {
+    const cols = db.exec("PRAGMA table_info(email_settings)");
+    const hasBrevo = cols[0]?.values?.some(c => c[1] === 'brevo_api_key');
+    console.log('[db] email_settings.brevo_api_key column:', hasBrevo ? 'EXISTS' : 'MISSING');
+  } catch(e) {}
 }
 
 module.exports = { initDb, all, get, run, saveDb };
