@@ -1614,6 +1614,8 @@ async function renderVerification(el) {
           </table></div>
         </div>` :
         `<div class="card"><div class="empty"><h3>All donors verified!</h3><p>No info checks needed right now.</p></div></div>`}`;
+  // Load unassigned vault cards below the verification list
+  setTimeout(() => _loadUnassignedCards(el), 100);
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
 function _verRows(donors) {
@@ -1931,6 +1933,18 @@ async function renderEmails(el) {
           <small style="font-size:11px;color:var(--gray-5)">If set, Postmark is used instead of Gmail SMTP — much better inbox placement.</small>
         </div>
 
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+          <div style="background:var(--green-pale,#f0fdf4);border:1.5px solid var(--green,#16a34a);border-radius:6px;padding:10px 12px">
+            <div style="font-weight:700;color:#15803d;margin-bottom:3px">🆓 Brevo (recommended free)</div>
+            <div style="font-size:11px;color:var(--gray-6)">300 emails/day free forever. Sign up at brevo.com → SMTP &amp; API → SMTP → copy host/port/login/password.</div>
+            <div style="font-size:11px;margin-top:4px"><code>smtp-relay.brevo.com</code> · port <code>587</code></div>
+          </div>
+          <div style="background:var(--blue-pale);border:1.5px solid var(--blue);border-radius:6px;padding:10px 12px">
+            <div style="font-weight:700;color:var(--navy);margin-bottom:3px">✉ Resend (3,000/month free)</div>
+            <div style="font-size:11px;color:var(--gray-6)">3,000 emails/month free. resend.com → API Keys → add key below as Postmark key field (uses same SMTP relay).</div>
+            <div style="font-size:11px;margin-top:4px"><code>smtp.resend.com</code> · port <code>587</code></div>
+          </div>
+        </div>
         <div style="font-size:12px;font-weight:600;color:var(--gray-7);margin-bottom:8px">Or: Gmail SMTP (works but may land in spam for non-Gmail recipients)</div>
         <div class="r2">
           <div><label>Your Gmail Address</label><input id="em-email" type="email" value="${cfg?.smtp_email||''}" autocomplete="email" placeholder="you@gmail.com"></div>
@@ -4063,4 +4077,124 @@ async function _recoveryImport(filename) {
       }
     }
   );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Unassigned Sola Vault Cards
+// ══════════════════════════════════════════════════════════════════════════════
+
+async function _loadUnassignedCards(el) {
+  const pg = el || $('page-verification');
+  if (!pg) return;
+  // Remove existing wrap if present
+  const old = pg.querySelector('#unassigned-cards-wrap');
+  if (old) old.remove();
+  const wrap = document.createElement('div');
+  wrap.id = 'unassigned-cards-wrap';
+  pg.appendChild(wrap);
+
+  try {
+    const r = await API.get(`/api/orgs/${API.orgId}/payments/vault/unassigned`);
+    if (!r.unassigned?.length) return; // all assigned — nothing to show
+    wrap.innerHTML = `
+      <div class="ph" style="margin-top:24px">
+        <div>
+          <div class="ph-title">Unassigned Cards in Sola Vault</div>
+          <div class="ph-sub">${r.unassigned.length} card${r.unassigned.length>1?'s':''} found in Sola not linked to any donor · ${r.total_assigned} of ${r.total_in_vault} vault cards assigned</div>
+        </div>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden">
+        <div class="tw"><table>
+          <thead><tr>
+            <th>Card</th><th>Name on Card</th><th>Expires</th><th>Added</th><th></th>
+          </tr></thead>
+          <tbody>${r.unassigned.map(c => `<tr>
+            <td><strong>${c.card_type||'Card'}</strong> ••••${c.last_four||'????'}</td>
+            <td style="font-size:13px">${c.name||'—'}</td>
+            <td style="font-size:12px;color:var(--gray-5)">${c.exp||'—'}</td>
+            <td style="font-size:11px;color:var(--gray-5)">${c.created?fmtD(c.created):'—'}</td>
+            <td><button class="btn btn-blue btn-sm"
+              onclick='_assignVaultCard(${JSON.stringify(c)})'>Assign to Donor</button></td>
+          </tr>`).join('')}</tbody>
+        </table></div>
+      </div>`;
+  } catch(e) {
+    // Sola not configured or vault API not available — silently skip
+    if (!e.message?.includes('not configured') && !e.message?.toLowerCase().includes('sola')) {
+      wrap.innerHTML = `<div class="alert alert-warn" style="margin-top:16px">Could not load Sola vault: ${e.message}</div>`;
+    }
+  }
+}
+
+function _assignVaultCard(card) {
+  window._vcCard = card;
+  window._vcDonorId = null;
+  Modal.open(`Assign Card ••••${card.last_four||'?'} to Donor`, `
+    <p style="font-size:13px;color:var(--gray-5);margin-bottom:10px">
+      Search for the donor this <strong>${card.card_type||'Card'} ••••${card.last_four||'????'}</strong> belongs to.
+    </p>
+    <div style="position:relative">
+      <input id="vc-search" placeholder="Search name, email, phone…" oninput="_vcSearch(this.value)" autocomplete="off">
+      <div id="vc-results" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;
+        border:1.5px solid var(--blue);border-top:none;border-radius:0 0 6px 6px;z-index:100;
+        max-height:200px;overflow-y:auto;box-shadow:var(--shadow-md)"></div>
+    </div>
+    <div id="vc-selected" style="display:none;margin-top:8px" class="alert alert-ok"></div>
+    <label style="margin-top:10px">Card Label</label>
+    <input id="vc-label" value="${card.card_type||'Card'} ••••${card.last_four||''}" autocomplete="off">
+    <div class="bg mt">
+      <button class="btn btn-primary" id="vc-assign-btn" onclick="window._vcDoAssign()" disabled>Assign Card</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+
+  window._vcDoAssign = async () => {
+    if (!window._vcDonorId) { toast('Select a donor first','err'); return; }
+    const btn = $('vc-assign-btn');
+    if(btn){btn.textContent='Assigning…';btn.disabled=true;}
+    try {
+      await API.post(`/api/orgs/${API.orgId}/payments/vault/assign`, {
+        token:     window._vcCard.token,
+        donor_id:  window._vcDonorId,
+        label:     val('vc-label') || null,
+        card_type: window._vcCard.card_type,
+        last_four: window._vcCard.last_four
+      });
+      toast('Card assigned to donor ✓');
+      Modal.close();
+      _loadUnassignedCards(); // refresh
+    } catch(e) {
+      toast(e.message,'err');
+      if(btn){btn.textContent='Assign Card';btn.disabled=false;}
+    }
+  };
+}
+
+let _vcTimer;
+async function _vcSearch(q) {
+  clearTimeout(_vcTimer);
+  const res=$('vc-results'); if(!res)return;
+  if(!q.trim()){res.style.display='none';return;}
+  _vcTimer = setTimeout(async()=>{
+    try {
+      const donors = await API.get(`/api/orgs/${API.orgId}/donors/search?q=${encodeURIComponent(q)}`);
+      res.innerHTML = donors.length
+        ? donors.map(d=>`<div onclick="_vcSelectDonor('${d.id}','${d.first_name} ${d.last_name}')"
+            style="padding:8px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--gray-1)"
+            onmouseover="this.style.background='var(--blue-pale)'" onmouseout="this.style.background=''">
+            <strong>${d.first_name} ${d.last_name}</strong>
+            ${d.email?`<span style="color:var(--gray-5);font-size:12px"> · ${d.email}</span>`:''}
+            ${d.cell?`<span style="color:var(--gray-5);font-size:12px"> · ${d.cell}</span>`:''}
+          </div>`).join('')
+        : '<div style="padding:8px 12px;font-size:13px;color:var(--gray-5)">No donors found</div>';
+      res.style.display='block';
+    } catch{}
+  }, 300);
+}
+
+function _vcSelectDonor(id, name) {
+  window._vcDonorId = id;
+  const inp=$('vc-search'); if(inp)inp.value=name;
+  const res=$('vc-results'); if(res)res.style.display='none';
+  const sel=$('vc-selected'); if(sel){sel.textContent='✓ '+name;sel.style.display='block';}
+  const btn=$('vc-assign-btn'); if(btn)btn.disabled=false;
 }

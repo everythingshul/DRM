@@ -300,3 +300,44 @@ router.get('/receipt/:donationId', async (req, res) => {
 });
 
 module.exports = router;
+
+// ── List Sola vault tokens not yet assigned to any donor in this org ───────────
+router.get('/vault/unassigned', requireOrgAdmin, async (req, res) => {
+  try {
+    const { listVaultTokens } = require('../utils/sola');
+    const vaultTokens = await listVaultTokens(req.orgId);
+
+    // Get all tokens already stored in DRM for this org
+    const assigned = all('SELECT sola_token FROM payment_methods WHERE org_id=? AND sola_token IS NOT NULL', [req.orgId]);
+    const assignedSet = new Set(assigned.map(p => p.sola_token));
+
+    const unassigned = vaultTokens.filter(t => t.token && !assignedSet.has(t.token));
+    res.json({ unassigned, total_in_vault: vaultTokens.length, total_assigned: assignedSet.size });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Assign a vault token to a donor as a payment method ───────────────────────
+router.post('/vault/assign', requireOrgAdmin, async (req, res) => {
+  try {
+    const { token, donor_id, label, card_type, last_four } = req.body;
+    if (!token || !donor_id) return res.status(400).json({ error: 'token and donor_id required' });
+
+    const donor = get('SELECT id FROM donors WHERE id=? AND org_id=?', [donor_id, req.orgId]);
+    if (!donor) return res.status(404).json({ error: 'Donor not found' });
+
+    // Check not already assigned
+    const exists = get('SELECT id FROM payment_methods WHERE sola_token=? AND org_id=?', [token, req.orgId]);
+    if (exists) return res.status(400).json({ error: 'This card is already assigned to a donor in this org' });
+
+    const id = require('uuid').v4();
+    run(`INSERT INTO payment_methods (id, donor_id, org_id, type, label, sola_token, last_four, card_brand, is_default)
+         VALUES (?, ?, ?, 'credit_card', ?, ?, ?, ?, 0)`,
+      [id, donor_id, req.orgId, label || `Card ••${last_four||''}`, token, last_four||null, card_type||null]);
+
+    res.json({ success: true, payment_method: get('SELECT * FROM payment_methods WHERE id=?', [id]) });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
