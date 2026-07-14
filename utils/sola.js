@@ -141,4 +141,4 @@ async function dafVoid(orgId, { refNum }) {
   return { refNum: r.xRefNum };
 }
 
-module.exports = { ccSave, ccSale, ccRefund, ccVoid, dafGrant, dafVoid, getSolaKey, listVaultTokens };
+module.exports = { ccSave, ccSale, ccRefund, ccVoid, dafGrant, dafVoid, getSolaKey };
