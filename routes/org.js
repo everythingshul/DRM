@@ -67,10 +67,6 @@ router.post('/email-settings/test', requireOrgAdmin, async (req, res) => {
       try {
         await mailer.sendViaBrevoApi(settings.brevo_api_key, { from: fromEmail, fromName, to: toAddr, subject: 'DRM Test Email', html });
       } catch(e) { return res.status(400).json({ error: `Brevo API error: ${e.message}` }); }
-    } else if (settings?.postmark_key) {
-      const transporter = nodemailer.createTransport({ host: 'smtp.postmarkapp.com', port: 587, secure: false, auth: { user: settings.postmark_key, pass: settings.postmark_key } });
-      try { await transporter.verify(); } catch(e) { return res.status(400).json({ error: `Postmark connection failed: ${e.message}` }); }
-      await mailer.sendMail({ transporter, orgId: req.orgId, to: toAddr, from: `"${fromName}" <${fromEmail}>`, subject: 'DRM Test Email', html, type: 'test', headers: { 'X-PM-Message-Stream': 'outbound' } });
     } else {
       if (!settings?.smtp_email)    return res.status(400).json({ error: 'Email not configured. Add a Brevo API key (recommended) above.' });
       if (!settings?.smtp_password) return res.status(400).json({ error: 'Password not set.' });
@@ -934,7 +930,7 @@ router.post('/email-log/:id/forward', requireOrgAdmin, async (req, res) => {
     if (!row.html_body) return res.status(400).json({ error: 'No body stored — cannot forward' });
 
     const settings = get('SELECT * FROM email_settings WHERE org_id=?', [req.orgId]);
-    const { buildTransporter, fromAddr, pmHeaders, sendMail } = require('../utils/mailer');
+    const { buildTransporter, fromAddr, sendMail } = require('../utils/mailer');
     const transporter = buildTransporter(settings);
     if (!transporter) return res.status(400).json({ error: 'Email not configured. Set up SMTP or Postmark in Email Settings.' });
 
@@ -946,7 +942,6 @@ router.post('/email-log/:id/forward', requireOrgAdmin, async (req, res) => {
       html: row.html_body,
       type: row.type,
       donorId: row.donor_id, donationId: row.donation_id,
-      headers: pmHeaders(settings)
     });
 
     res.json({ success: true });

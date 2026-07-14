@@ -318,7 +318,6 @@ router.post('/:id/test-send', requireOrgAdmin, async (req, res) => {
       to, from: mailer.fromAddr(settings, org?.name),
       subject: '[TEST] ' + t.subject, html,
       type: 'test',
-      headers: mailer.pmHeaders(settings)
     });
 
     res.json({ success: true });

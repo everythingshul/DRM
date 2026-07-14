@@ -111,4 +111,4 @@ function fromAddr(settings, orgName) {
 }
 
 
-module.exports = { sendMail, buildTransporter, fromAddr, pmHeaders, sendViaBrevoApi };
+module.exports = { sendMail, buildTransporter, fromAddr, sendViaBrevoApi };

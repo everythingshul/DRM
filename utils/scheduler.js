@@ -38,12 +38,12 @@ async function sendReceiptEmail(donor, donation, org) {
       return;
     }
     const settings = get('SELECT * FROM email_settings WHERE org_id = ?', [org.id]);
-    if (!settings?.postmark_key && !settings?.smtp_email) {
-      console.log(`[receipt] Skipping — no email provider configured for org ${org.id}. Add Postmark API key or Gmail SMTP in Email Settings.`);
+    if (!settings?.brevo_api_key && !settings?.smtp_email) {
+      console.log(`[receipt] Skipping — no email provider configured for org ${org.id}. Add Brevo API key or Gmail SMTP in Email Settings.`);
       return;
     }
-    if (!settings?.postmark_key && !settings?.smtp_password) {
-      console.log(`[receipt] Skipping — no App Password saved for org ${org.id}. Enter Gmail App Password in Email Settings, or use Postmark instead.`);
+    if (!settings?.brevo_api_key && !settings?.smtp_email && !settings?.smtp_password) {
+      console.log(`[receipt] Skipping — no email credentials for org ${org.id}.`);
       return;
     }
     if (settings.donation_emails_paused) {
@@ -54,7 +54,7 @@ async function sendReceiptEmail(donor, donation, org) {
       console.log(`[receipt] Skipping — donor ${donor.id} (${donor.first_name} ${donor.last_name}) has no email address`);
       return;
     }
-    const provider = settings.postmark_key ? 'smtp.postmarkapp.com:587 (Postmark)' : `${settings.smtp_host||'smtp.gmail.com'}:${settings.smtp_port||587} (Gmail)`;
+    const provider = settings.brevo_api_key ? 'api.brevo.com (Brevo API)' : `${settings.smtp_host||'smtp.gmail.com'}:${settings.smtp_port||587}`;
     console.log(`[receipt] Attempting to send to ${donor.email} via ${provider}`);
 
     const useBrevoApi = !!settings.brevo_api_key;
@@ -116,11 +116,11 @@ async function sendReceiptEmail(donor, donation, org) {
 
     await mailer.sendMail({
       transporter, orgId: org.id,
-      to: donor.email, from: mailer.fromAddr(settings, org.name),
+      to: donor.email,
+      from: `"${settings.from_name || org.name}" <${settings.smtp_email || 'noreply@everythingshul.com'}>`,
       subject, html,
       type: 'receipt',
       donorId: donor.id, donationId: donation.id,
-      headers: mailer.pmHeaders(settings),
       brevoApiKey: settings.brevo_api_key || null,
       fromEmail: settings.smtp_email || null,
       fromName: settings.from_name || org.name
@@ -335,7 +335,7 @@ async function processExpiryWarnings() {
   // Find orgs with expiry dates that haven't been fully warned
   const orgs = all(`
     SELECT o.*, es.smtp_email, es.smtp_password, es.smtp_host, es.smtp_port,
-           es.from_name, es.postmark_key
+           es.from_name, es.postmark_key, es.brevo_api_key
     FROM organizations o
     LEFT JOIN email_settings es ON es.org_id = o.id
     WHERE o.expires_at IS NOT NULL
@@ -379,9 +379,7 @@ async function processExpiryWarnings() {
 
         // Send via Postmark or SMTP
         let transporter;
-        if (org.postmark_key) {
-          transporter = nodemailer.createTransport({ host:'smtp.postmarkapp.com', port:587, secure:false, auth:{user:org.postmark_key, pass:org.postmark_key} });
-        } else if (org.smtp_email && org.smtp_password) {
+        if (org.smtp_email && org.smtp_password) {
           transporter = nodemailer.createTransport({ host:org.smtp_host||'smtp.gmail.com', port:org.smtp_port||587, secure:false, auth:{user:org.smtp_email, pass:org.smtp_password} });
         }
 
@@ -394,7 +392,7 @@ async function processExpiryWarnings() {
                 from: `"EverythingShul DRM" <${org.smtp_email || 'noreply@everythingshul.com'}>`,
                 subject: `Action Required: DRM Account Expires in ${daysLeft} Day${daysLeft>1?'s':''}`,
                 html, type: 'expiry_warning',
-                headers: org.postmark_key ? { 'X-PM-Message-Stream': 'outbound' } : {}
+                headers: {}
               });
             } catch(e) { console.error(`[expiry] Warning email failed: ${e.message}`); }
           }
