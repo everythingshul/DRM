@@ -46,7 +46,7 @@ router.put('/email-settings', requireOrgAdmin, (req, res) => {
        from_name ?? existing.from_name, receipt_template ?? existing.receipt_template,
        marketing_template ?? existing.marketing_template,
        donation_emails_paused !== undefined ? (donation_emails_paused ? 1 : 0) : existing.donation_emails_paused,
-       newPmKey, req.orgId]);
+       newPmKey, newBrevoKey, req.orgId]);
   }
   res.json({ success: true });
 });
