@@ -311,17 +311,30 @@ router.get('/vault/unassigned', requireOrgAdmin, async (req, res) => {
     const assigned = all('SELECT sola_token FROM payment_methods WHERE org_id=? AND sola_token IS NOT NULL', [req.orgId]);
     const assignedSet = new Set(assigned.map(p => p.sola_token));
 
-    const unassigned = vaultMethods
-      .filter(pm => pm.Token && !assignedSet.has(pm.Token))
-      .map(pm => ({
-        token:     pm.Token,
-        last_four: (pm.MaskedCardNumber || '').replace(/\D/g,'').slice(-4),
-        card_type: pm.Issuer || pm.TokenType || '',
-        name:      pm.Name   || '',
-        exp:       pm.Exp    || '',
-        created:   pm.CreatedDate || '',
-        pm_id:     pm.PaymentMethodId || ''
+    // ListPaymentMethods returns minimal data — fetch full details for unassigned ones
+    const unassignedRaw = vaultMethods.filter(pm => pm.Token && !assignedSet.has(pm.Token));
+
+    const { getCustomer } = require('../utils/solaRecurring');
+    // Fetch full details in batches of 5 to get masked card numbers
+    const { getPaymentMethodDetails } = require('../utils/solaRecurring');
+    const unassigned = [];
+    for (let i = 0; i < unassignedRaw.length; i += 5) {
+      const batch = unassignedRaw.slice(i, i + 5);
+      const results = await Promise.all(batch.map(async pm => {
+        let details = {};
+        try { details = await getPaymentMethodDetails(req.orgId, pm.PaymentMethodId); } catch(e) {}
+        return {
+          token:     pm.Token,
+          last_four: (details.MaskedCardNumber || '').replace(/\D/g,'').slice(-4) || null,
+          card_type: details.Issuer || pm.TokenType || 'CC',
+          name:      details.Name || details.TokenAlias || '',
+          exp:       details.Exp  || '',
+          created:   details.CreatedDate || pm.CreatedDate || '',
+          pm_id:     pm.PaymentMethodId || ''
+        };
       }));
+      unassigned.push(...results);
+    }
 
     res.json({ unassigned, total_in_vault: vaultMethods.length, total_assigned: assignedSet.size });
   } catch(e) {

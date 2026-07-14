@@ -148,11 +148,20 @@ async function processTransaction(orgId, solaCustomerId, paymentMethodId, amount
   return { refNum: r.RefNum, status: r.Result };
 }
 
+// Get full details of a single payment method (includes MaskedCardNumber, Issuer, Exp)
+async function getPaymentMethodDetails(orgId, paymentMethodId) {
+  return solaPost(orgId, 'GetPaymentMethod', {
+    PaymentMethodId: paymentMethodId,
+    ShowDeleted: false
+  });
+}
+
 module.exports = {
   createCustomer,
   updateCustomer,
   getCustomer,
   listPaymentMethods,
   createPaymentMethod,
-  processTransaction
+  processTransaction,
+  getPaymentMethodDetails
 };

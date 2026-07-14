@@ -4118,9 +4118,9 @@ async function _loadUnassignedCards(el) {
             <th>Card</th><th>Name on Card</th><th>Expires</th><th>Added</th><th></th>
           </tr></thead>
           <tbody>${r.unassigned.map(c => `<tr>
-            <td><strong>${c.card_type||'Card'}</strong> ••••${c.last_four||'????'}</td>
+            <td><strong>${c.card_type||'CC'}</strong>${c.last_four ? ` ••••${c.last_four}` : ''}</td>
             <td style="font-size:13px">${c.name||'—'}</td>
-            <td style="font-size:12px;color:var(--gray-5)">${c.exp||'—'}</td>
+            <td style="font-size:12px;color:var(--gray-5)">${c.exp ? c.exp.replace(/(\d{2})(\d{2})/,'$1/$2') : '—'}</td>
             <td style="font-size:11px;color:var(--gray-5)">${c.created?fmtD(c.created):'—'}</td>
             <td><button class="btn btn-blue btn-sm"
               onclick='_assignVaultCard(${JSON.stringify(c)})'>Assign to Donor</button></td>
