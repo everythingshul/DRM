@@ -304,15 +304,26 @@ module.exports = router;
 // ── List Sola vault tokens not yet assigned to any donor in this org ───────────
 router.get('/vault/unassigned', requireOrgAdmin, async (req, res) => {
   try {
-    const { listVaultTokens } = require('../utils/sola');
-    const vaultTokens = await listVaultTokens(req.orgId);
+    const { listPaymentMethods } = require('../utils/solaRecurring');
+    const vaultMethods = await listPaymentMethods(req.orgId);
 
     // Get all tokens already stored in DRM for this org
     const assigned = all('SELECT sola_token FROM payment_methods WHERE org_id=? AND sola_token IS NOT NULL', [req.orgId]);
     const assignedSet = new Set(assigned.map(p => p.sola_token));
 
-    const unassigned = vaultTokens.filter(t => t.token && !assignedSet.has(t.token));
-    res.json({ unassigned, total_in_vault: vaultTokens.length, total_assigned: assignedSet.size });
+    const unassigned = vaultMethods
+      .filter(pm => pm.Token && !assignedSet.has(pm.Token))
+      .map(pm => ({
+        token:     pm.Token,
+        last_four: (pm.MaskedCardNumber || '').replace(/\D/g,'').slice(-4),
+        card_type: pm.Issuer || pm.TokenType || '',
+        name:      pm.Name   || '',
+        exp:       pm.Exp    || '',
+        created:   pm.CreatedDate || '',
+        pm_id:     pm.PaymentMethodId || ''
+      }));
+
+    res.json({ unassigned, total_in_vault: vaultMethods.length, total_assigned: assignedSet.size });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }

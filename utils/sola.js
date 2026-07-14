@@ -141,33 +141,4 @@ async function dafVoid(orgId, { refNum }) {
   return { refNum: r.xRefNum };
 }
 
-// ── List all tokens in the Sola vault ─────────────────────────────────────────
-// Uses Cardknox cc:reporttokens — returns all stored cards
-async function listVaultTokens(orgId) {
-  const raw = await solaPost({
-    ...base(orgId, 'cc:reporttokens'),
-  });
-  // Response contains xRecords array or xError
-  if (raw.xError) throw new Error('Sola: ' + raw.xError);
-  // Parse the token list — Cardknox returns xRecords as a delimited string or array
-  let records = [];
-  if (Array.isArray(raw.xRecords)) {
-    records = raw.xRecords;
-  } else if (raw.xRecords) {
-    // Sometimes returned as newline-delimited JSON objects
-    records = String(raw.xRecords).split('\n')
-      .filter(Boolean)
-      .map(r => { try { return JSON.parse(r); } catch { return null; } })
-      .filter(Boolean);
-  }
-  return records.map(r => ({
-    token:     r.xToken      || r.token      || '',
-    last_four: (r.xMaskedCardNumber || r.maskedCardNumber || '').replace(/\D/g,'').slice(-4),
-    card_type: r.xCardType   || r.cardType   || '',
-    name:      r.xName       || r.name       || '',
-    exp:       r.xExp        || r.exp        || '',
-    created:   r.xEnteredDate || r.enteredDate || ''
-  })).filter(r => r.token);
-}
-
 module.exports = { ccSave, ccSale, ccRefund, ccVoid, dafGrant, dafVoid, getSolaKey, listVaultTokens };

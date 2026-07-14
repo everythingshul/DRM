@@ -1945,14 +1945,18 @@ async function renderEmails(el) {
             <div style="font-size:11px;margin-top:4px"><code>smtp.resend.com</code> · port <code>587</code></div>
           </div>
         </div>
-        <div style="font-size:12px;font-weight:600;color:var(--gray-7);margin-bottom:8px">Or: Gmail SMTP (works but may land in spam for non-Gmail recipients)</div>
+        <div style="font-size:12px;font-weight:600;color:var(--gray-7);margin-bottom:8px">Or: Gmail / Brevo / Resend / Any SMTP</div>
         <div class="r2">
-          <div><label>Your Gmail Address</label><input id="em-email" type="email" value="${cfg?.smtp_email||''}" autocomplete="email" placeholder="you@gmail.com"></div>
+          <div><label>Email / Login</label><input id="em-email" type="email" value="${cfg?.smtp_email||''}" autocomplete="email" placeholder="you@gmail.com or your Brevo login"></div>
           <div><label>From Name</label><input id="em-name" value="${cfg?.from_name||''}" placeholder="Your Shul Name"></div>
         </div>
-        <label>Gmail App Password <span style="font-size:11px;color:var(--gray-5)">(leave blank to keep existing)</span></label>
-        <input id="em-pass" type="password" placeholder="16-character App Password (NOT your Gmail password)">
-        <small style="color:var(--gray-5);font-size:11px">Gmail → Google Account → Security → 2-Step Verification → App Passwords → Create</small>
+        <div class="r2">
+          <div><label>SMTP Host</label><input id="em-host" value="${cfg?.smtp_host||'smtp.gmail.com'}" placeholder="smtp.gmail.com or smtp-relay.brevo.com"></div>
+          <div><label>Port</label><input id="em-port" type="number" value="${cfg?.smtp_port||587}"></div>
+        </div>
+        <label>Password / App Password <span style="font-size:11px;color:var(--gray-5)">(leave blank to keep existing)</span></label>
+        <input id="em-pass" type="password" placeholder="Gmail App Password or Brevo SMTP password">
+        <small style="color:var(--gray-5);font-size:11px">Gmail: Google Account → Security → 2-Step Verification → App Passwords → Create<br>Brevo: smtp-relay.brevo.com · port 587 · login = your Brevo email · password = Brevo SMTP key</small>
 
         <div class="bg mt">
           <button class="btn btn-primary" onclick="_saveEmailSettings()">Save</button>
@@ -2653,12 +2657,12 @@ async function _saveEmailSettings() {
   try {
     await API.put(API.o.email(), {
       smtp_email: email || undefined,
-      smtp_password: val('em-pass') || undefined, // undefined = keep existing if blank
-      smtp_host: 'smtp.gmail.com',
-      smtp_port: 587,
+      smtp_password: val('em-pass') || undefined,
+      smtp_host: val('em-host') || 'smtp.gmail.com',
+      smtp_port: parseInt(val('em-port')) || 587,
       from_name: val('em-name') || '',
       donation_emails_paused: $('em-pause')?.checked ? 1 : 0,
-      postmark_key: val('em-pmkey') || undefined // undefined = keep existing if blank
+      postmark_key: val('em-pmkey') || undefined
     });
     toast('Email settings saved ✓');
     const passInput = $('em-pass'); if (passInput) passInput.value = '';

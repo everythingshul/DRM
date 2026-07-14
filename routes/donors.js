@@ -143,6 +143,19 @@ router.post('/', (req, res) => {
     ]);
 
     const donor = get('SELECT * FROM donors WHERE id = ?', [id]);
+
+    // Sync to Sola customer portal (async, don't block response)
+    setImmediate(async () => {
+      try {
+        const { createCustomer } = require('../utils/solaRecurring');
+        const solaId = await createCustomer(req.orgId, donor);
+        run('UPDATE donors SET sola_customer_id=? WHERE id=?', [solaId, id]);
+        console.log(`[sola] Created customer ${solaId} for donor ${id}`);
+      } catch(e) {
+        console.error(`[sola] Failed to create customer for donor ${id}: ${e.message}`);
+      }
+    });
+
     res.json({ success: true, donor });
   } catch (e) {
     console.error(e);
@@ -197,6 +210,27 @@ router.put('/:id', (req, res) => {
     ]);
 
     const updated = get('SELECT * FROM donors WHERE id = ?', [req.params.id]);
+
+    // Sync updates to Sola customer portal (async)
+    setImmediate(async () => {
+      try {
+        const { createCustomer, updateCustomer, getCustomer } = require('../utils/solaRecurring');
+        if (updated.sola_customer_id) {
+          // Get current revision before updating (required by Sola)
+          const current = await getCustomer(req.orgId, updated.sola_customer_id);
+          await updateCustomer(req.orgId, updated.sola_customer_id, updated, current.Revision);
+          console.log(`[sola] Updated customer ${updated.sola_customer_id} for donor ${updated.id}`);
+        } else {
+          // Donor exists in DRM but not yet in Sola — create now
+          const solaId = await createCustomer(req.orgId, updated);
+          run('UPDATE donors SET sola_customer_id=? WHERE id=?', [solaId, updated.id]);
+          console.log(`[sola] Created customer ${solaId} for existing donor ${updated.id}`);
+        }
+      } catch(e) {
+        console.error(`[sola] Failed to sync donor ${req.params.id}: ${e.message}`);
+      }
+    });
+
     res.json({ success: true, donor: updated });
   } catch (e) {
     console.error(e);
