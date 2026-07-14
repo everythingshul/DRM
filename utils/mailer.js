@@ -58,10 +58,11 @@ function buildTransporter(settings) {
   }
   // Gmail / Brevo / Resend / any SMTP
   if (settings.smtp_email && settings.smtp_password) {
+    const port = parseInt(settings.smtp_port) || 587;
     return nodemailer.createTransport({
       host: settings.smtp_host || 'smtp.gmail.com',
-      port: settings.smtp_port || 587,
-      secure: false,
+      port: port,
+      secure: port === 465,
       auth: { user: settings.smtp_email, pass: settings.smtp_password }
     });
   }

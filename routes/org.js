@@ -69,10 +69,11 @@ router.post('/email-settings/test', requireOrgAdmin, async (req, res) => {
     } else {
       if (!settings?.smtp_email) return res.status(400).json({ error: 'Email not configured. Add a Postmark API key (recommended) or Gmail SMTP credentials.' });
       if (!settings?.smtp_password) return res.status(400).json({ error: 'App Password not set. Enter it and save before testing.' });
+      const port = parseInt(settings.smtp_port) || 587;
       transporter = nodemailer.createTransport({
         host: settings.smtp_host || 'smtp.gmail.com',
-        port: settings.smtp_port || 587,
-        secure: false,
+        port: port,
+        secure: port === 465,
         auth: { user: settings.smtp_email, pass: settings.smtp_password }
       });
     }
