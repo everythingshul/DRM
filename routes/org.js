@@ -32,9 +32,9 @@ router.put('/email-settings', requireOrgAdmin, (req, res) => {
   const existing = get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]);
 
   if (!existing) {
-    run(`INSERT INTO email_settings (id, org_id, smtp_email, smtp_password, smtp_host, smtp_port, from_name, receipt_template, marketing_template, donation_emails_paused, postmark_key)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [uuidv4(), req.orgId, smtp_email, smtp_password || '', smtp_host || 'smtp.gmail.com', smtp_port || 587, from_name || '', receipt_template || '', marketing_template || '', donation_emails_paused ? 1 : 0, postmark_key || '']);
+   run(`INSERT INTO email_settings (id, org_id, smtp_email, smtp_password, smtp_host, smtp_port, from_name, receipt_template, marketing_template, donation_emails_paused, postmark_key, brevo_api_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [uuidv4(), req.orgId, smtp_email, smtp_password || '', smtp_host || 'smtp.gmail.com', smtp_port || 587, from_name || '', receipt_template || '', marketing_template || '', donation_emails_paused ? 1 : 0, postmark_key || '', brevo_api_key || '']);
   } else {
     const newPass = smtp_password ? smtp_password : existing.smtp_password;
     const newPmKey = postmark_key !== undefined ? postmark_key : existing.postmark_key;
