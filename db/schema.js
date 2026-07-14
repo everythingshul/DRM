@@ -316,7 +316,8 @@ function runMigrations() {
   safe("ALTER TABLE donors ADD COLUMN autopay_minute INTEGER DEFAULT 0");
   safe("ALTER TABLE donors ADD COLUMN hebrew_title TEXT");
   safe("ALTER TABLE donations ADD COLUMN label TEXT");
-  safe("ALTER TABLE email_settings ADD COLUMN postmark_key TEXT DEFAULT ''");
+ safeAlter("ALTER TABLE email_settings ADD COLUMN postmark_key TEXT DEFAULT ''");
+  safeAlter("ALTER TABLE email_settings ADD COLUMN brevo_api_key TEXT DEFAULT ''");
   safe("ALTER TABLE organizations ADD COLUMN expires_at DATETIME DEFAULT NULL");
   safe("ALTER TABLE organizations ADD COLUMN expiry_warned INTEGER DEFAULT 0");
   safe("ALTER TABLE kvitel_settings ADD COLUMN neighborhood_font TEXT DEFAULT 'Frank Ruhl Libre'");
