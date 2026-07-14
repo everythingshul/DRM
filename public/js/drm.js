@@ -2672,7 +2672,9 @@ async function _loadEmailStatus() {
   const c = $('em-status'); if (!c) return;
   try {
     const s = await API.get(`/api/orgs/${API.orgId}/email-settings/status`);
-    if (s.postmark) {
+    if (s.brevo) {
+      c.innerHTML = `<div class="alert alert-ok" style="font-size:12px">✓ Brevo API configured${s.paused?' (paused)':''}. Emails send via HTTPS — reliable delivery.</div>`;
+    } else if (s.postmark) {
       c.innerHTML = `<div class="alert alert-ok" style="font-size:12px">✓ Postmark configured${s.paused?' (paused)':''}. Best deliverability — emails should reach inbox reliably.</div>`;
     } else if (s.configured) {
       c.innerHTML = `<div class="alert alert-ok" style="font-size:12px">✓ Gmail SMTP configured${s.paused?' (paused)':''}. Emails will send but may land in spam for non-Gmail recipients. Consider adding a Postmark key above.</div>`;

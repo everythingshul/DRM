@@ -57,45 +57,28 @@ router.post('/email-settings/test', requireOrgAdmin, async (req, res) => {
     const { to } = req.body;
     const settings = get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]);
     const org = get('SELECT * FROM organizations WHERE id=?', [req.orgId]);
+    const fromName  = settings?.from_name || org?.name || 'DRM';
+    const fromEmail = settings?.smtp_email || 'noreply@everythingshul.com';
+    const toAddr    = to || settings?.smtp_email;
+    const html      = '<p>This is a test email from your DRM system. If you received this, email is working correctly.</p>';
 
-    let transporter;
-    if (settings?.postmark_key) {
-      // Use Postmark
-      transporter = nodemailer.createTransport({
-        host: 'smtp.postmarkapp.com',
-        port: 587,
-        secure: false,
-        auth: { user: settings.postmark_key, pass: settings.postmark_key }
-      });
+    if (settings?.brevo_api_key) {
+      // Use Brevo API over HTTPS — works on Render (no SMTP port blocking)
+      try {
+        await mailer.sendViaBrevoApi(settings.brevo_api_key, { from: fromEmail, fromName, to: toAddr, subject: 'DRM Test Email', html });
+      } catch(e) { return res.status(400).json({ error: `Brevo API error: ${e.message}` }); }
+    } else if (settings?.postmark_key) {
+      const transporter = nodemailer.createTransport({ host: 'smtp.postmarkapp.com', port: 587, secure: false, auth: { user: settings.postmark_key, pass: settings.postmark_key } });
+      try { await transporter.verify(); } catch(e) { return res.status(400).json({ error: `Postmark connection failed: ${e.message}` }); }
+      await mailer.sendMail({ transporter, orgId: req.orgId, to: toAddr, from: `"${fromName}" <${fromEmail}>`, subject: 'DRM Test Email', html, type: 'test', headers: { 'X-PM-Message-Stream': 'outbound' } });
     } else {
-      if (!settings?.smtp_email) return res.status(400).json({ error: 'Email not configured. Add a Postmark API key (recommended) or Gmail SMTP credentials.' });
-      if (!settings?.smtp_password) return res.status(400).json({ error: 'App Password not set. Enter it and save before testing.' });
+      if (!settings?.smtp_email)    return res.status(400).json({ error: 'Email not configured. Add a Brevo API key (recommended) above.' });
+      if (!settings?.smtp_password) return res.status(400).json({ error: 'Password not set.' });
       const port = parseInt(settings.smtp_port) || 587;
-      transporter = nodemailer.createTransport({
-        host: settings.smtp_host || 'smtp.gmail.com',
-        port: port,
-        secure: port === 465,
-        auth: { user: settings.smtp_email, pass: settings.smtp_password }
-      });
+      const transporter = nodemailer.createTransport({ host: settings.smtp_host || 'smtp.gmail.com', port, secure: port === 465, auth: { user: settings.smtp_email, pass: settings.smtp_password } });
+      try { await transporter.verify(); } catch(e) { return res.status(400).json({ error: `Connection failed: ${e.message}` }); }
+      await mailer.sendMail({ transporter, orgId: req.orgId, to: toAddr, from: `"${fromName}" <${fromEmail}>`, subject: 'DRM Test Email', html, type: 'test' });
     }
-
-    try {
-      await transporter.verify();
-    } catch (verifyErr) {
-      return res.status(400).json({ error: `Connection failed: ${verifyErr.message}` });
-    }
-
-    const fromName = settings?.from_name || org?.name || 'DRM';
-    const fromEmail = settings?.smtp_email || 'receipts@everythingshul.com';
-    await mailer.sendMail({
-      transporter, orgId: req.orgId,
-      to: to || settings?.smtp_email,
-      from: `"${fromName}" <${fromEmail}>`,
-      subject: 'DRM Test Email',
-      html: '<p>This is a test email from your DRM system. If you received this, email sending is working correctly.</p>',
-      type: 'test',
-      headers: settings?.postmark_key ? { 'X-PM-Message-Stream': 'outbound' } : {}
-    });
 
     res.json({ success: true });
   } catch (e) {
@@ -105,11 +88,13 @@ router.post('/email-settings/test', requireOrgAdmin, async (req, res) => {
 
 // ── Email status — quick check whether email is fully configured ──────────────
 router.get('/email-settings/status', (req, res) => {
-  const settings = get('SELECT smtp_email, smtp_password, donation_emails_paused, postmark_key FROM email_settings WHERE org_id = ?', [req.orgId]);
+  const settings = get('SELECT smtp_email, smtp_password, donation_emails_paused, postmark_key, brevo_api_key FROM email_settings WHERE org_id = ?', [req.orgId]);
+  const hasBrevo    = !!(settings?.brevo_api_key);
   const hasPostmark = !!(settings?.postmark_key);
-  const hasGmail   = !!(settings?.smtp_email && settings?.smtp_password);
+  const hasGmail    = !!(settings?.smtp_email && settings?.smtp_password);
   res.json({
-    configured: hasPostmark || hasGmail,
+    configured: hasBrevo || hasPostmark || hasGmail,
+    brevo:      hasBrevo,
     postmark:   hasPostmark,
     has_email:  !!settings?.smtp_email,
     has_password: !!settings?.smtp_password,
