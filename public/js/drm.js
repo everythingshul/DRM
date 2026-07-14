@@ -4095,7 +4095,12 @@ async function _loadUnassignedCards(el) {
 
   try {
     const r = await API.get(`/api/orgs/${API.orgId}/payments/vault/unassigned`);
-    if (!r.unassigned?.length) return; // all assigned — nothing to show
+    if (!r.unassigned?.length) {
+      wrap.innerHTML = `<div class="alert alert-ok" style="margin-top:16px;font-size:12px">
+        ✓ Sola vault checked — ${r.total_in_vault||0} card${r.total_in_vault!==1?'s':''} in vault, all assigned to donors.
+      </div>`;
+      return;
+    }
     wrap.innerHTML = `
       <div class="ph" style="margin-top:24px">
         <div>
@@ -4119,10 +4124,10 @@ async function _loadUnassignedCards(el) {
         </table></div>
       </div>`;
   } catch(e) {
-    // Sola not configured or vault API not available — silently skip
-    if (!e.message?.includes('not configured') && !e.message?.toLowerCase().includes('sola')) {
-      wrap.innerHTML = `<div class="alert alert-warn" style="margin-top:16px">Could not load Sola vault: ${e.message}</div>`;
-    }
+    wrap.innerHTML = `<div class="alert alert-warn" style="margin-top:16px;font-size:12px">
+      ⚠ Could not check Sola vault: ${e.message}
+      ${e.message?.includes('not configured') ? '<br>Set your Sola API key in Settings to enable vault card detection.' : ''}
+    </div>`;
   }
 }
 
