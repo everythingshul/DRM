@@ -3,7 +3,7 @@ const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const { v4: uuidv4 } = require('uuid');
 const { get, run, all } = require('../db/schema');
-const { requireAuth, requireOrg } = require('../middleware/auth');
+const { requireAuth, requireOrg, requireOrgAdmin } = require('../middleware/auth');
 const { ccSave, ccSale, ccRefund, ccVoid, dafGrant } = require('../utils/sola');
 const { sendReceiptEmail } = require('../utils/scheduler');
 
