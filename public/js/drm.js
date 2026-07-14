@@ -1921,30 +1921,24 @@ async function renderEmails(el) {
           <span class="tgl-s"></span></label></div>
         <hr class="divider">
 
-        <div style="background:var(--blue-pale);border:1.5px solid var(--blue);border-radius:6px;padding:12px 14px;margin-bottom:14px">
-          <div style="font-weight:700;color:var(--navy);margin-bottom:4px">🚀 Recommended: Postmark (best deliverability, avoids spam)</div>
-          <div style="font-size:12px;color:var(--gray-6);margin-bottom:8px">
-            Postmark is a free transactional email service. Sign up at <strong>postmarkapp.com</strong>, create a server,
-            add and verify your sending domain (everythingshul.com or your shul's domain — they walk you through SPF/DKIM),
-            then paste your Server API Token below. First 100 emails/month free, then $1.50/1000.
+        <div style="background:var(--green-pale,#f0fdf4);border:1.5px solid var(--green,#16a34a);border-radius:6px;padding:12px 14px;margin-bottom:10px">
+          <div style="font-weight:700;color:#15803d;margin-bottom:4px">🆓 Brevo API (recommended — 300/day free, works on Render)</div>
+          <div style="font-size:11px;color:var(--gray-6);margin-bottom:8px">
+            Uses HTTPS instead of SMTP — never blocked by hosting providers. Your domain is already verified in Brevo.<br>
+            Brevo → top right menu → <strong>SMTP & API → API Settings</strong> tab → Generate a new API key → paste below.
           </div>
-          <label>Postmark Server API Token <span style="font-size:11px;color:var(--gray-5)">(leave blank to keep existing)</span></label>
-          <input id="em-pmkey" type="password" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="">
-          <small style="font-size:11px;color:var(--gray-5)">If set, Postmark is used instead of Gmail SMTP — much better inbox placement.</small>
+          <label>Brevo API Key <span style="font-size:11px;color:var(--gray-5)">(leave blank to keep existing)</span></label>
+          <input id="em-brevokey" type="password" placeholder="xkeysib-..." value="">
+          <small style="font-size:11px;color:var(--gray-5)">When set, all emails send via Brevo API (HTTPS) — ignores SMTP settings below.</small>
         </div>
 
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
-          <div style="background:var(--green-pale,#f0fdf4);border:1.5px solid var(--green,#16a34a);border-radius:6px;padding:10px 12px">
-            <div style="font-weight:700;color:#15803d;margin-bottom:3px">🆓 Brevo (recommended free)</div>
-            <div style="font-size:11px;color:var(--gray-6)">300 emails/day free forever. Sign up at brevo.com → SMTP &amp; API → SMTP → copy host/port/login/password.</div>
-            <div style="font-size:11px;margin-top:4px"><code>smtp-relay.brevo.com</code> · port <code>587</code></div>
-          </div>
-          <div style="background:var(--blue-pale);border:1.5px solid var(--blue);border-radius:6px;padding:10px 12px">
-            <div style="font-weight:700;color:var(--navy);margin-bottom:3px">✉ Resend (3,000/month free)</div>
-            <div style="font-size:11px;color:var(--gray-6)">3,000 emails/month free. resend.com → API Keys → add key below as Postmark key field (uses same SMTP relay).</div>
-            <div style="font-size:11px;margin-top:4px"><code>smtp.resend.com</code> · port <code>587</code></div>
-          </div>
+        <div style="background:var(--blue-pale);border:1.5px solid var(--blue);border-radius:6px;padding:12px 14px;margin-bottom:14px">
+          <div style="font-weight:700;color:var(--navy);margin-bottom:4px">🚀 Postmark (100 emails/month free)</div>
+          <label>Postmark Server API Token <span style="font-size:11px;color:var(--gray-5)">(leave blank to keep existing)</span></label>
+          <input id="em-pmkey" type="password" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="">
         </div>
+
+
         <div style="font-size:12px;font-weight:600;color:var(--gray-7);margin-bottom:8px">Or: Gmail / Brevo / Resend / Any SMTP</div>
         <div class="r2">
           <div><label>Email / Login</label><input id="em-email" type="email" value="${cfg?.smtp_email||''}" autocomplete="email" placeholder="you@gmail.com or your Brevo login"></div>
