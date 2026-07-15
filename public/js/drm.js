@@ -2042,6 +2042,7 @@ function _emailLogRows(rows, typeLabels, typePills) {
     <td style="font-size:12px">${r.first_name?`<a href="#" onclick="event.preventDefault();DonorDetail.open('${r.donor_id}')" style="color:var(--navy)">${r.first_name} ${r.last_name}</a>`:'—'}</td>
     <td><div class="actions">
       <button class="btn btn-ghost btn-sm" onclick="_emailLogPreview('${r.id}')">Preview</button>
+      <button class="btn btn-ghost btn-sm" onclick="_emailLogViewHtml('${r.id}')">HTML</button>
       <button class="btn btn-ghost btn-sm" onclick="_emailLogForward('${r.id}')">Forward</button>
     </div></td>
   </tr>`).join('');
@@ -2055,9 +2056,9 @@ function _emailLogPreview(id) {
         style="width:100%;height:100%;border:none"
         sandbox="allow-same-origin"></iframe>
     </div>
-    <div class="bg mt">
-      <button class="btn btn-primary btn-sm" onclick="_emailLogForward('${id}')">Forward</button>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
       <button class="btn btn-ghost btn-sm" onclick="Modal.close()">Close</button>
+      <button class="btn btn-primary btn-sm" onclick="_emailLogForward('${id}')">Forward →</button>
     </div>`, {lg:true, tall:true});
 }
 
@@ -2232,10 +2233,11 @@ function _edRenderShell(name, subject) {
       <div style="overflow-y:auto;background:#e5e7eb;padding:16px" id="ed-canvas-wrap">
         <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <input id="ed-name" value="${name||''}" placeholder="Template name *"
-            style="flex:1;min-width:140px;font-size:13px;padding:6px 10px;border:1.5px solid var(--gray-3);border-radius:5px">
+            style="flex:1;min-width:140px;font-size:13px;padding:10px 14px;border:1.5px solid var(--gray-3);border-radius:6px">
           <input id="ed-subject" value="${subject||''}" placeholder="Email subject *"
-            style="flex:2;min-width:200px;font-size:13px;padding:6px 10px;border:1.5px solid var(--gray-3);border-radius:5px">
+            style="flex:2;min-width:200px;font-size:13px;padding:10px 14px;border:1.5px solid var(--gray-3);border-radius:6px">
           <button class="btn btn-primary btn-sm" onclick="_edSave()">Save</button>
+          <button class="btn btn-ghost btn-sm" onclick="_edScheduleModal()">Schedule</button>
           <button class="btn btn-ghost btn-sm" onclick="_edPreviewModal()">Preview</button>
           <button class="btn btn-ghost btn-sm" onclick="Modal.close()">Cancel</button>
         </div>
@@ -2607,22 +2609,24 @@ function _edDelBlock(idx) {
   _edRenderCanvas();
   _edRenderProps();
 }
-async function _edSave() {
+async function _edSave(returnId = false) {
   const name    = document.getElementById('ed-name')?.value?.trim();
   const subject = document.getElementById('ed-subject')?.value?.trim();
-  if (!name || !subject) { toast('Name and subject required','err'); return; }
+  if (!name || !subject) { toast('Name and subject required','err'); return null; }
   try {
     if (window._edId) {
       await API.put(`/api/orgs/${API.orgId}/email-templates/${window._edId}`, { name, subject, blocks: window._edBlocks });
       toast('Template saved ✓');
+      if (!returnId) { Modal.close(); renderEmails($('page-emails')); }
+      return window._edId;
     } else {
       const r = await API.post(`/api/orgs/${API.orgId}/email-templates`, { name, subject, blocks: window._edBlocks });
       window._edId = r.template.id;
       toast('Template created ✓');
+      if (!returnId) { Modal.close(); renderEmails($('page-emails')); }
+      return window._edId;
     }
-    Modal.close();
-    renderEmails($('page-emails'));
-  } catch(e) { toast(e.message||'Save failed','err'); }
+  } catch(e) { toast(e.message||'Save failed','err'); return null; }
 }
 async function _edPreviewModal() {
   if (!window._edId) { toast('Save first, then preview','err'); return; }
@@ -4196,4 +4200,103 @@ function _vcSelectDonor(id, name) {
   const res=$('vc-results'); if(res)res.style.display='none';
   const sel=$('vc-selected'); if(sel){sel.textContent='✓ '+name;sel.style.display='block';}
   const btn=$('vc-assign-btn'); if(btn)btn.disabled=false;
+}
+
+// ── Duplicate template ────────────────────────────────────────────────────────
+async function _emailDuplicate(id, name) {
+  try {
+    const t = await API.get(`/api/orgs/${API.orgId}/email-templates/${id}`);
+    await API.post(`/api/orgs/${API.orgId}/email-templates`, {
+      name:    `${t.name} (copy)`,
+      subject: t.subject,
+      blocks:  t.blocks,
+      description: t.description || ''
+    });
+    toast('Template duplicated ✓');
+    renderEmails($('page-emails'));
+  } catch(e) { toast(e.message||'Error','err'); }
+}
+
+// ── View raw HTML of a logged email ──────────────────────────────────────────
+async function _emailLogViewHtml(id) {
+  const row = (window._emailLogAll||[]).find(r=>r.id===id);
+  const subject = row?.subject || 'Email HTML';
+  try {
+    const res = await fetch(`/api/orgs/${API.orgId}/email-log/${id}/body`, {
+      credentials:'include', headers:{'x-org-id':API.orgId,'Authorization':'Bearer '+localStorage.getItem('drm_token')}
+    });
+    const html = await res.text();
+    Modal.open(`HTML — ${subject}`, `
+      <textarea style="width:100%;height:520px;font-size:11px;font-family:monospace;resize:vertical;
+        border:1px solid var(--gray-2);border-radius:4px;padding:10px;line-height:1.5"
+        readonly>${html.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</textarea>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+        <button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText(document.querySelector('#modal-body textarea').value.replace(/&lt;/g,'<').replace(/&gt;/g,'>'));toast('Copied ✓')">Copy HTML</button>
+        <button class="btn btn-ghost btn-sm" onclick="Modal.close()">Close</button>
+      </div>`, {lg:true, tall:true});
+  } catch(e) { toast('Could not load HTML','err'); }
+}
+
+// ── Schedule email from builder ───────────────────────────────────────────────
+function _edScheduleModal() {
+  const name    = val('ed-name')?.trim();
+  const subject = val('ed-subject')?.trim();
+  if (!name) { toast('Enter a template name first','err'); return; }
+  if (!subject) { toast('Enter a subject first','err'); return; }
+
+  const now = new Date(); now.setHours(now.getHours()+1);
+  Modal.open('Schedule This Email', `
+    <p style="font-size:13px;color:var(--gray-5);margin-bottom:12px">
+      This will save the template and schedule it to send to all donors who have an email address.
+    </p>
+    <label>Send At</label>
+    <input type="datetime-local" id="sched-at" value="${toLocalDT(now.toISOString())}">
+    <div class="bg mt">
+      <button class="btn btn-primary" id="sched-btn" onclick="_edDoSchedule()">Save & Schedule</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+async function _edDoSchedule() {
+  const btn = $('sched-btn');
+  if(btn){btn.textContent='Saving…';btn.disabled=true;}
+  try {
+    // First save the template
+    const savedId = await _edSave(true); // returns id
+    if (!savedId) { toast('Save failed','err'); if(btn){btn.textContent='Save & Schedule';btn.disabled=false;} return; }
+    // Then schedule it
+    const subject = val('ed-subject')?.trim();
+    const scheduledAt = val('sched-at');
+    // Generate HTML from blocks
+    const html = _edBlocksToHtml(window._edBlocks);
+    await API.post(API.o.schedEmails(), {
+      subject,
+      html_body: html,
+      template_id: savedId,
+      scheduled_for: scheduledAt,
+      recipient_group: 'all_donors'
+    });
+    toast('Saved & scheduled ✓');
+    Modal.close();
+    renderEmails($('page-emails'));
+  } catch(e) {
+    toast(e.message||'Schedule failed','err');
+    if(btn){btn.textContent='Save & Schedule';btn.disabled=false;}
+  }
+}
+
+function _edBlocksToHtml(blocks) {
+  // Simple HTML generation from blocks for scheduling
+  return `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
+    ${(blocks||[]).map(b => {
+      if (b.type==='header') return `<div style="background:${b.bg||'#1a3a6b'};color:${b.color||'#fff'};padding:${b.padding||'24px 32px'};text-align:${b.align||'center'};font-size:${b.size||24}px;font-weight:700">${b.text||''}</div>`;
+      if (b.type==='text') return `<div style="padding:${b.padding||'12px 32px'};font-size:${b.size||15}px;color:${b.color||'#333'};text-align:${b.align||'left'};direction:${b.dir||'ltr'}">${b.text||''}</div>`;
+      if (b.type==='divider') return `<div style="padding:${b.padding||'0 32px'}"><hr style="border:none;border-top:1px solid ${b.color||'#e5e7eb'}"></div>`;
+      if (b.type==='spacer') return `<div style="height:${b.height||20}px"></div>`;
+      if (b.type==='button') return `<div style="text-align:center;padding:${b.padding||'16px'}"><a href="${b.url||'#'}" style="background:${b.bg||'#1a3a6b'};color:${b.color||'#fff'};padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:700">${b.text||'Click Here'}</a></div>`;
+      if (b.type==='tax_footer') return `<div style="background:${b.bg||'#f9fafb'};padding:${b.padding||'16px 32px'};font-size:${b.size||12}px;color:${b.color||'#6b7280'};text-align:center">${b.text||''}</div>`;
+      if (b.type==='donation_details') return `<div style="padding:${b.padding||'0 32px'}"><table width="100%" style="border-collapse:collapse"><tr style="background:${b.headerBg||'#f0f4ff'}"><th colspan="2" style="padding:10px;color:${b.headerColor||'#1a3a6b'};text-align:left">${b.title||'Donation Details'}</th></tr><tr><td style="padding:8px">Amount</td><td>{{amount}}</td></tr><tr><td style="padding:8px">Date</td><td>{{date}}</td></tr><tr><td style="padding:8px">Transaction ID</td><td>{{transaction_id}}</td></tr></table></div>`;
+      return '';
+    }).join('')}
+  </div>`;
 }

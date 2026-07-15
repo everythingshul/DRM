@@ -936,24 +936,21 @@ router.post('/email-log/:id/forward', requireOrgAdmin, async (req, res) => {
     const { to } = req.body;
     if (!to) return res.status(400).json({ error: 'Recipient address required' });
 
-    const row = get('SELECT * FROM email_log WHERE id=? AND org_id=?',
-      [req.params.id, req.orgId]);
+    const row = get('SELECT * FROM email_log WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
     if (!row) return res.status(404).json({ error: 'Email not found' });
     if (!row.html_body) return res.status(400).json({ error: 'No body stored — cannot forward' });
 
     const settings = get('SELECT * FROM email_settings WHERE org_id=?', [req.orgId]);
-    const { buildTransporter, fromAddr, sendMail } = require('../utils/mailer');
-    const transporter = buildTransporter(settings);
-    if (!transporter) return res.status(400).json({ error: 'Email not configured. Set up SMTP or Postmark in Email Settings.' });
+    const org      = get('SELECT * FROM organizations WHERE id=?', [req.orgId]);
+    const { fromAddr, sendMail } = require('../utils/mailer');
 
-    const org = get('SELECT * FROM organizations WHERE id=?', [req.orgId]);
     await sendMail({
-      transporter, orgId: req.orgId,
+      settings, orgId: req.orgId,
       to, from: fromAddr(settings, org?.name),
       subject: `Fwd: ${row.subject}`,
       html: row.html_body,
       type: row.type,
-      donorId: row.donor_id, donationId: row.donation_id,
+      donorId: row.donor_id, donationId: row.donation_id
     });
 
     res.json({ success: true });

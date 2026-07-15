@@ -89,14 +89,14 @@ async function sendMail(opts) {
     }
 
     run(`INSERT INTO email_log (id,org_id,to_email,subject,html_body,type,status,donor_id,donation_id)
-         VALUES (?,?,?,?,?,'sent',?,?,?)`,
+         VALUES (?,?,?,?,?,?,'sent',?,?)`,
       [logId, orgId, to, subject, html||null, type, donorId, donationId]);
     console.log(`[email] ✓ ${type} → ${to}`);
     return { success: true };
 
   } catch(e) {
     run(`INSERT INTO email_log (id,org_id,to_email,subject,html_body,type,status,error,donor_id,donation_id)
-         VALUES (?,?,?,?,?,'failed',?,?,?)`,
+         VALUES (?,?,?,?,?,?,'failed',?,?,?)`,
       [logId, orgId, to, subject, html||null, type, e.message, donorId, donationId]);
     console.error(`[email] ✗ ${type} → ${to} — ${e.message}`);
     throw e;
