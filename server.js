@@ -17,7 +17,10 @@ const kvitelRouter   = require('./routes/kvitel');
 const paymentsRouter  = require('./routes/payments');
 const { router: emailTplRouter } = require('./routes/email-templates');
 const whatsappRouter = require('./routes/whatsapp');
-const recoveryRouter = require('./routes/recovery');
+const recoveryRouter       = require('./routes/recovery');
+const leadsRouter          = require('./routes/leads');
+const importsRouter        = require('./routes/imports');
+const notificationsRouter  = require('./routes/notifications');
 const { startScheduler } = require('./utils/scheduler');
 
 const app = express();
@@ -103,7 +106,7 @@ app.post('/api/orgs/:orgId/import/donors',
       const emailSet = new Set(existing.filter(d=>d.email).map(d => d.email.toLowerCase()));
       const cellSet  = new Set(existing.filter(d=>d.cell).map(d => d.cell.replace(/\D/g,'')));
 
-      let imported = 0, flagged = [], errors = [];
+      let imported = 0, flagged = [], errors = [], donorIds = [];
 
       // Build lookup sets from existing donors for duplicate detection
       const hebrewSet  = new Set(existing.filter(d=>d.hebrew_full_name).map(d=>d.hebrew_full_name.trim().toLowerCase()));
@@ -158,6 +161,27 @@ app.post('/api/orgs/:orgId/import/donors',
              (row['Notes']||row['notes']||'').toString().trim()||null
             ]);
 
+          // If flagged as duplicate, create duplicate record
+          if (dupReasons.length) {
+            // Find the matching existing donor
+            let matchId = null;
+            if (dupReasons.includes('Email') && email) {
+              const m = get('SELECT id FROM donors WHERE email=? AND org_id=? AND id!=?', [email, req.params.orgId, newId]);
+              matchId = m?.id;
+            } else if (dupReasons.includes('Cell phone') && cell) {
+              const m = get('SELECT id FROM donors WHERE cell=? AND org_id=? AND id!=?', [cell, req.params.orgId, newId]);
+              matchId = m?.id;
+            }
+            if (matchId) {
+              try {
+                run(`INSERT OR IGNORE INTO donor_duplicates (id,org_id,donor_id_a,donor_id_b) VALUES (?,?,?,?)`,
+                  [uuidv4(), req.params.orgId, matchId, newId]);
+              } catch {}
+            }
+          }
+
+          donorIds.push({ id: newId, flagged: dupReasons.length > 0, reasons: dupReasons.join(', ') });
+
           // Add to sets so within-batch duplicates are also caught
           if (hebrew) hebrewSet.add(hebrew.toLowerCase());
           if (email)  emailSet2.add(email);
@@ -172,8 +196,19 @@ app.post('/api/orgs/:orgId/import/donors',
         } catch(e) { errors.push(`${displayName}: ${e.message}`); }
       }
 
+      // Save import history
+      const importId = uuidv4();
+      run(`INSERT INTO import_history (id,org_id,imported_by,type,total_rows,imported,flagged,errors,filename)
+           VALUES (?,?,?,?,?,?,?,?,?)`,
+        [importId, req.params.orgId, req.user?.id||'unknown', 'donors',
+         rows.length, imported, flagged.length, errors.length, req.file.originalname||'upload.xlsx']);
+      for (const d of donorIds) {
+        run('INSERT INTO import_items (id,import_id,donor_id,was_flagged,flag_reasons) VALUES (?,?,?,?,?)',
+          [uuidv4(), importId, d.id, d.flagged?1:0, d.reasons||null]);
+      }
+
       try { fs.unlinkSync(req.file.path); } catch {}
-      res.json({ success: true, imported, flagged, errors: errors.slice(0,50) });
+      res.json({ success: true, imported, flagged, errors: errors.slice(0,50), import_id: importId });
     } catch(e) {
       try { if(req.file) fs.unlinkSync(req.file.path); } catch {}
       res.status(500).json({ error: e.message });
@@ -187,6 +222,9 @@ app.use('/api/orgs/:orgId/payments', paymentsRouter);
 app.use('/api/orgs/:orgId/email-templates', emailTplRouter);
 app.use('/api/orgs/:orgId/whatsapp', whatsappRouter);
 app.use('/api/recovery', recoveryRouter);
+app.use('/api/orgs/:orgId/leads', leadsRouter);
+app.use('/api/orgs/:orgId/imports', importsRouter);
+app.use('/api/orgs/:orgId/notifications', notificationsRouter);
 
 app.get('/api/setup-status', (req, res) => {
   res.json({ needsSetup: all('SELECT id FROM users LIMIT 1', []).length === 0 });

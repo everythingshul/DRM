@@ -477,6 +477,47 @@ router.post('/new-account', async (req, res) => {
   }
 });
 
+// ── Super admin: access another org (requires consent logging) ────────────────
+router.post('/super-admin/access-org', requireAuth, async (req, res) => {
+  try {
+    if (!req.user.is_super_admin) return res.status(403).json({ error: 'Super admin only' });
+    const { org_id, purpose } = req.body;
+    if (!org_id) return res.status(400).json({ error: 'org_id required' });
+
+    const org = get('SELECT * FROM organizations WHERE id=?', [org_id]);
+    if (!org) return res.status(404).json({ error: 'Org not found' });
+
+    // Log the access
+    run(`INSERT INTO super_admin_access (id,super_admin_id,org_id,granted_by,purpose) VALUES (?,?,?,?,?)`,
+      [uuidv4(), req.user.id, org_id, req.user.id, purpose||'Super admin access']);
+
+    // Generate a temporary token for this org
+    const token = generateToken({
+      userId: req.user.id, orgId: org_id,
+      isSuperAdmin: true, superAdminAccess: true
+    });
+
+    res.json({ success: true, token, org });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── User permissions (page-level) ─────────────────────────────────────────────
+router.get('/orgs/:orgId/user-permissions/:userId', requireAuth, (req, res) => {
+  const perms = all('SELECT * FROM user_permissions WHERE org_id=? AND user_id=?', [req.params.orgId, req.params.userId]);
+  res.json(perms);
+});
+
+router.put('/orgs/:orgId/user-permissions/:userId', requireAuth, (req, res) => {
+  const { permissions } = req.body; // array of {page, can_view, can_edit}
+  if (!Array.isArray(permissions)) return res.status(400).json({ error: 'permissions must be array' });
+  for (const p of permissions) {
+    run(`INSERT INTO user_permissions (id,org_id,user_id,page,can_view,can_edit) VALUES (?,?,?,?,?,?)
+         ON CONFLICT(org_id,user_id,page) DO UPDATE SET can_view=excluded.can_view,can_edit=excluded.can_edit`,
+      [uuidv4(), req.params.orgId, req.params.userId, p.page, p.can_view?1:0, p.can_edit?1:0]);
+  }
+  res.json({ success: true });
+});
+
 module.exports = router;
 
 // Super admin: list all orgs with expiry status

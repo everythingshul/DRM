@@ -143,7 +143,19 @@
 
     <div class="sb-footer">
       <span id="sb-user" class="sb-user-name"></span>
-      <button id="logout-btn" class="btn-link">Sign Out</button>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button id="notif-btn" class="btn-link" onclick="_toggleNotifications()" style="position:relative;font-size:18px;line-height:1">
+          🔔<span id="notif-badge" style="display:none;position:absolute;top:-4px;right:-4px;background:var(--red);color:#fff;font-size:9px;font-weight:700;border-radius:50%;width:16px;height:16px;line-height:16px;text-align:center" id="notif-count">0</span>
+        </button>
+        <button id="logout-btn" class="btn-link">Sign Out</button>
+      </div>
+    </div>
+    <div id="notif-panel" style="display:none;position:absolute;bottom:60px;left:0;right:0;background:#fff;border-top:1px solid var(--gray-2);border-radius:8px 8px 0 0;max-height:300px;overflow-y:auto;z-index:100;box-shadow:0 -4px 12px rgba(0,0,0,.1)">
+      <div style="padding:10px 14px;font-weight:700;font-size:13px;border-bottom:1px solid var(--gray-1);display:flex;justify-content:space-between;align-items:center">
+        Notifications
+        <button class="btn btn-ghost btn-sm" onclick="_markAllNotifRead()" style="font-size:11px">Mark all read</button>
+      </div>
+      <div id="notif-list" style="padding:8px"></div>
     </div>
   </aside>
 
@@ -160,6 +172,7 @@
     <div id="page-reports"      class="page"></div>
     <div id="page-settings"     class="page"></div>
     <div id="page-whatsapp"     class="page"></div>
+    <div id="page-leads"        class="page"></div>
     <div id="page-recovery"     class="page"></div>
   </main>
 </div>

@@ -407,6 +407,9 @@ function showApp() {
     item.onclick = () => { if (window.innerWidth <= 768) closeSidebar(); navigateTo(item.dataset.page); };
   });
   $('logout-btn').onclick = async () => { try { await API.post('/auth/logout', {}); } catch {} localStorage.removeItem('drm_token'); showLogin(); };
+  // Poll notifications every 60 seconds
+  setInterval(_loadNotifications, 60000);
+  setTimeout(_loadNotifications, 1000);
   // Show recovery link for super admins
   if (DRM.user?.is_super_admin) {
     document.querySelectorAll('.nav-super-admin').forEach(el => el.style.display = '');
@@ -439,6 +442,8 @@ function navigateTo(page) {
   // For donors page: if already rendered, just reload data (no flicker)
   if (page === 'donors' && el.querySelector('#d-tbody')) {
     Donors.load();
+  } else if (page === 'leads' && el.querySelector('#leads-list')) {
+    _loadLeads();
   } else {
     renderPage(page, el);
   }
@@ -447,7 +452,7 @@ function navigateTo(page) {
 function reloadPage() { const el = $('page-' + _currentPage); if(el) renderPage(_currentPage, el); }
 window.addEventListener('popstate', () => {
   const page = location.hash.replace('#','') || 'dashboard';
-  const valid = ['dashboard','donors','donations','verification','failures','bank','emails','kvitel','reports','settings','whatsapp','recovery'];
+  const valid = ['dashboard','donors','leads','donations','verification','failures','bank','emails','kvitel','reports','settings','whatsapp','recovery'];
   if (valid.includes(page)) { const el=$('page-'+page); if(el) el.innerHTML=''; navigateTo(page); }
 });
 
@@ -455,6 +460,7 @@ function renderPage(page, el) {
   const map = {
     dashboard:    renderDashboard,
     donors:       el => Donors.render(el),
+    leads:        renderLeads,
     donations:    renderDonations,
     verification: renderVerification,
     failures:     renderFailures,
@@ -551,7 +557,7 @@ const Donors = {
     <div class="card" style="margin-bottom:12px;padding:12px 14px">
       <div class="search-bar">
         <div class="sw" style="flex:2">
-          <input id="d-search" placeholder="Search name, email, phone, Hebrew…" autocomplete="off" autocorrect="off" spellcheck="false">
+          <input id="d-search" placeholder="Search name, email, phone, Hebrew…" autocomplete="new-password" autocorrect="off" spellcheck="false">
         </div>
         <select id="d-hood"><option value="">All Neighborhoods</option></select>
         <select id="d-label"><option value="">All Labels</option></select>
@@ -568,7 +574,8 @@ const Donors = {
     <div class="card" style="padding:0;overflow:hidden">
       <div id="d-bulk" class="bulk-bar">
         <span id="d-bulk-cnt">0 selected</span>
-        <button class="btn btn-ghost btn-sm" onclick="Donors.bulkDelete()">Delete Selected</button>
+        <button class="btn btn-ghost btn-sm" onclick="Donors.bulkLabel()">+ Add Label</button>
+        <button class="btn btn-ghost btn-sm" onclick="Donors.bulkDelete()">Delete</button>
         <button class="btn btn-ghost btn-sm" onclick="Donors.clearSel()">Clear</button>
       </div>
       <div class="tw"><table>
@@ -673,6 +680,26 @@ const Donors = {
   toggleOne(id, c) { if(c) this.selected.add(id); else this.selected.delete(id); this.updateBulk(); },
   clearSel() { this.selected.clear(); const a=$('sel-all'); if(a)a.checked=false; document.querySelectorAll('#d-tbody input[type=checkbox]').forEach(c=>c.checked=false); this.updateBulk(); },
   updateBulk() { const bar=$('d-bulk'),cnt=$('d-bulk-cnt'); if(bar)bar.className='bulk-bar'+(this.selected.size>0?' show':''); if(cnt)cnt.textContent=`${this.selected.size} selected`; },
+  async bulkLabel() {
+    if(!this.selected.size) return;
+    const labels = await API.get(`/api/orgs/${API.orgId}/labels`);
+    const donorLabels = (labels?.donor_labels || labels || []);
+    Modal.open(`Add Label to ${this.selected.size} Donor(s)`, `
+      <div style="margin-bottom:10px">
+        <div style="font-size:12px;color:var(--gray-5);margin-bottom:8px">Select a label to add to all selected donors:</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px" id="bulk-label-pills">
+          ${donorLabels.map(l=>`<button type="button" class="btn btn-ghost btn-sm" id="blp-${l.replace(/[^a-z0-9]/gi,'_')}"
+            onclick="_bulkLabelSelect('${l.replace(/'/g,"\\'")}',this)">${l}</button>`).join('')}
+        </div>
+        <input id="bulk-label-custom" placeholder="Or type a new label…" autocomplete="new-password"
+          style="padding:8px 12px;border:1.5px solid var(--gray-3);border-radius:6px;width:100%;box-sizing:border-box">
+        <input type="hidden" id="bulk-label-val" value="">
+      </div>
+      <div class="bg mt">
+        <button class="btn btn-primary" onclick="_bulkLabelApplyDonors()">Add Label</button>
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+      </div>`, {sm:true});
+  },
   bulkDelete() { if(!this.selected.size)return; confirmDlg(`Delete ${this.selected.size} donor(s)?`,async()=>{for(const id of this.selected)await API.del(API.o.donor(id)).catch(()=>{}); this.selected.clear(); toast('Deleted'); Donors.load(); }); },
   async pauseAll() { confirmDlg('Pause AutoPay for all donors?',async()=>{await API.post(`/api/orgs/${API.orgId}/donors/autopay/pause-all`,{}); toast('Paused'); Donors.load();}); },
   async resumeAll() { await API.post(`/api/orgs/${API.orgId}/donors/autopay/resume-all`,{}); toast('Resumed'); this.load(); },
@@ -1606,7 +1633,7 @@ async function renderVerification(el) {
       ${donors.length ? `
         <div class="card" style="padding:0;overflow:hidden">
           <div style="padding:12px 14px;border-bottom:1px solid var(--gray-1)">
-            <div class="sw"><input id="ver-search" placeholder="Search name, email, phone…" oninput="_filterVer()" autocomplete="off"></div>
+            <div class="sw"><input id="ver-search" autocomplete="new-password" placeholder="Search name, email, phone…" oninput="_filterVer()" autocomplete="off"></div>
           </div>
           <div class="tw"><table>
             <thead><tr>
@@ -2136,7 +2163,7 @@ async function _emailClearDefault() {
   toast('Default cleared'); renderEmails($('page-emails'));
 }
 async function _emailDelete(id, name) {
-  window.confirm2(`Delete template "${name}"?`, async () => {
+  confirmDlg(`Delete template "${name}"?`, async () => {
     await API.del(`/api/orgs/${API.orgId}/email-templates/${id}`);
     toast('Deleted'); renderEmails($('page-emails'));
   });
@@ -2238,11 +2265,11 @@ function _edRenderShell(name, subject) {
 
       <!-- Center: Canvas -->
       <div style="overflow-y:auto;background:#e5e7eb;padding:16px" id="ed-canvas-wrap">
-        <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <input id="ed-name" value="${name||''}" placeholder="Template name *"
-            style="flex:1;min-width:140px;font-size:13px;padding:10px 14px;border:1.5px solid var(--gray-3);border-radius:6px">
-          <input id="ed-subject" value="${subject||''}" placeholder="Email subject *"
-            style="flex:2;min-width:200px;font-size:13px;padding:10px 14px;border:1.5px solid var(--gray-3);border-radius:6px">
+        <div style="margin-bottom:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:#fff;padding:12px 16px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.08)">
+          <input id="ed-name" value="${name||''}" placeholder="Template name *" autocomplete="new-password"
+            style="flex:1;min-width:160px;font-size:14px;padding:11px 16px;border:2px solid var(--gray-3);border-radius:7px">
+          <input id="ed-subject" value="${subject||''}" placeholder="Email subject *" autocomplete="new-password"
+            style="flex:2;min-width:220px;font-size:14px;padding:11px 16px;border:2px solid var(--gray-3);border-radius:7px">
           <button class="btn btn-primary btn-sm" onclick="_edSave()">Save</button>
           <button class="btn btn-ghost btn-sm" onclick="_edScheduleModal()">Schedule</button>
           <button class="btn btn-ghost btn-sm" onclick="_edPreviewModal()">Preview</button>
@@ -2618,6 +2645,13 @@ function _edDelBlock(idx) {
   _edRenderProps();
 }
 async function _edSave(returnId = false) {
+  // If in HTML mode, capture raw HTML from textarea into blocks first
+  if (_edHtmlMode) {
+    const rawHtml = $('ed-html-raw')?.value?.replace(/&lt;/g,'<').replace(/&gt;/g,'>') || '';
+    if (rawHtml.trim()) {
+      window._edBlocks = [{ type: 'raw_html', html: rawHtml }];
+    }
+  }
   const name    = document.getElementById('ed-name')?.value?.trim();
   const subject = document.getElementById('ed-subject')?.value?.trim();
   if (!name || !subject) { toast('Name and subject required','err'); return null; }
@@ -2946,7 +2980,7 @@ async function renderSettings(el) {
     
     el.innerHTML = `
       <div class="ph"><div class="ph-title">Settings</div></div>
-      <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-labels">Labels</div><div class="tab" data-tc="st-tz">Timezone</div><div class="tab" data-tc="st-log">Login Log</div><div class="tab" data-tc="st-backup">Backup</div></div>
+      <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-labels">Labels</div><div class="tab" data-tc="st-tz">Timezone</div><div class="tab" data-tc="st-log">Login Log</div><div class="tab" data-tc="st-backup">Backup</div><div class="tab" data-tc="st-imports">Import History</div></div>
       <div id="st-users" class="tc on"><div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
           <strong>Users</strong>
@@ -2983,6 +3017,9 @@ async function renderSettings(el) {
       <div id="st-backup" class="tc">
         <div class="card" id="st-backup-card"><div class="spinner"></div></div>
       </div>
+      <div id="st-imports" class="tc">
+        <div class="card" id="st-imports-card"><div class="spinner"></div></div>
+      </div>
       <div id="st-log" class="tc"><div class="card">
         <div class="card-title">Login Audit Log</div>
         <div class="scroll-box"><table><thead><tr><th>Time</th><th>User</th><th>Action</th><th>IP</th></tr></thead>
@@ -2991,6 +3028,7 @@ async function renderSettings(el) {
       </div></div>`;
     tabsInit('#page-settings');
     document.querySelector('#page-settings .tab[data-tc="st-backup"]')?.addEventListener('click', _loadBackupStatus);
+    document.querySelector('#page-settings .tab[data-tc="st-imports"]')?.addEventListener('click', _loadImportHistory);
     // Load label lists when Labels tab is clicked
     document.querySelector('#page-settings .tab[data-tc="st-labels"]').addEventListener('click', _loadLabelSettings);
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
@@ -4287,34 +4325,30 @@ function _edScheduleModal() {
   if (!subject) { toast('Enter a subject first','err'); return; }
   const now = new Date(); now.setHours(now.getHours()+1);
   Modal.open('Schedule This Email', `
-    <label>Recipients</label>
-    <div style="margin-bottom:10px">
-      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:6px">
-        <input type="radio" name="sched-recip" value="all" id="sched-all" checked onchange="_schedRecipChange()">
-        <span>All donors with email address</span>
-      </label>
-      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:6px">
-        <input type="radio" name="sched-recip" value="label" id="sched-label" onchange="_schedRecipChange()">
-        <span>By label</span>
-      </label>
-      <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-        <input type="radio" name="sched-recip" value="specific" id="sched-specific" onchange="_schedRecipChange()">
-        <span>Select specific donors</span>
-      </label>
+    <div style="margin-bottom:14px">
+      <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Send To</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap" id="sched-recip-pills">
+        <button type="button" class="btn btn-primary btn-sm" id="pill-all" onclick="_schedSetRecip('all')">All Donors</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="pill-label" onclick="_schedSetRecip('label')">By Label</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="pill-specific" onclick="_schedSetRecip('specific')">Specific Donors</button>
+      </div>
+      <input type="hidden" id="sched-recip-val" value="all">
     </div>
     <div id="sched-label-wrap" style="display:none;margin-bottom:10px">
-      <select id="sched-label-sel" style="width:100%">
+      <select id="sched-label-sel" style="width:100%;padding:8px 10px;border:1.5px solid var(--gray-3);border-radius:6px">
         <option value="">Loading labels...</option>
       </select>
     </div>
     <div id="sched-specific-wrap" style="display:none;margin-bottom:10px">
-      <input id="sched-donor-search" placeholder="Search donors by name, email, phone…" oninput="_schedDonorSearch(this.value)" autocomplete="off">
-      <div id="sched-donor-results" style="max-height:160px;overflow-y:auto;border:1px solid var(--gray-2);border-radius:4px;margin-top:4px"></div>
-      <div id="sched-donor-selected" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px"></div>
+      <input id="sched-donor-search" placeholder="Search donors…" oninput="_schedDonorSearch(this.value)"
+        autocomplete="new-password"
+        style="padding:8px 12px;border:1.5px solid var(--gray-3);border-radius:6px;width:100%;box-sizing:border-box;margin-bottom:6px">
+      <div id="sched-donor-results" style="max-height:180px;overflow-y:auto;border:1.5px solid var(--gray-2);border-radius:6px"></div>
+      <div id="sched-donor-selected" style="margin-top:8px;display:flex;flex-wrap:wrap;gap:4px;min-height:24px"></div>
     </div>
     <label>Send At</label>
-    <input type="datetime-local" id="sched-at" value="${toLocalDT(now.toISOString())}">
-    <div class="bg mt">
+    <input type="datetime-local" id="sched-at" value="${toLocalDT(now.toISOString())}" style="padding:8px 12px;border:1.5px solid var(--gray-3);border-radius:6px;width:100%;box-sizing:border-box">
+    <div class="bg mt" style="padding-top:12px;border-top:1px solid var(--gray-1)">
       <button class="btn btn-primary" id="sched-btn" onclick="_edDoSchedule()">Save & Schedule</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
     </div>`, {sm:true});
@@ -4327,11 +4361,16 @@ function _edScheduleModal() {
   }).catch(()=>{});
 }
 
-function _schedRecipChange() {
-  const v = document.querySelector('input[name="sched-recip"]:checked')?.value;
+function _schedSetRecip(v) {
+  $('sched-recip-val').value = v;
+  ['all','label','specific'].forEach(p => {
+    const btn = $('pill-'+p);
+    if(btn) { btn.className = v===p ? 'btn btn-primary btn-sm' : 'btn btn-ghost btn-sm'; }
+  });
   $('sched-label-wrap').style.display    = v==='label'    ? '' : 'none';
   $('sched-specific-wrap').style.display = v==='specific' ? '' : 'none';
 }
+function _schedRecipChange() { _schedSetRecip(document.querySelector('input[name="sched-recip"]:checked')?.value||'all'); }
 
 let _schedDonorTimer;
 function _schedDonorSearch(q) {
@@ -4415,31 +4454,499 @@ function _edToggleHtml() {
   _edHtmlMode = !_edHtmlMode;
   const btn = $('ed-html-btn');
   if (_edHtmlMode) {
-    // Switch to HTML editor — generate HTML from current blocks
-    if(btn) { btn.textContent='◀ Back to Builder'; btn.style.background='var(--amber)'; btn.style.color='#fff'; }
+    if(btn) { btn.textContent='◀ Back to Builder'; btn.style.background='var(--amber)'; btn.style.color='#fff'; btn.style.border='none'; }
     const html = _edBlocksToHtml(window._edBlocks||[]);
-    canvas.innerHTML = `<div style="padding:12px">
-      <div style="font-size:11px;color:var(--gray-5);margin-bottom:6px">Edit raw HTML — click "Back to Builder" to exit. Changes here won't sync back to blocks.</div>
-      <textarea id="ed-html-raw" style="width:100%;height:480px;font-size:12px;font-family:monospace;
-        border:1px solid var(--gray-2);border-radius:4px;padding:10px;resize:vertical;line-height:1.5
-      ">${html.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</textarea>
+    canvas.innerHTML = `<div style="padding:16px">
+      <div style="font-size:11px;color:var(--gray-5);margin-bottom:8px;line-height:1.5">
+        ✏️ Edit raw HTML below. When you click <strong>Save</strong> the HTML will be saved as-is.
+      </div>
+      <textarea id="ed-html-raw" style="width:100%;height:520px;font-size:12px;font-family:monospace;
+        border:1.5px solid var(--gray-3);border-radius:6px;padding:12px;resize:vertical;line-height:1.6;box-sizing:border-box
+      " placeholder="Paste or write HTML here...">${html.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</textarea>
     </div>`;
   } else {
-    // Switch back to block builder — restore from blocks
-    if(btn) { btn.textContent='‹/› HTML'; btn.style.background=''; btn.style.color=''; }
+    if(btn) { btn.textContent='‹/› HTML'; btn.style.background=''; btn.style.color=''; btn.style.border=''; }
+    // When exiting HTML mode, if there was raw HTML, keep it in blocks
     _edRenderBlocks();
   }
 }
 
-// Hook _edSave to use raw HTML when in HTML mode
-const _edSave_orig = _edSave;
-_edSave = async function(returnId = false) {
-  if (_edHtmlMode) {
-    // In HTML mode — save raw HTML as a single html block
-    const rawHtml = $('ed-html-raw')?.value?.replace(/&lt;/g,'<').replace(/&gt;/g,'>');
-    if (rawHtml) {
-      window._edBlocks = [{ type: 'raw_html', html: rawHtml }];
+// Patch window._edSave after page load to capture HTML mode saves
+document.addEventListener('DOMContentLoaded', () => {}, false);
+// Instead, intercept at call time by checking _edHtmlMode inside _edSave
+// (added inline in _edSave function above via the returnId block)
+
+// ── Mass label helpers ────────────────────────────────────────────────────────
+function _bulkLabelSelect(label, btn) {
+  $('bulk-label-val').value = label;
+  $('bulk-label-custom').value = '';
+  document.querySelectorAll('#bulk-label-pills .btn').forEach(b => b.className='btn btn-ghost btn-sm');
+  btn.className = 'btn btn-primary btn-sm';
+}
+
+async function _bulkLabelApplyDonors() {
+  const label = val('bulk-label-custom')?.trim() || val('bulk-label-val');
+  if (!label) { toast('Select or enter a label','err'); return; }
+  try {
+    const ids = [...(Donors.selected || new Set())];
+    if (!ids.length) { toast('No donors selected','err'); return; }
+    // Apply label to each selected donor
+    await Promise.all(ids.map(async id => {
+      const donor = await API.get(`/api/orgs/${API.orgId}/donors/${id}`);
+      const labels = jsonParse(donor.labels||'[]');
+      if (!labels.includes(label)) {
+        labels.push(label);
+        await API.put(`/api/orgs/${API.orgId}/donors/${id}`, { labels });
+      }
+    }));
+    toast(`Label "${label}" added to ${ids.length} donor(s) ✓`);
+    Modal.close();
+    Donors.load();
+  } catch(e) { toast(e.message||'Error','err'); }
+}
+
+async function _donBulkLabel() {
+  if(!window._donSelected?.size) return;
+  const labels = await API.get(`/api/orgs/${API.orgId}/labels`);
+  const donationLabels = (labels?.donation_labels || []);
+  Modal.open(`Add Label to ${window._donSelected.size} Donation(s)`, `
+    <div style="margin-bottom:10px">
+      <div style="font-size:12px;color:var(--gray-5);margin-bottom:8px">Select a label to add to selected donations:</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px" id="bulk-label-pills">
+        ${donationLabels.map(l=>`<button type="button" class="btn btn-ghost btn-sm"
+          onclick="_bulkLabelSelect('${l.replace(/'/g,"\\\\'")}',this)">${l}</button>`).join('')}
+      </div>
+      <input id="bulk-label-custom" placeholder="Or type a new label…" autocomplete="new-password"
+        style="padding:8px 12px;border:1.5px solid var(--gray-3);border-radius:6px;width:100%;box-sizing:border-box">
+      <input type="hidden" id="bulk-label-val" value="">
+    </div>
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_donBulkLabelApply()">Add Label</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+async function _donBulkLabelApply() {
+  const label = val('bulk-label-custom')?.trim() || val('bulk-label-val');
+  if (!label) { toast('Select or enter a label','err'); return; }
+  try {
+    const ids = [...(window._donSelected || new Set())];
+    await Promise.all(ids.map(id => API.put(`/api/orgs/${API.orgId}/donations/${id}/label`, { label })));
+    toast(`Label "${label}" added to ${ids.length} donation(s) ✓`);
+    Modal.close();
+    _donClearSel();
+    renderDonations($('page-donations'));
+  } catch(e) { toast(e.message||'Error','err'); }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// LEADS PAGE
+// ══════════════════════════════════════════════════════════════════════════════
+
+let _leadsData = [], _leadStaff = [], _leadCategories = [];
+
+async function renderLeads(el) {
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    [_leadStaff, _leadCategories] = await Promise.all([
+      API.get(`/api/orgs/${API.orgId}/leads/staff/list`).catch(()=>[]),
+      API.get(`/api/orgs/${API.orgId}/leads/categories/list`).catch(()=>[])
+    ]);
+    el.innerHTML = `
+      <div class="ph">
+        <div><div class="ph-title">Leads</div><div class="ph-sub" id="leads-count"></div></div>
+        <div class="bg">
+          <button class="btn btn-ghost btn-sm" onclick="_leadCategories_manage()">⚙ Categories</button>
+          <button class="btn btn-primary btn-sm" onclick="_leadAdd()">+ Add Lead</button>
+        </div>
+      </div>
+      <div class="card" style="padding:12px 14px;margin-bottom:12px">
+        <div class="search-bar">
+          <div class="sw" style="flex:2"><input id="leads-search" placeholder="Search name, email, phone…" oninput="_leadsFilter()" autocomplete="new-password"></div>
+          <select id="leads-status" onchange="_leadsFilter()">
+            <option value="">All Statuses</option>
+            <option value="new">New</option>
+            <option value="in_progress">In Progress</option>
+            <option value="converted">Converted</option>
+            <option value="lost">Lost</option>
+          </select>
+          <select id="leads-assigned" onchange="_leadsFilter()">
+            <option value="">All Assignees</option>
+            ${_leadStaff.map(s=>`<option value="${s.id}">${s.full_name}</option>`).join('')}
+          </select>
+          <select id="leads-category" onchange="_leadsFilter()">
+            <option value="">All Categories</option>
+            ${_leadCategories.map(c=>`<option value="${c.name}">${c.name}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div id="leads-list"></div>`;
+    await _loadLeads();
+  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+
+async function _loadLeads() {
+  const q = val('leads-search')||'';
+  const status = val('leads-status')||'';
+  const assigned = val('leads-assigned')||'';
+  const category = val('leads-category')||'';
+  const p = new URLSearchParams();
+  if (q) p.set('q',q);
+  if (status) p.set('status',status);
+  if (assigned) p.set('assigned_to',assigned);
+  if (category) p.set('category',category);
+
+  try {
+    _leadsData = await API.get(`/api/orgs/${API.orgId}/leads?${p}`);
+    const cnt = $('leads-count'); if(cnt) cnt.textContent = `${_leadsData.length} lead${_leadsData.length!==1?'s':''}`;
+    _renderLeadsList();
+  } catch(e) { const l=$('leads-list'); if(l) l.innerHTML=`<div class="alert alert-err">${e.message}</div>`; }
+}
+
+function _leadsFilter() { clearTimeout(window._leadsSearchTimer); window._leadsSearchTimer = setTimeout(_loadLeads, 300); }
+
+const statusColors = { new:'var(--blue)', in_progress:'var(--amber)', converted:'var(--green)', lost:'var(--gray-4)' };
+const statusLabels = { new:'New', in_progress:'In Progress', converted:'Converted', lost:'Lost' };
+
+function _renderLeadsList() {
+  const list = $('leads-list'); if(!list) return;
+  if (!_leadsData.length) { list.innerHTML = '<div class="card"><div class="empty"><h3>No leads found</h3></div></div>'; return; }
+  list.innerHTML = `<div class="card" style="padding:0;overflow:hidden"><div class="tw"><table>
+    <thead><tr>
+      <th>Name</th><th>Contact</th><th>Category</th><th>Assigned To</th>
+      <th>Status</th><th>Follow-ups</th><th>Next Follow-up</th><th></th>
+    </tr></thead>
+    <tbody>${_leadsData.map(l => {
+      const name = [l.title,l.first_name,l.last_name].filter(Boolean).join(' ') || '—';
+      const cat = _leadCategories.find(c=>c.name===l.category);
+      const nextFu = l.next_followup ? fmtD(l.next_followup) : '—';
+      const isOverdue = l.next_followup && new Date(l.next_followup) < new Date();
+      return `<tr>
+        <td><div style="font-weight:600;font-size:13px">${name}</div>
+          ${l.hebrew_full_name?`<div style="font-family:var(--font-he);font-size:11px;color:var(--gray-5)">${l.hebrew_full_name}</div>`:''}
+        </td>
+        <td style="font-size:12px">${l.cell||l.email||'—'}</td>
+        <td>${cat?`<span class="pill" style="background:${cat.color}20;color:${cat.color};font-size:10px">${cat.name}</span>`:(l.category||'—')}</td>
+        <td style="font-size:12px">${l.assigned_name||'<span style="color:var(--gray-4)">Unassigned</span>'}</td>
+        <td><span class="pill" style="background:${statusColors[l.status]||'var(--gray-2)'}20;color:${statusColors[l.status]||'var(--gray-5)'};font-size:11px">${statusLabels[l.status]||l.status}</span></td>
+        <td style="font-size:12px;text-align:center">${l.followup_count||0}</td>
+        <td style="font-size:12px;${isOverdue?'color:var(--red);font-weight:700':'color:var(--gray-5)'}">${nextFu}${isOverdue?' ⚠':''}</td>
+        <td><div class="actions">
+          <button class="btn btn-blue btn-sm" onclick="_leadView('${l.id}')">View</button>
+          <button class="btn btn-ghost btn-sm" onclick="_leadAddFollowup('${l.id}')">Follow Up</button>
+          ${l.status!=='converted'?`<button class="btn btn-green btn-sm" onclick="_leadConvert('${l.id}')">Convert</button>`:'<span class="pill pill-green" style="font-size:10px">Converted</span>'}
+        </div></td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div></div>`;
+}
+
+function _leadAdd() {
+  Modal.open('Add Lead', _leadForm(), {lg:true});
+}
+
+async function _leadView(id) {
+  try {
+    const lead = await API.get(`/api/orgs/${API.orgId}/leads/${id}`);
+    const cat = _leadCategories.find(c=>c.name===lead.category);
+    Modal.open(`Lead: ${[lead.title,lead.first_name,lead.last_name].filter(Boolean).join(' ')||'Unnamed'}`, `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+        <div>
+          <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;margin-bottom:6px">Contact Info</div>
+          ${lead.email?`<div style="font-size:13px;margin-bottom:4px">📧 ${lead.email}</div>`:''}
+          ${lead.cell?`<div style="font-size:13px;margin-bottom:4px">📱 ${lead.cell}</div>`:''}
+          ${lead.home_phone?`<div style="font-size:13px;margin-bottom:4px">☎ ${lead.home_phone}</div>`:''}
+          ${lead.street?`<div style="font-size:12px;color:var(--gray-5)">${[lead.street,lead.apt,lead.city,lead.state,lead.zip].filter(Boolean).join(', ')}</div>`:''}
+        </div>
+        <div>
+          <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;margin-bottom:6px">Details</div>
+          <div style="font-size:13px;margin-bottom:4px">Assigned: <strong>${lead.assigned_name||'Unassigned'}</strong></div>
+          <div style="font-size:13px;margin-bottom:4px">Status: <span class="pill" style="background:${statusColors[lead.status]}20;color:${statusColors[lead.status]};font-size:11px">${statusLabels[lead.status]||lead.status}</span></div>
+          ${cat?`<div style="font-size:13px;margin-bottom:4px">Category: <span class="pill" style="background:${cat.color}20;color:${cat.color};font-size:11px">${cat.name}</span></div>`:''}
+          ${lead.notes?`<div style="font-size:12px;color:var(--gray-6);margin-top:8px">${lead.notes}</div>`:''}
+        </div>
+      </div>
+      <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;margin-bottom:8px">Follow-up History (${lead.followups?.length||0})</div>
+      <div style="max-height:200px;overflow-y:auto;border:1px solid var(--gray-2);border-radius:6px;margin-bottom:14px">
+        ${lead.followups?.length ? lead.followups.map(fu=>`
+          <div style="padding:10px 14px;border-bottom:1px solid var(--gray-1)">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
+              <strong style="font-size:12px">${fu.done_by_name||'Unknown'}</strong>
+              <span style="font-size:11px;color:var(--gray-5)">${fmtDT(fu.created_at)}</span>
+            </div>
+            <div style="font-size:13px;margin-bottom:4px">${fu.notes}</div>
+            ${fu.next_followup_date?`<div style="font-size:11px;color:var(--blue)">📅 Next follow-up: ${fmtD(fu.next_followup_date)}</div>`:''}
+          </div>`).join('') : '<div style="padding:14px;text-align:center;color:var(--gray-4);font-size:13px">No follow-ups yet</div>'}
+      </div>
+      <div class="bg">
+        <button class="btn btn-primary btn-sm" onclick="_leadEdit('${id}')">Edit</button>
+        <button class="btn btn-ghost btn-sm" onclick="Modal.close();_leadAddFollowup('${id}')">+ Follow Up</button>
+        ${lead.status!=='converted'?`<button class="btn btn-green btn-sm" onclick="Modal.close();_leadConvert('${id}')">Convert to Donor</button>`:''}
+        <button class="btn btn-icon" style="color:var(--red)" onclick="confirmDlg('Delete this lead?',async()=>{await API.del('/api/orgs/'+API.orgId+'/leads/${id}');toast('Deleted');Modal.close();_loadLeads();})">&#10005;</button>
+      </div>`, {lg:true});
+  } catch(e) { toast(e.message,'err'); }
+}
+
+function _leadForm(lead={}) {
+  return `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div><label>Title</label><input id="lf-title" value="${lead.title||''}" autocomplete="new-password"></div>
+      <div><label>Category</label>
+        <select id="lf-category">
+          <option value="">No category</option>
+          ${_leadCategories.map(c=>`<option value="${c.name}" ${lead.category===c.name?'selected':''}>${c.name}</option>`).join('')}
+        </select>
+      </div>
+      <div><label>First Name</label><input id="lf-first" value="${lead.first_name||''}" autocomplete="new-password"></div>
+      <div><label>Last Name</label><input id="lf-last" value="${lead.last_name||''}" autocomplete="new-password"></div>
+      <div><label>Hebrew Title</label><input id="lf-htitle" value="${lead.hebrew_title||''}" autocomplete="new-password"></div>
+      <div><label>Hebrew Name</label><input id="lf-hname" value="${lead.hebrew_full_name||''}" autocomplete="new-password" style="direction:rtl;font-family:var(--font-he)"></div>
+      <div><label>Email</label><input id="lf-email" type="email" value="${lead.email||''}" autocomplete="new-password"></div>
+      <div><label>Cell</label><input id="lf-cell" value="${lead.cell||''}" autocomplete="new-password"></div>
+      <div><label>Home Phone</label><input id="lf-home" value="${lead.home_phone||''}" autocomplete="new-password"></div>
+      <div><label>Status</label>
+        <select id="lf-status">
+          ${['new','in_progress','lost'].map(s=>`<option value="${s}" ${(lead.status||'new')===s?'selected':''}>${statusLabels[s]||s}</option>`).join('')}
+        </select>
+      </div>
+      <div><label>Assign To</label>
+        <select id="lf-assigned">
+          <option value="">Unassigned</option>
+          ${_leadStaff.map(s=>`<option value="${s.id}" ${lead.assigned_to===s.id?'selected':''}>${s.full_name}</option>`).join('')}
+        </select>
+      </div>
+      <div><label>Street</label><input id="lf-street" value="${lead.street||''}" autocomplete="new-password"></div>
+      <div><label>City</label><input id="lf-city" value="${lead.city||''}" autocomplete="new-password"></div>
+    </div>
+    <label style="margin-top:10px">Notes</label>
+    <textarea id="lf-notes" style="min-height:80px">${lead.notes||''}</textarea>
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_leadSave('${lead.id||''}')">Save Lead</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`;
+}
+
+async function _leadSave(id='') {
+  const data = {
+    title: val('lf-title'), first_name: val('lf-first'), last_name: val('lf-last'),
+    hebrew_title: val('lf-htitle'), hebrew_full_name: val('lf-hname'),
+    email: val('lf-email'), cell: val('lf-cell'), home_phone: val('lf-home'),
+    street: val('lf-street'), city: val('lf-city'),
+    category: val('lf-category'), status: val('lf-status'),
+    assigned_to: val('lf-assigned')||null, notes: val('lf-notes')
+  };
+  try {
+    if (id) await API.put(`/api/orgs/${API.orgId}/leads/${id}`, data);
+    else await API.post(`/api/orgs/${API.orgId}/leads`, data);
+    toast('Lead saved ✓'); Modal.close(); _loadLeads();
+  } catch(e) { toast(e.message||'Error','err'); }
+}
+
+async function _leadEdit(id) {
+  try {
+    const lead = await API.get(`/api/orgs/${API.orgId}/leads/${id}`);
+    Modal.open('Edit Lead', _leadForm(lead), {lg:true});
+  } catch(e) { toast(e.message,'err'); }
+}
+
+function _leadAddFollowup(leadId) {
+  Modal.open('Add Follow-Up', `
+    <div style="font-size:13px;color:var(--gray-5);margin-bottom:12px">
+      Your name will be auto-signed on this follow-up.
+    </div>
+    <label>Notes <span style="color:var(--red)">*</span></label>
+    <textarea id="fu-notes" placeholder="How did the call go? What was discussed?" style="min-height:100px"></textarea>
+    <label style="margin-top:10px">Next Follow-up Date</label>
+    <input type="date" id="fu-date" value="${new Date(Date.now()+7*86400000).toISOString().slice(0,10)}">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_leadSaveFollowup('${leadId}')">Save Follow-up</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+async function _leadSaveFollowup(leadId) {
+  const notes = val('fu-notes')?.trim();
+  if (!notes) { toast('Notes required','err'); return; }
+  try {
+    await API.post(`/api/orgs/${API.orgId}/leads/${leadId}/followup`, {
+      notes, next_followup_date: val('fu-date')||null
+    });
+    toast('Follow-up saved ✓'); Modal.close(); _loadLeads();
+  } catch(e) { toast(e.message||'Error','err'); }
+}
+
+async function _leadConvert(id) {
+  confirmDlg('Convert this lead to a donor? They will appear in the Donors page.', async () => {
+    try {
+      const r = await API.post(`/api/orgs/${API.orgId}/leads/${id}/convert`, {});
+      toast('Lead converted to donor ✓');
+      _loadLeads();
+      // Optionally navigate to the new donor
+      if (r.donor_id) { navigateTo('donors'); }
+    } catch(e) { toast(e.message||'Error','err'); }
+  });
+}
+
+function _leadCategories_manage() {
+  const renderCats = () => `
+    <div id="cat-list" style="margin-bottom:12px">
+      ${_leadCategories.length ? _leadCategories.map(c=>`
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--gray-1)">
+          <div style="width:14px;height:14px;border-radius:3px;background:${c.color};flex-shrink:0"></div>
+          <span style="flex:1;font-size:13px">${c.name}</span>
+          <button class="btn btn-icon" style="color:var(--red)" onclick="API.del('/api/orgs/'+API.orgId+'/leads/categories/${c.id}').then(()=>{_leadCategories=_leadCategories.filter(x=>x.id!='${c.id}');$('cat-modal-body').innerHTML=renderCats()+'<div>'+addCatForm()+'</div>';}).catch(e=>toast(e.message,'err'))">✕</button>
+        </div>`).join('') : '<div style="font-size:13px;color:var(--gray-4);text-align:center;padding:8px">No categories yet</div>'}
+    </div>`;
+  const addCatForm = () => `
+    <div style="display:flex;gap:8px;align-items:flex-end">
+      <div style="flex:1"><label>Name</label><input id="cat-name" autocomplete="new-password"></div>
+      <div><label>Color</label><input type="color" id="cat-color" value="#6366f1" style="width:48px;height:38px;padding:2px;border-radius:4px;border:1px solid var(--gray-2)"></div>
+      <button class="btn btn-primary" onclick="
+        const n=val('cat-name')?.trim(),c=val('cat-color');
+        if(!n){toast('Enter a name','err');return;}
+        API.post('/api/orgs/'+API.orgId+'/leads/categories/list',{name:n,color:c})
+          .then(r=>{_leadCategories.push(r.category);toast('Added');renderLeads($('page-leads'));Modal.close();})
+          .catch(e=>toast(e.message,'err'))
+      ">Add</button>
+    </div>`;
+  Modal.open('Manage Lead Categories', `<div id="cat-modal-body">${renderCats()}<hr class="divider">${addCatForm()}</div>`, {sm:true});
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// NOTIFICATIONS
+// ══════════════════════════════════════════════════════════════════════════════
+let _notifOpen = false;
+
+async function _loadNotifications() {
+  try {
+    const notifs = await API.get(`/api/orgs/${API.orgId}/notifications`);
+    const unread = notifs.filter(n=>!n.is_read).length;
+    const badge = $('notif-badge'), count = $('notif-count');
+    if (badge) badge.style.display = unread > 0 ? '' : 'none';
+    if (count) count.textContent = unread;
+    const list = $('notif-list');
+    if (list) {
+      list.innerHTML = notifs.length ? notifs.map(n=>`
+        <div onclick="_notifClick('${n.id}','${n.link||''}')"
+          style="padding:8px 10px;border-radius:6px;cursor:pointer;margin-bottom:4px;
+          background:${n.is_read?'transparent':'var(--blue-pale)'};border:1px solid ${n.is_read?'transparent':'var(--blue-light)'}">
+          <div style="font-size:12px;font-weight:${n.is_read?'400':'700'}">${n.title}</div>
+          ${n.body?`<div style="font-size:11px;color:var(--gray-5);margin-top:2px">${n.body}</div>`:''}
+          <div style="font-size:10px;color:var(--gray-4);margin-top:2px">${fmtDT(n.created_at)}</div>
+        </div>`).join('')
+        : '<div style="text-align:center;color:var(--gray-4);font-size:13px;padding:12px">No notifications</div>';
     }
-  }
-  return _edSave_orig(returnId);
-};
+  } catch {}
+}
+
+function _toggleNotifications() {
+  _notifOpen = !_notifOpen;
+  const panel = $('notif-panel');
+  if (panel) panel.style.display = _notifOpen ? '' : 'none';
+  if (_notifOpen) _loadNotifications();
+}
+
+async function _notifClick(id, link) {
+  await API.put(`/api/orgs/${API.orgId}/notifications/${id}/read`, {}).catch(()=>{});
+  if (link && link.startsWith('#')) navigateTo(link.replace('#',''));
+  _loadNotifications();
+  _toggleNotifications();
+}
+
+async function _markAllNotifRead() {
+  await API.put(`/api/orgs/${API.orgId}/notifications/read-all`, {}).catch(()=>{});
+  _loadNotifications();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SUPER ADMIN ORG ACCESS
+// ══════════════════════════════════════════════════════════════════════════════
+async function _superAdminAccessOrg(orgId, orgName) {
+  Modal.open('Access Organisation', `
+    <div class="alert alert-warn" style="margin-bottom:14px;font-size:13px">
+      ⚠ You are about to access <strong>${orgName}</strong>'s data as a super admin.
+      This access will be logged including your reason.
+    </div>
+    <label>Reason for access <span style="color:var(--red)">*</span></label>
+    <input id="sa-reason" placeholder="e.g. Technical support, investigating issue…" autocomplete="new-password">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_superAdminDoAccess('${orgId}')">Grant Access & Switch</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+async function _superAdminDoAccess(orgId) {
+  const reason = val('sa-reason')?.trim();
+  if (!reason) { toast('Enter a reason','err'); return; }
+  try {
+    const r = await API.post('/api/auth/super-admin/access-org', { org_id: orgId, purpose: reason });
+    if (r.token) {
+      // Store original token so we can go back
+      if (!localStorage.getItem('drm_token_original')) {
+        localStorage.setItem('drm_token_original', localStorage.getItem('drm_token'));
+      }
+      localStorage.setItem('drm_token', r.token);
+    }
+    Modal.close();
+    toast(`Now accessing ${r.org.name}`);
+    // Reload the app with new org context
+    window.location.reload();
+  } catch(e) { toast(e.message||'Error','err'); }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// IMPORT HISTORY (in Settings)
+// ══════════════════════════════════════════════════════════════════════════════
+async function _loadImportHistory() {
+  const wrap = $('st-imports-card'); if(!wrap) return;
+  wrap.innerHTML = '<div class="spinner"></div>';
+  try {
+    const imports = await API.get(`/api/orgs/${API.orgId}/imports`);
+    if (!imports.length) { wrap.innerHTML = '<div class="empty"><p>No imports yet.</p></div>'; return; }
+    wrap.innerHTML = `
+      <div class="tw"><table>
+        <thead><tr><th>Date</th><th>File</th><th>By</th><th>Imported</th><th>Flagged</th><th>Status</th><th></th></tr></thead>
+        <tbody>${imports.map(i=>`<tr>
+          <td style="font-size:12px">${fmtDT(i.created_at)}</td>
+          <td style="font-size:12px;font-family:monospace">${i.filename||'—'}</td>
+          <td style="font-size:12px">${i.imported_by_name||'—'}</td>
+          <td style="font-weight:600">${i.imported}</td>
+          <td style="color:${i.flagged?'var(--amber)':'var(--gray-4)'}">${i.flagged||0}</td>
+          <td><span class="pill" style="font-size:10px;background:${i.status==='deleted'?'var(--red-pale)':'var(--green-pale)'};color:${i.status==='deleted'?'var(--red)':'var(--green)'}">${i.status}</span></td>
+          <td>${DRM.user?.is_super_admin && i.status!=='deleted' ?
+            `<button class="btn btn-ghost btn-sm" onclick="_viewImport('${i.id}')">View</button>
+             <button class="btn btn-icon" style="color:var(--red)" onclick="_deleteImport('${i.id}')">🗑</button>` : '—'
+          }</td>
+        </tr>`).join('')}</tbody>
+      </table></div>`;
+  } catch(e) { wrap.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+
+async function _viewImport(id) {
+  try {
+    const imp = await API.get(`/api/orgs/${API.orgId}/imports/${id}`);
+    Modal.open(`Import: ${imp.filename||id}`, `
+      <div style="font-size:12px;color:var(--gray-5);margin-bottom:10px">
+        ${imp.imported} donors imported · ${imp.flagged||0} flagged · ${fmtDT(imp.created_at)}
+      </div>
+      <div class="tw" style="max-height:400px;overflow-y:auto"><table>
+        <thead><tr><th>Name</th><th>Email</th><th>Flagged</th></tr></thead>
+        <tbody>${(imp.items||[]).map(item=>`<tr>
+          <td style="font-size:13px">${item.first_name||''} ${item.last_name||''}</td>
+          <td style="font-size:12px">${item.email||'—'}</td>
+          <td>${item.was_flagged?`<span class="pill pill-amber" style="font-size:10px">${item.flag_reasons||'duplicate'}</span>`:'—'}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+      <div class="bg mt"><button class="btn btn-ghost" onclick="Modal.close()">Close</button></div>`, {lg:true});
+  } catch(e) { toast(e.message,'err'); }
+}
+
+async function _deleteImport(id) {
+  confirmDlg('Delete this import? Donors created by this import (with no donations) will be permanently deleted. Donors with donations will be kept.', async () => {
+    try {
+      const r = await API.del(`/api/orgs/${API.orgId}/imports/${id}`);
+      toast(`Deleted ${r.deleted} donors. ${r.skipped} skipped (had donations).`);
+      _loadImportHistory();
+    } catch(e) { toast(e.message,'err'); }
+  });
+}
