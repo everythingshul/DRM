@@ -38,17 +38,7 @@ async function sendReceiptEmail(donor, donation, org) {
       return;
     }
 
-    // Only send receipt if NO default receipt template is set
-    // (when a default is set, it means the org manages receipts manually via the email designer)
-    const { get: dbGet } = require('../db/schema');
-    const hasDefaultTemplate = dbGet(
-      'SELECT id FROM email_templates WHERE org_id=? AND is_default_receipt=1 LIMIT 1',
-      [org.id]
-    );
-    if (hasDefaultTemplate) {
-      console.log(`[receipt] Skipping — org has a default receipt template set (receipts managed via Email Designer)`);
-      return;
-    }
+
     const settings = get('SELECT * FROM email_settings WHERE org_id = ?', [org.id]);
     if (!settings?.brevo_api_key && !settings?.smtp_email) {
       console.log(`[receipt] Skipping — no email provider configured for org ${org.id}. Add Brevo API key or Gmail SMTP in Email Settings.`);

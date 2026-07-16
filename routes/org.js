@@ -279,7 +279,10 @@ router.get('/reports/donors', (req, res) => {
   const { format = 'json' } = req.query;
   const donors = all(`
     SELECT d.*, n.name_he as neighborhood_name,
-           (SELECT COALESCE(SUM(amount),0) FROM donations WHERE donor_id = d.id AND status = 'completed') as total_donated
+           (SELECT COALESCE(SUM(amount),0) FROM donations WHERE donor_id=d.id AND status='completed') as total_donated,
+           (SELECT COUNT(*) FROM donations WHERE donor_id=d.id AND status='completed') as donation_count,
+           (SELECT MAX(donation_date) FROM donations WHERE donor_id=d.id AND status='completed') as last_donation_date,
+           (SELECT COUNT(*) FROM recurring_schedules WHERE donor_id=d.id AND status='active') as active_recurring
     FROM donors d
     LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
     WHERE d.org_id = ?
@@ -288,17 +291,118 @@ router.get('/reports/donors', (req, res) => {
 
   if (format === 'xlsx') {
     const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.json_to_sheet(donors.map(d => ({
-      'Title': d.title, 'First Name': d.first_name, 'Last Name': d.last_name,
-      'Hebrew Title': d.hebrew_title, 'Hebrew Name': d.hebrew_full_name,
-      'Cell': d.cell, 'Home': d.home_phone, 'Email': d.email,
-      'Neighborhood': d.neighborhood_name,
-      'Address': [d.street, d.apt, d.city, d.state, d.zip].filter(Boolean).join(', '),
-      'Labels': d.labels, 'Total Donated': d.total_donated,
-      'Auto Pay': d.autopay_enabled ? 'Yes' : 'No',
-      'Created': d.created_at
-    })));
-    XLSX.utils.book_append_sheet(wb, ws, 'Donors');
+
+    // ── Sheet 1: Donors ──────────────────────────────────────────────────────
+    const ws1 = XLSX.utils.json_to_sheet(donors.map(d => {
+      // Parse labels JSON
+      let labels = '';
+      try { labels = JSON.parse(d.labels||'[]').join(', '); } catch {}
+
+      // Get payment methods for this donor
+      const cards = all(
+        'SELECT type, label, last_four, card_brand, daf_name, other_description, is_default FROM payment_methods WHERE donor_id=? ORDER BY is_default DESC',
+        [d.id]
+      );
+      const cardsStr = cards.map(c => {
+        if (c.type === 'credit_card') return `${c.card_brand||'Card'} ••${c.last_four||''}${c.label?' ('+c.label+')':''}${c.is_default?' [default]':''}`;
+        if (c.type === 'daf') return `DAF: ${c.daf_name||''}${c.is_default?' [default]':''}`;
+        return `${c.type}${c.label?' ('+c.label+')':''}`;
+      }).join(' | ');
+
+      return {
+        'Title':              d.title || '',
+        'First Name':         d.first_name || '',
+        'Last Name':          d.last_name || '',
+        'Hebrew Title':       d.hebrew_title || '',
+        'Hebrew Name':        d.hebrew_full_name || '',
+        'Email':              d.email || '',
+        'Cell':               d.cell || '',
+        'Home Phone':         d.home_phone || '',
+        'Street':             d.street || '',
+        'Apt':                d.apt || '',
+        'City':               d.city || '',
+        'State':              d.state || '',
+        'Zip':                d.zip || '',
+        'Neighborhood':       d.neighborhood_name || '',
+        'Labels':             labels,
+        'Notes':              d.notes || '',
+        'Total Donated':      parseFloat(d.total_donated||0).toFixed(2),
+        'Donation Count':     d.donation_count || 0,
+        'Last Donation':      d.last_donation_date ? d.last_donation_date.slice(0,10) : '',
+        'Active Recurring':   d.active_recurring ? 'Yes' : 'No',
+        'Auto Pay':           d.autopay_enabled ? 'Yes' : 'No',
+        'Cards on File':      cardsStr,
+        'Kvitel Enabled':     d.kvitel_enabled ? 'Yes' : 'No',
+        'Emails Paused':      d.donation_emails_paused ? 'Yes' : 'No',
+        'Sola Customer ID':   d.sola_customer_id || '',
+        'Created':            d.created_at ? d.created_at.slice(0,10) : '',
+        'Last Verified':      d.info_verified_at ? d.info_verified_at.slice(0,10) : ''
+      };
+    }));
+    ws1['!cols'] = [
+      {wch:8},{wch:14},{wch:16},{wch:12},{wch:18},{wch:28},{wch:14},{wch:14},
+      {wch:22},{wch:6},{wch:14},{wch:6},{wch:8},{wch:16},{wch:20},{wch:30},
+      {wch:12},{wch:10},{wch:14},{wch:10},{wch:10},{wch:40},{wch:10},{wch:10},{wch:18},{wch:12},{wch:14}
+    ];
+    XLSX.utils.book_append_sheet(wb, ws1, 'Donors');
+
+    // ── Sheet 2: Payment Methods ──────────────────────────────────────────────
+    const allCards = all(`
+      SELECT pm.*, d.first_name, d.last_name, d.email
+      FROM payment_methods pm
+      JOIN donors d ON pm.donor_id = d.id
+      WHERE pm.org_id = ?
+      ORDER BY d.last_name, d.first_name
+    `, [req.orgId]);
+    if (allCards.length) {
+      const ws2 = XLSX.utils.json_to_sheet(allCards.map(c => ({
+        'Donor First Name':  c.first_name,
+        'Donor Last Name':   c.last_name,
+        'Donor Email':       c.email || '',
+        'Type':              c.type,
+        'Label':             c.label || '',
+        'Card Brand':        c.card_brand || '',
+        'Last Four':         c.last_four || '',
+        'DAF Name':          c.daf_name || '',
+        'Description':       c.other_description || '',
+        'Is Default':        c.is_default ? 'Yes' : 'No',
+        'Sola Token':        c.sola_token || '',
+        'Added':             c.created_at ? c.created_at.slice(0,10) : ''
+      })));
+      XLSX.utils.book_append_sheet(wb, ws2, 'Payment Methods');
+    }
+
+    // ── Sheet 3: Donation History ─────────────────────────────────────────────
+    const donations = all(`
+      SELECT don.*, d.first_name, d.last_name, d.email,
+             pm.label as card_label, pm.last_four, pm.card_brand, pm.type as card_type
+      FROM donations don
+      JOIN donors d ON don.donor_id = d.id
+      LEFT JOIN payment_methods pm ON don.payment_method_id = pm.id
+      WHERE don.org_id = ?
+      ORDER BY don.donation_date DESC
+    `, [req.orgId]);
+    if (donations.length) {
+      const ws3 = XLSX.utils.json_to_sheet(donations.map(d => ({
+        'Date':              d.donation_date ? d.donation_date.slice(0,10) : '',
+        'First Name':        d.first_name,
+        'Last Name':         d.last_name,
+        'Email':             d.email || '',
+        'Amount':            parseFloat(d.amount||0).toFixed(2),
+        'Method':            d.method,
+        'Card':              d.card_brand ? `${d.card_brand} ••${d.last_four||''}` : '',
+        'Label':             d.label || '',
+        'Status':            d.status,
+        'Transaction ID':    d.transaction_id || '',
+        'Notes':             d.notes || '',
+        'Is Autopay':        d.is_autopay ? 'Yes' : 'No',
+        'Is Recurring':      d.is_recurring ? 'Yes' : 'No',
+        'Receipt Sent':      d.receipt_sent ? 'Yes' : 'No',
+        'Refund Amount':     d.refund_amount ? parseFloat(d.refund_amount).toFixed(2) : ''
+      })));
+      XLSX.utils.book_append_sheet(wb, ws3, 'Donations');
+    }
+
     const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
     res.setHeader('Content-Disposition', 'attachment; filename=donors-export.xlsx');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
