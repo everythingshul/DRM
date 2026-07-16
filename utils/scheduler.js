@@ -603,6 +603,43 @@ async function runDailyBackup() {
 
 }
 
+async function processFollowupNotifications() {
+  const today = new Date().toISOString().slice(0, 10);
+  // Find follow-ups due today that haven't been notified yet
+  const due = all(`
+    SELECT lf.*, l.first_name, l.last_name, l.org_id, l.assigned_to
+    FROM lead_followups lf
+    JOIN leads l ON l.id = lf.lead_id
+    WHERE lf.next_followup_date = ? AND lf.notified = 0 AND l.assigned_to IS NOT NULL
+  `, [today]);
+
+  for (const fu of due) {
+    try {
+      // Notify assigned fundraiser
+      run(`INSERT INTO notifications (id, org_id, user_id, type, title, body, link)
+           VALUES (?, ?, ?, 'followup_due', ?, ?, ?)`,
+        [require('uuid').v4(), fu.org_id, fu.assigned_to,
+         `Follow-up due: ${fu.first_name||''} ${fu.last_name||''}`,
+         `Scheduled follow-up today. Notes: ${fu.notes?.slice(0,80)||'—'}`,
+         `#leads/${fu.lead_id}`]);
+      // Also notify org admins
+      const admins = all(`SELECT u.id FROM users u JOIN org_users ou ON ou.user_id=u.id
+        WHERE ou.org_id=? AND ou.role='admin' AND u.id!=?`, [fu.org_id, fu.assigned_to]);
+      for (const admin of admins) {
+        run(`INSERT INTO notifications (id, org_id, user_id, type, title, body, link) VALUES (?, ?, ?, 'followup_due', ?, ?, ?)`,
+          [require('uuid').v4(), fu.org_id, admin.id,
+           `Follow-up due: ${fu.first_name||''} ${fu.last_name||''}`,
+           `Assigned to ${fu.done_by_name||'staff'}. Follow-up scheduled today.`,
+           `#leads/${fu.lead_id}`]);
+      }
+      run('UPDATE lead_followups SET notified=1 WHERE id=?', [fu.id]);
+      console.log(`[followup] Notified for lead ${fu.lead_id}`);
+    } catch(e) {
+      console.error(`[followup] Notification error: ${e.message}`);
+    }
+  }
+}
+
 function startScheduler() {
   cron.schedule('* * * * *', async () => {
     try {
@@ -621,6 +658,12 @@ function startScheduler() {
   cron.schedule('0 9 * * *', async () => {
     try { await processExpiryWarnings(); }
     catch(e) { console.error('Expiry warning error:', e.message); }
+  });
+
+  // Check follow-up notifications every hour
+  cron.schedule('0 * * * *', async () => {
+    try { await processFollowupNotifications(); }
+    catch(e) { console.error('Follow-up notification error:', e.message); }
   });
 
   // Daily backup at 2am

@@ -246,13 +246,15 @@ router.post('/:id/verify', (req, res) => {
   res.json({ success: true });
 });
 
-// Delete donor
+// Delete donor — preserve donations for financial tracking
 router.delete('/:id', (req, res) => {
   const existing = get('SELECT id FROM donors WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
   if (!existing) return res.status(404).json({ error: 'Donor not found' });
   run('DELETE FROM scheduled_charges WHERE donor_id = ?', [req.params.id]);
+  run('DELETE FROM recurring_schedules WHERE donor_id = ?', [req.params.id]);
   run('DELETE FROM payment_methods WHERE donor_id = ?', [req.params.id]);
-  run('DELETE FROM donations WHERE donor_id = ?', [req.params.id]);
+  // Keep donations — set donor_id to null so financial records are preserved
+  run('UPDATE donations SET donor_id = NULL WHERE donor_id = ?', [req.params.id]);
   run('DELETE FROM donors WHERE id = ?', [req.params.id]);
   res.json({ success: true });
 });

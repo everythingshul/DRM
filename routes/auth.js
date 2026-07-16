@@ -566,6 +566,13 @@ router.get('/access-requests', requireAuth, requireOrg, (req, res) => {
   res.json(requests);
 });
 
+// ── Super admin: see their own access requests ────────────────────────────────
+router.get('/access-requests/mine', requireAuth, (req, res) => {
+  if (!req.user.is_super_admin) return res.status(403).json({ error: 'Super admin only' });
+  const requests = all(`SELECT * FROM access_requests WHERE super_admin_id=? ORDER BY created_at DESC`, [req.user.id]);
+  res.json(requests);
+});
+
 // ── Org admin: approve or deny an access request ──────────────────────────────
 router.post('/access-requests/:id/respond', requireAuth, requireOrg, requireOrgAdmin, (req, res) => {
   try {

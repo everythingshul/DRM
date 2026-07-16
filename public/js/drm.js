@@ -153,17 +153,25 @@ function confirmDlg(msg, yes) {
 }
 
 function fmt$(n) { return '$' + parseFloat(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function _tz() {
+  if (window._orgTz) return window._orgTz;
+  try { return JSON.parse(DRM.org?.settings||'{}').timezone || 'America/New_York'; } catch { return 'America/New_York'; }
+}
 function fmtD(d) {
   if (!d) return '—';
   try {
+    // Date-only strings: treat as local date in org timezone
     if (/^\d{4}-\d{2}-\d{2}$/.test(d)) {
-      const [y,m,day]=d.split('-').map(Number);
-      return new Date(y,m-1,day).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});
+      return new Date(d+'T12:00:00').toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric',timeZone:_tz()});
     }
-    return new Date(d).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});
+    return new Date(d).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric',timeZone:_tz()});
   } catch { return d; }
 }
-function fmtDT(d) { if (!d) return '—'; try { return new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch { return d; } }
+function fmtDT(d) {
+  if (!d) return '—';
+  try { return new Date(d).toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit',timeZone:_tz()}); }
+  catch { return d; }
+}
 function age(m) { if (!m && m !== 0) return '—'; const mo = parseInt(m); if (mo < 12) return mo + 'mo'; const y = Math.floor(mo / 12), r = mo % 12; return r ? `${y}y ${r}mo` : `${y}y`; }
 function fmtMethod(m) { return { credit_card: 'Credit Card', daf: 'DAF', check: 'Check', cash: 'Cash', wire: 'Wire', other: 'Other' }[m] || m; }
 function fmtFreq(f) { return { weekly: 'Weekly', biweekly: 'Bi-Weekly', monthly: 'Monthly', quarterly: 'Quarterly', yearly: 'Yearly', once: 'One-Time' }[f] || f; }
@@ -407,9 +415,11 @@ function showApp() {
     item.onclick = () => { if (window.innerWidth <= 768) closeSidebar(); navigateTo(item.dataset.page); };
   });
   $('logout-btn').onclick = async () => { try { await API.post('/auth/logout', {}); } catch {} localStorage.removeItem('drm_token'); showLogin(); };
-  // Poll notifications every 60 seconds
-  setInterval(_loadNotifications, 60000);
-  setTimeout(_loadNotifications, 1000);
+  // Poll notifications every 15 seconds for liveness
+  setInterval(_loadNotifications, 15000);
+  setTimeout(_loadNotifications, 500);
+  // Also refresh when window gets focus
+  window.addEventListener('focus', _loadNotifications);
   // Show recovery link for super admins
   if (DRM.user?.is_super_admin) {
     document.querySelectorAll('.nav-super-admin').forEach(el => el.style.display = '');
@@ -2988,7 +2998,7 @@ async function renderSettings(el) {
         <div class="card" style="margin-bottom:12px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
             <strong>My Account</strong>
-            <button class="btn btn-ghost btn-sm" onclick="_editAccountInfo()">✏ Edit</button>
+            ${DRM.user?.is_super_admin?'<button class="btn btn-ghost btn-sm" onclick="_editAccountInfo()">✏ Edit</button>':''}
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px">
             <div><span style="color:var(--gray-5);font-size:11px">Organisation</span><div style="font-weight:600">${DRM.org?.name||'—'}</div></div>
@@ -5080,7 +5090,7 @@ async function _loadImportHistory() {
             </div>
           </div>
           <div style="display:flex;align-items:center;gap:6px">
-            ${DRM.user?.is_super_admin && i.status!=='deleted' ? `
+            ${DRM.user?.is_super_admin ? `
               <button class="btn btn-icon" style="color:var(--red)" title="Delete this entire import batch"
                 onclick="event.stopPropagation();_deleteImport('${i.id}')">🗑</button>` : ''}
             <span id="imp-arrow-${i.id}" style="color:var(--gray-4);font-size:12px;transition:transform .2s">▼</span>
@@ -5223,10 +5233,14 @@ async function _checkAccessRequests() {
 
 async function _respondAccessRequest(requestId, action) {
   try {
-    await API.post(`/api/auth/access-requests/${requestId}/respond`, { action });
+    const r = await API.post(`/api/auth/access-requests/${requestId}/respond`, { action });
     toast(action === 'approve' ? 'Access approved ✓' : 'Access denied');
-    _checkAccessRequests();
-    _loadNotifications();
+    // Remove banner immediately without waiting for reload
+    const banner = $('access-req-banner');
+    if (banner) banner.remove();
+    // Refresh notifications immediately
+    await _loadNotifications();
+    // If approved, the super admin will see a notification — they use it to switch in
   } catch(e) { toast(e.message,'err'); }
 }
 
@@ -5491,14 +5505,10 @@ function _showScheduledFollowups() {
 
 // ── Account info editing ──────────────────────────────────────────────────────
 function _editAccountInfo() {
-  Modal.open('Edit Account Info', `
+  if (!DRM.user?.is_super_admin) { toast('Super admin only','err'); return; }
+  Modal.open('Edit Organisation Info', `
     <label>Organisation Name</label>
     <input id="acc-org-name" value="${DRM.org?.name||''}" autocomplete="new-password">
-    <hr class="divider">
-    <label>My Full Name</label>
-    <input id="acc-my-name" value="${DRM.user?.full_name||''}" autocomplete="new-password">
-    <label>My Email</label>
-    <input id="acc-my-email" type="email" value="${DRM.user?.email||''}" autocomplete="new-password">
     <div class="bg mt">
       <button class="btn btn-primary" onclick="_saveAccountInfo()">Save</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
@@ -5508,16 +5518,7 @@ function _editAccountInfo() {
 async function _saveAccountInfo() {
   try {
     const orgName = val('acc-org-name')?.trim();
-    const myName  = val('acc-my-name')?.trim();
-    const myEmail = val('acc-my-email')?.trim();
-    // Update org name
-    if (orgName && orgName !== DRM.org?.name) {
-      await API.put(`/api/orgs/${API.orgId}/settings`, { name: orgName });
-    }
-    // Update my profile
-    if (myName || myEmail) {
-      await API.put(`/api/orgs/${API.orgId}/users/${DRM.user.id}/profile`, { full_name: myName, email: myEmail });
-    }
+    if (orgName) await API.put(`/api/orgs/${API.orgId}/settings`, { name: orgName });
     toast('Saved ✓');
     Modal.close();
     renderSettings($('page-settings'));
