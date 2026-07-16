@@ -412,6 +412,77 @@ function runMigrations() {
   // Invite permissions column
   safe("ALTER TABLE org_users ADD COLUMN permissions TEXT DEFAULT '{}'");
   safe("ALTER TABLE org_users ADD COLUMN invited_by TEXT");
+  // New tables — add as migrations since DB already exists
+  try { db.run(`CREATE TABLE IF NOT EXISTS import_history (
+    id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
+    imported_by TEXT NOT NULL, type TEXT DEFAULT 'donors',
+    total_rows INTEGER DEFAULT 0, imported INTEGER DEFAULT 0,
+    flagged INTEGER DEFAULT 0, errors INTEGER DEFAULT 0,
+    filename TEXT, status TEXT DEFAULT 'completed',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`); saveDb(); } catch(e) {}
+  try { db.run(`CREATE TABLE IF NOT EXISTS import_items (
+    id TEXT PRIMARY KEY, import_id TEXT NOT NULL,
+    donor_id TEXT NOT NULL, was_flagged INTEGER DEFAULT 0,
+    flag_reasons TEXT
+  )`); saveDb(); } catch(e) {}
+  try { db.run(`CREATE TABLE IF NOT EXISTS donor_duplicates (
+    id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
+    donor_id_a TEXT NOT NULL, donor_id_b TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    resolved_by TEXT, resolved_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(donor_id_a, donor_id_b)
+  )`); saveDb(); } catch(e) {}
+  try { db.run(`CREATE TABLE IF NOT EXISTS leads (
+    id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
+    title TEXT, first_name TEXT, last_name TEXT,
+    hebrew_title TEXT, hebrew_full_name TEXT,
+    email TEXT, cell TEXT, home_phone TEXT,
+    street TEXT, apt TEXT, city TEXT, state TEXT, zip TEXT,
+    neighborhood_id TEXT, labels TEXT DEFAULT '[]',
+    category TEXT, notes TEXT, assigned_to TEXT,
+    status TEXT DEFAULT 'new', converted_donor_id TEXT,
+    created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`); saveDb(); } catch(e) {}
+  try { db.run(`CREATE TABLE IF NOT EXISTS lead_followups (
+    id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, org_id TEXT NOT NULL,
+    notes TEXT NOT NULL, next_followup_date DATE,
+    done_by TEXT NOT NULL, done_by_name TEXT,
+    notified INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`); saveDb(); } catch(e) {}
+  try { db.run(`CREATE TABLE IF NOT EXISTS lead_categories (
+    id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
+    name TEXT NOT NULL, color TEXT DEFAULT '#6366f1',
+    sort_order INTEGER DEFAULT 0
+  )`); saveDb(); } catch(e) {}
+  try { db.run(`CREATE TABLE IF NOT EXISTS user_permissions (
+    id TEXT PRIMARY KEY, org_id TEXT NOT NULL, user_id TEXT NOT NULL,
+    page TEXT NOT NULL, can_view INTEGER DEFAULT 1, can_edit INTEGER DEFAULT 1,
+    UNIQUE(org_id, user_id, page)
+  )`); saveDb(); } catch(e) {}
+  try { db.run(`CREATE TABLE IF NOT EXISTS notifications (
+    id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
+    user_id TEXT NOT NULL, type TEXT NOT NULL,
+    title TEXT NOT NULL, body TEXT, link TEXT,
+    is_read INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`); saveDb(); } catch(e) {}
+  try { db.run(`CREATE TABLE IF NOT EXISTS super_admin_access (
+    id TEXT PRIMARY KEY, super_admin_id TEXT NOT NULL,
+    org_id TEXT NOT NULL, granted_by TEXT,
+    purpose TEXT, status TEXT DEFAULT 'pending',
+    accessed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`); saveDb(); } catch(e) {}
+  try { db.run(`CREATE TABLE IF NOT EXISTS access_requests (
+    id TEXT PRIMARY KEY, super_admin_id TEXT NOT NULL,
+    super_admin_name TEXT, org_id TEXT NOT NULL,
+    purpose TEXT, status TEXT DEFAULT 'pending',
+    token TEXT, expires_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`); saveDb(); } catch(e) {}
   // Verify column exists
   try {
     const cols = db.exec("PRAGMA table_info(email_settings)");

@@ -169,6 +169,14 @@ router.post('/orgs/:orgId/users', requireAuth, requireOrg, requireOrgAdmin, asyn
 
     run('INSERT INTO org_users (id, org_id, user_id, role, invited_by) VALUES (?, ?, ?, ?, ?)',
       [uuidv4(), req.orgId, user.id, role, req.user.id]);
+    // Save page permissions
+    if (Array.isArray(permissions) && permissions.length) {
+      for (const p of permissions) {
+        run(`INSERT INTO user_permissions (id,org_id,user_id,page,can_view,can_edit) VALUES (?,?,?,?,?,?)
+             ON CONFLICT(org_id,user_id,page) DO UPDATE SET can_view=excluded.can_view,can_edit=excluded.can_edit`,
+          [uuidv4(), req.orgId, user.id, p.page, p.can_view?1:0, p.can_edit?1:0]);
+      }
+    }
 
     res.json({ success: true, user: { id: user.id, email: user.email, full_name: user.full_name, role } });
   } catch (e) {
@@ -200,7 +208,7 @@ router.put('/orgs/:orgId/users/:userId/password', requireAuth, requireOrg, requi
 // Invite user by email — sends setup link, no password set by admin
 router.post('/orgs/:orgId/users/invite', requireAuth, requireOrg, requireOrgAdmin, async (req, res) => {
   try {
-    const { email, role = 'staff' } = req.body;
+    const { email, role = 'staff', permissions = [] } = req.body;
     if (!email) return res.status(400).json({ error: 'Email required' });
 
     // Check if user already exists in org
@@ -225,6 +233,14 @@ router.post('/orgs/:orgId/users/invite', requireAuth, requireOrg, requireOrgAdmi
 
     run('INSERT INTO org_users (id, org_id, user_id, role, invited_by) VALUES (?, ?, ?, ?, ?)',
       [uuidv4(), req.orgId, user.id, role, req.user.id]);
+    // Save page permissions
+    if (Array.isArray(permissions) && permissions.length) {
+      for (const p of permissions) {
+        run(`INSERT INTO user_permissions (id,org_id,user_id,page,can_view,can_edit) VALUES (?,?,?,?,?,?)
+             ON CONFLICT(org_id,user_id,page) DO UPDATE SET can_view=excluded.can_view,can_edit=excluded.can_edit`,
+          [uuidv4(), req.orgId, user.id, p.page, p.can_view?1:0, p.can_edit?1:0]);
+      }
+    }
 
     // Generate a setup token (same JWT mechanism, 48h)
     const { generateToken } = require('../middleware/auth');
@@ -482,28 +498,75 @@ router.post('/new-account', async (req, res) => {
   }
 });
 
-// ── Super admin: access another org (requires consent logging) ────────────────
-router.post('/super-admin/access-org', requireAuth, async (req, res) => {
+// ── Super admin: request access to an org (org admin must approve) ───────────
+router.post('/super-admin/request-access', requireAuth, async (req, res) => {
   try {
     if (!req.user.is_super_admin) return res.status(403).json({ error: 'Super admin only' });
     const { org_id, purpose } = req.body;
-    if (!org_id) return res.status(400).json({ error: 'org_id required' });
-
+    if (!org_id || !purpose) return res.status(400).json({ error: 'org_id and purpose required' });
     const org = get('SELECT * FROM organizations WHERE id=?', [org_id]);
     if (!org) return res.status(404).json({ error: 'Org not found' });
 
-    // Log the access
-    run(`INSERT INTO super_admin_access (id,super_admin_id,org_id,granted_by,purpose) VALUES (?,?,?,?,?)`,
-      [uuidv4(), req.user.id, org_id, req.user.id, purpose||'Super admin access']);
+    // Create pending access request
+    const requestId = uuidv4();
+    const expires = new Date(Date.now() + 24*60*60*1000).toISOString();
+    run(`INSERT INTO access_requests (id,super_admin_id,super_admin_name,org_id,purpose,status,expires_at)
+         VALUES (?,?,?,?,?,?,?)`,
+      [requestId, req.user.id, req.user.full_name||req.user.email, org_id, purpose, 'pending', expires]);
 
-    // Generate a temporary token for this org
-    const token = generateToken({
-      userId: req.user.id, orgId: org_id,
-      isSuperAdmin: true, superAdminAccess: true
-    });
-
-    res.json({ success: true, token, org });
+    // Notify org admins
+    const admins = all(`SELECT u.id FROM users u JOIN org_users ou ON ou.user_id=u.id WHERE ou.org_id=? AND ou.role='admin'`, [org_id]);
+    for (const admin of admins) {
+      run(`INSERT INTO notifications (id,org_id,user_id,type,title,body,link) VALUES (?,?,?,?,?,?,?)`,
+        [uuidv4(), org_id, admin.id, 'access_request',
+         `Access request from ${req.user.full_name||'Super Admin'}`,
+         `Reason: ${purpose}. Please approve or deny in Settings.`,
+         `#settings`]);
+    }
+    res.json({ success: true, request_id: requestId, message: 'Access request sent to org admin' });
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Org admin: list pending access requests ────────────────────────────────────
+router.get('/access-requests', requireAuth, requireOrg, (req, res) => {
+  const requests = all(`SELECT * FROM access_requests WHERE org_id=? AND status='pending' ORDER BY created_at DESC`, [req.orgId]);
+  res.json(requests);
+});
+
+// ── Org admin: approve or deny an access request ──────────────────────────────
+router.post('/access-requests/:id/respond', requireAuth, requireOrg, requireOrgAdmin, (req, res) => {
+  try {
+    const { action } = req.body; // 'approve' or 'deny'
+    const request = get('SELECT * FROM access_requests WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
+    if (!request) return res.status(404).json({ error: 'Request not found' });
+    if (request.status !== 'pending') return res.status(400).json({ error: 'Already responded' });
+
+    if (action === 'approve') {
+      const token = generateToken({ userId: request.super_admin_id, orgId: req.orgId, superAdminAccess: true });
+      run(`UPDATE access_requests SET status='approved',token=?,granted_by=? WHERE id=?`, [token, req.user.id, req.params.id]);
+      run(`INSERT INTO super_admin_access (id,super_admin_id,org_id,granted_by,purpose) VALUES (?,?,?,?,?)`,
+        [uuidv4(), request.super_admin_id, req.orgId, req.user.id, request.purpose]);
+      // Notify super admin
+      run(`INSERT INTO notifications (id,org_id,user_id,type,title,body) VALUES (?,?,?,?,?,?)`,
+        [uuidv4(), req.orgId, request.super_admin_id, 'access_approved',
+         `Access approved for ${get('SELECT name FROM organizations WHERE id=?',[req.orgId])?.name}`,
+         `Your access request was approved. Go to All Orgs → Access to use it.`]);
+      res.json({ success: true, token });
+    } else {
+      run(`UPDATE access_requests SET status='denied' WHERE id=?`, [req.params.id]);
+      res.json({ success: true });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Super admin: use approved token to switch into org ────────────────────────
+router.get('/access-requests/:id/token', requireAuth, (req, res) => {
+  if (!req.user.is_super_admin) return res.status(403).json({ error: 'Super admin only' });
+  const request = get('SELECT * FROM access_requests WHERE id=? AND super_admin_id=? AND status=?', [req.params.id, req.user.id, 'approved']);
+  if (!request) return res.status(404).json({ error: 'No approved request found' });
+  if (new Date(request.expires_at) < new Date()) return res.status(400).json({ error: 'Access expired' });
+  const org = get('SELECT * FROM organizations WHERE id=?', [request.org_id]);
+  res.json({ token: request.token, org });
 });
 
 // ── User permissions (page-level) ─────────────────────────────────────────────
@@ -544,9 +607,9 @@ router.get('/orgs', requireAuth, (req, res) => {
 // Super admin: set/update expiry date for an org
 router.put('/orgs/:orgId/expiry', requireAuth, (req, res) => {
   if (!req.user.is_super_admin) return res.status(403).json({ error: 'Super admin only' });
-  const { expires_at } = req.body;
-  // Reset warning flags when expiry is updated
-  run('UPDATE organizations SET expires_at=?, expiry_warned=0 WHERE id=?',
-    [expires_at || null, req.params.orgId]);
+  const { expires_at, expiry_date, name } = req.body;
+  const expiryVal = expiry_date || expires_at || null;
+  if (name) run('UPDATE organizations SET name=? WHERE id=?', [name, req.params.orgId]);
+  run('UPDATE organizations SET expires_at=?, expiry_warned=0 WHERE id=?', [expiryVal, req.params.orgId]);
   res.json({ success: true });
 });

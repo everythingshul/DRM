@@ -452,7 +452,7 @@ function navigateTo(page) {
 function reloadPage() { const el = $('page-' + _currentPage); if(el) renderPage(_currentPage, el); }
 window.addEventListener('popstate', () => {
   const page = location.hash.replace('#','') || 'dashboard';
-  const valid = ['dashboard','donors','leads','donations','verification','failures','bank','emails','kvitel','reports','settings','whatsapp','recovery'];
+  const valid = ['dashboard','donors','leads','followups','donations','verification','failures','bank','emails','kvitel','reports','settings','whatsapp','recovery'];
   if (valid.includes(page)) { const el=$('page-'+page); if(el) el.innerHTML=''; navigateTo(page); }
 });
 
@@ -461,6 +461,7 @@ function renderPage(page, el) {
     dashboard:    renderDashboard,
     donors:       el => Donors.render(el),
     leads:        renderLeads,
+    followups:    renderScheduledFollowups,
     donations:    renderDonations,
     verification: renderVerification,
     failures:     renderFailures,
@@ -574,7 +575,9 @@ const Donors = {
     <div class="card" style="padding:0;overflow:hidden">
       <div id="d-bulk" class="bulk-bar">
         <span id="d-bulk-cnt">0 selected</span>
-        <button class="btn btn-ghost btn-sm" onclick="Donors.bulkLabel()">+ Add Label</button>
+        <button class="btn btn-ghost btn-sm" onclick="Donors.bulkLabel()">+ Label</button>
+        <button class="btn btn-ghost btn-sm" onclick="Donors.bulkNeighborhood()">🏘 Neighborhood</button>
+        <button class="btn btn-ghost btn-sm" onclick="Donors.bulkAutopay()">⚡ AutoPay</button>
         <button class="btn btn-ghost btn-sm" onclick="Donors.bulkDelete()">Delete</button>
         <button class="btn btn-ghost btn-sm" onclick="Donors.clearSel()">Clear</button>
       </div>
@@ -3033,12 +3036,86 @@ async function renderSettings(el) {
     document.querySelector('#page-settings .tab[data-tc="st-backup"]')?.addEventListener('click', _loadBackupStatus);
     document.querySelector('#page-settings .tab[data-tc="st-imports"]')?.addEventListener('click', _loadImportHistory);
     document.querySelector('#page-settings .tab[data-tc="st-all-orgs"]')?.addEventListener('click', _loadAllOrgs);
+    // Check for pending access requests for org admins
+    _checkAccessRequests();
     // Load label lists when Labels tab is clicked
     document.querySelector('#page-settings .tab[data-tc="st-labels"]').addEventListener('click', _loadLabelSettings);
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
-function _inviteUser(){Modal.open('Invite User',`<p style="color:var(--gray-5);font-size:13px;margin-bottom:12px">They'll receive a setup link to create their own password.</p><label>Email *</label><input id="iu-email" type="email" autocomplete="off"><label>Role</label><select id="iu-role"><option value="staff">Staff</option><option value="admin">Admin</option></select><div id="iu-res" style="display:none;margin-top:10px"></div><div class="bg mt"><button class="btn btn-primary" onclick="_doInviteUser()">Send Invite</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
-async function _doInviteUser(){try{const r=await API.post(`/api/orgs/${API.orgId}/users/invite`,{email:val('iu-email'),role:val('iu-role')});const res=$('iu-res');res.innerHTML=r.emailSent?`<div class="alert alert-ok">Invite sent to ${val('iu-email')}</div>`:`<div class="alert alert-warn">Email not configured. Share this link:<br><a href="${r.setupUrl}" target="_blank" style="font-size:11px;word-break:break-all">${r.setupUrl}</a></div>`;res.style.display='block';renderSettings($('page-settings'));}catch(e){toast(e.message||'Unknown error','err');}}
+function _inviteUser() {
+  const pages = [
+    {id:'donors',     label:'Donors',     note:'Can hide donations & adding donations'},
+    {id:'donations',  label:'Donations',  note:''},
+    {id:'leads',      label:'Leads',      note:''},
+    {id:'verification',label:'Info Check',note:''},
+    {id:'failures',   label:'Failed Charges',note:''},
+    {id:'bank',       label:'Bank',       note:''},
+    {id:'emails',     label:'Emails',     note:''},
+    {id:'kvitel',     label:'Kvitel',     note:''},
+    {id:'reports',    label:'Reports',    note:''},
+    {id:'settings',   label:'Settings',   note:''},
+  ];
+  Modal.open('Invite User', `
+    <p style="color:var(--gray-5);font-size:13px;margin-bottom:12px">They'll receive a link to create their password.</p>
+    <div class="r2">
+      <div><label>Email *</label><input id="iu-email" type="email" autocomplete="new-password"></div>
+      <div><label>Role</label>
+        <select id="iu-role">
+          <option value="staff">Staff (limited)</option>
+          <option value="admin">Admin (full access)</option>
+        </select>
+      </div>
+    </div>
+    <div style="margin-top:14px">
+      <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Page Permissions</div>
+      <div style="font-size:11px;color:var(--gray-4);margin-bottom:8px">Leave all on for full access. Admins always have full access regardless.</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr>
+          <th style="text-align:left;padding:4px 8px;color:var(--gray-5);font-weight:600">Page</th>
+          <th style="padding:4px 8px;color:var(--gray-5);font-weight:600;text-align:center">View</th>
+          <th style="padding:4px 8px;color:var(--gray-5);font-weight:600;text-align:center">Edit/Create</th>
+        </tr></thead>
+        <tbody>
+          ${pages.map(p=>`<tr style="border-top:1px solid var(--gray-1)">
+            <td style="padding:6px 8px">
+              ${p.label}
+              ${p.note?`<div style="font-size:10px;color:var(--gray-4)">${p.note}</div>`:''}
+            </td>
+            <td style="text-align:center;padding:6px 8px">
+              <input type="checkbox" id="perm-view-${p.id}" checked onchange="if(!this.checked)document.getElementById('perm-edit-${p.id}').checked=false">
+            </td>
+            <td style="text-align:center;padding:6px 8px">
+              <input type="checkbox" id="perm-edit-${p.id}" checked onchange="if(this.checked)document.getElementById('perm-view-${p.id}').checked=true">
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div id="iu-res" style="display:none;margin-top:10px"></div>
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_doInviteUser()">Send Invite</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {lg:true});
+}
+async function _doInviteUser() {
+  try {
+    const pages = ['donors','donations','leads','verification','failures','bank','emails','kvitel','reports','settings'];
+    const permissions = pages.map(p => ({
+      page: p,
+      can_view: $('perm-view-'+p)?.checked ? 1 : 0,
+      can_edit: $('perm-edit-'+p)?.checked ? 1 : 0
+    }));
+    const r = await API.post(`/api/orgs/${API.orgId}/users/invite`, {
+      email: val('iu-email'), role: val('iu-role'), permissions
+    });
+    const res = $('iu-res');
+    res.innerHTML = r.emailSent
+      ? `<div class="alert alert-ok">Invite sent to ${val('iu-email')}</div>`
+      : `<div class="alert alert-warn">Email not configured. Share this link:<br><a href="${r.setupUrl}" target="_blank" style="font-size:11px;word-break:break-all">${r.setupUrl}</a></div>`;
+    res.style.display = 'block';
+    renderSettings($('page-settings'));
+  } catch(e) { toast(e.message||'Unknown error','err'); }
+}
 function _inviteAcct(){Modal.open('Invite New Account',`<p style="color:var(--gray-5);font-size:13px;margin-bottom:12px">They'll get a link to create their org and admin account.</p><label>Email *</label><input id="ia-email" type="email" autocomplete="off"><div id="ia-res" style="display:none;margin-top:10px"></div><div class="bg mt"><button class="btn btn-primary" onclick="_doInviteAcct()">Send Invite</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
 async function _doInviteAcct(){try{const r=await API.post('/auth/invite-account',{email:val('ia-email')});const res=$('ia-res');res.innerHTML=r.emailSent?`<div class="alert alert-ok">Invite sent to ${val('ia-email')}</div>`:`<div class="alert alert-warn">Email not configured. Share this link:<br><a href="${r.setupUrl}" target="_blank" style="font-size:11px;word-break:break-all">${r.setupUrl}</a></div>`;res.style.display='block';}catch(e){toast(e.message||'Unknown error','err');}}
 function _resetPw(id,name){Modal.open('Reset Password',`<p style="margin-bottom:10px">New password for <strong>${name}</strong></p><label>Password</label><input id="rp-pw" type="password"><div class="bg mt"><button class="btn btn-primary" onclick="API.put('/api/orgs/${API.orgId}/users/${id}/password',{password:val('rp-pw')}).then(()=>{toast('Updated');Modal.close()}).catch(e=>toast(e.message||'Unknown error','err'))">Set</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
@@ -4561,6 +4638,8 @@ async function renderLeads(el) {
         <div><div class="ph-title">Leads</div><div class="ph-sub" id="leads-count"></div></div>
         <div class="bg">
           <button class="btn btn-ghost btn-sm" onclick="_leadCategories_manage()">⚙ Categories</button>
+          <button class="btn btn-ghost btn-sm" onclick="_showScheduledFollowups()">📅 Follow-up Schedule</button>
+          <button class="btn btn-ghost btn-sm" id="leads-mass-btn" style="display:none" onclick="_leadsMassAction()">⚡ Mass Action</button>
           <button class="btn btn-primary btn-sm" onclick="_leadAdd()">+ Add Lead</button>
         </div>
       </div>
@@ -4617,6 +4696,7 @@ function _renderLeadsList() {
   if (!_leadsData.length) { list.innerHTML = '<div class="card"><div class="empty"><h3>No leads found</h3></div></div>'; return; }
   list.innerHTML = `<div class="card" style="padding:0;overflow:hidden"><div class="tw"><table>
     <thead><tr>
+      <th style="width:28px"><input type="checkbox" id="leads-sel-all" onchange="_leadsToggleAll(this.checked)"></th>
       <th>Name</th><th>Contact</th><th>Category</th><th>Assigned To</th>
       <th>Status</th><th>Follow-ups</th><th>Next Follow-up</th><th></th>
     </tr></thead>
@@ -4626,6 +4706,7 @@ function _renderLeadsList() {
       const nextFu = l.next_followup ? fmtD(l.next_followup) : '—';
       const isOverdue = l.next_followup && new Date(l.next_followup) < new Date();
       return `<tr>
+        <td><input type="checkbox" value="${l.id}" onchange="_leadsToggleOne('${l.id}',this.checked)"></td>
         <td><div style="font-weight:600;font-size:13px">${name}</div>
           ${l.hebrew_full_name?`<div style="font-family:var(--font-he);font-size:11px;color:var(--gray-5)">${l.hebrew_full_name}</div>`:''}
         </td>
@@ -4676,10 +4757,14 @@ async function _leadView(id) {
           <div style="padding:10px 14px;border-bottom:1px solid var(--gray-1)">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
               <strong style="font-size:12px">${fu.done_by_name||'Unknown'}</strong>
-              <span style="font-size:11px;color:var(--gray-5)">${fmtDT(fu.created_at)}</span>
+              <div style="display:flex;align-items:center;gap:6px">
+                <span style="font-size:11px;color:var(--gray-5)">${fmtDT(fu.created_at)}</span>
+                <button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px"
+                  onclick="event.stopPropagation();_editFollowupDate('${fu.id}','${fu.next_followup_date||''}')">✏ Date</button>
+              </div>
             </div>
             <div style="font-size:13px;margin-bottom:4px">${fu.notes}</div>
-            ${fu.next_followup_date?`<div style="font-size:11px;color:var(--blue)">📅 Next follow-up: ${fmtD(fu.next_followup_date)}</div>`:''}
+            ${fu.next_followup_date?`<div style="font-size:11px;color:var(--blue)">📅 Next follow-up: ${fmtD(fu.next_followup_date)}</div>`:'<div style="font-size:11px;color:var(--gray-4)">No follow-up date set</div>'}
           </div>`).join('') : '<div style="padding:14px;text-align:center;color:var(--gray-4);font-size:13px">No follow-ups yet</div>'}
       </div>
       <div class="bg">
@@ -4692,22 +4777,30 @@ async function _leadView(id) {
 }
 
 function _leadForm(lead={}) {
+  const existingLabels = (() => { try { return JSON.parse(lead.labels||'[]'); } catch { return []; } })();
   return `
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-      <div><label>Title</label><input id="lf-title" value="${lead.title||''}" autocomplete="new-password"></div>
+      <div><label>Title</label><input id="lf-title" value="${lead.title||''}" autocomplete="new-password" placeholder="Mr. Mrs. Dr."></div>
+      <div><label>Hebrew Title</label><input id="lf-htitle" value="${lead.hebrew_title||''}" autocomplete="new-password"></div>
+      <div><label>First Name</label><input id="lf-first" value="${lead.first_name||''}" autocomplete="new-password"></div>
+      <div><label>Last Name</label><input id="lf-last" value="${lead.last_name||''}" autocomplete="new-password"></div>
+      <div style="grid-column:1/-1"><label>Hebrew Full Name</label>
+        <input id="lf-hname" value="${lead.hebrew_full_name||''}" autocomplete="new-password" style="direction:rtl;font-family:var(--font-he)">
+      </div>
+      <div><label>Email</label><input id="lf-email" type="email" value="${lead.email||''}" autocomplete="new-password"></div>
+      <div><label>Cell</label><input id="lf-cell" value="${lead.cell||''}" autocomplete="new-password"></div>
+      <div><label>Home Phone</label><input id="lf-home" value="${lead.home_phone||''}" autocomplete="new-password"></div>
+      <div><label>Street</label><input id="lf-street" value="${lead.street||''}" autocomplete="new-password"></div>
+      <div><label>Apt</label><input id="lf-apt" value="${lead.apt||''}" autocomplete="new-password"></div>
+      <div><label>City</label><input id="lf-city" value="${lead.city||''}" autocomplete="new-password"></div>
+      <div><label>State</label><input id="lf-state" value="${lead.state||''}" autocomplete="new-password"></div>
+      <div><label>Zip</label><input id="lf-zip" value="${lead.zip||''}" autocomplete="new-password"></div>
       <div><label>Category</label>
         <select id="lf-category">
           <option value="">No category</option>
           ${_leadCategories.map(c=>`<option value="${c.name}" ${lead.category===c.name?'selected':''}>${c.name}</option>`).join('')}
         </select>
       </div>
-      <div><label>First Name</label><input id="lf-first" value="${lead.first_name||''}" autocomplete="new-password"></div>
-      <div><label>Last Name</label><input id="lf-last" value="${lead.last_name||''}" autocomplete="new-password"></div>
-      <div><label>Hebrew Title</label><input id="lf-htitle" value="${lead.hebrew_title||''}" autocomplete="new-password"></div>
-      <div><label>Hebrew Name</label><input id="lf-hname" value="${lead.hebrew_full_name||''}" autocomplete="new-password" style="direction:rtl;font-family:var(--font-he)"></div>
-      <div><label>Email</label><input id="lf-email" type="email" value="${lead.email||''}" autocomplete="new-password"></div>
-      <div><label>Cell</label><input id="lf-cell" value="${lead.cell||''}" autocomplete="new-password"></div>
-      <div><label>Home Phone</label><input id="lf-home" value="${lead.home_phone||''}" autocomplete="new-password"></div>
       <div><label>Status</label>
         <select id="lf-status">
           ${['new','in_progress','lost'].map(s=>`<option value="${s}" ${(lead.status||'new')===s?'selected':''}>${statusLabels[s]||s}</option>`).join('')}
@@ -4719,9 +4812,19 @@ function _leadForm(lead={}) {
           ${_leadStaff.map(s=>`<option value="${s.id}" ${lead.assigned_to===s.id?'selected':''}>${s.full_name}</option>`).join('')}
         </select>
       </div>
-      <div><label>Street</label><input id="lf-street" value="${lead.street||''}" autocomplete="new-password"></div>
-      <div><label>City</label><input id="lf-city" value="${lead.city||''}" autocomplete="new-password"></div>
     </div>
+    <label style="margin-top:10px">Labels</label>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px" id="lf-labels-chips">
+      ${existingLabels.map(l=>`<span class="pill pill-blue" style="font-size:11px">${l}
+        <span onclick="this.parentElement.remove();_lfUpdateLabels()" style="cursor:pointer;margin-left:3px">×</span>
+      </span>`).join('')}
+    </div>
+    <div style="display:flex;gap:6px">
+      <input id="lf-label-input" placeholder="Add label…" autocomplete="new-password" style="flex:1"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();_lfAddLabel()}">
+      <button class="btn btn-ghost btn-sm" onclick="_lfAddLabel()">Add</button>
+    </div>
+    <input type="hidden" id="lf-labels-val" value="${lead.labels||'[]'}">
     <label style="margin-top:10px">Notes</label>
     <textarea id="lf-notes" style="min-height:80px">${lead.notes||''}</textarea>
     <div class="bg mt">
@@ -4735,7 +4838,9 @@ async function _leadSave(id='') {
     title: val('lf-title'), first_name: val('lf-first'), last_name: val('lf-last'),
     hebrew_title: val('lf-htitle'), hebrew_full_name: val('lf-hname'),
     email: val('lf-email'), cell: val('lf-cell'), home_phone: val('lf-home'),
-    street: val('lf-street'), city: val('lf-city'),
+    street: val('lf-street'), apt: val('lf-apt'), city: val('lf-city'),
+    state: val('lf-state'), zip: val('lf-zip'),
+    labels: (() => { try { return JSON.parse(val('lf-labels-val')||'[]'); } catch { return []; } })(),
     category: val('lf-category'), status: val('lf-status'),
     assigned_to: val('lf-assigned')||null, notes: val('lf-notes')
   };
@@ -4792,28 +4897,48 @@ async function _leadConvert(id) {
 }
 
 function _leadCategories_manage() {
+  function refresh() {
+    const body = $('cat-modal-body');
+    if(body) body.innerHTML = renderCats() + '<hr class="divider">' + addCatForm();
+  }
   const renderCats = () => `
-    <div id="cat-list" style="margin-bottom:12px">
+    <div id="cat-list" style="margin-bottom:4px">
       ${_leadCategories.length ? _leadCategories.map(c=>`
-        <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--gray-1)">
-          <div style="width:14px;height:14px;border-radius:3px;background:${c.color};flex-shrink:0"></div>
-          <span style="flex:1;font-size:13px">${c.name}</span>
-          <button class="btn btn-icon" style="color:var(--red)" onclick="API.del('/api/orgs/'+API.orgId+'/leads/categories/${c.id}').then(()=>{_leadCategories=_leadCategories.filter(x=>x.id!='${c.id}');$('cat-modal-body').innerHTML=renderCats()+'<div>'+addCatForm()+'</div>';}).catch(e=>toast(e.message,'err'))">✕</button>
-        </div>`).join('') : '<div style="font-size:13px;color:var(--gray-4);text-align:center;padding:8px">No categories yet</div>'}
+        <div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--gray-1)" id="cat-row-${c.id}">
+          <input type="color" value="${c.color}" style="width:32px;height:32px;padding:2px;border-radius:4px;border:1px solid var(--gray-2);cursor:pointer;flex-shrink:0"
+            onchange="document.getElementById('cat-name-${c.id}').dataset.color=this.value">
+          <input id="cat-name-${c.id}" value="${c.name}" data-color="${c.color}" data-id="${c.id}"
+            style="flex:1;font-size:13px;padding:6px 8px;border:1px solid var(--gray-2);border-radius:4px" autocomplete="new-password">
+          <button class="btn btn-primary btn-sm" onclick="
+            const inp=document.getElementById('cat-name-${c.id}');
+            const col=inp.previousElementSibling.value;
+            API.put('/api/orgs/'+API.orgId+'/leads/categories/${c.id}',{name:inp.value.trim(),color:col})
+              .then(()=>{
+                const idx=_leadCategories.findIndex(x=>x.id==='${c.id}');
+                if(idx>=0){_leadCategories[idx].name=inp.value.trim();_leadCategories[idx].color=col;}
+                toast('Saved');
+              }).catch(e=>toast(e.message,'err'))
+          ">Save</button>
+          <button class="btn btn-icon" style="color:var(--red)" onclick="
+            API.del('/api/orgs/'+API.orgId+'/leads/categories/${c.id}')
+              .then(()=>{_leadCategories=_leadCategories.filter(x=>x.id!='${c.id}');refresh();})
+              .catch(e=>toast(e.message,'err'))
+          ">✕</button>
+        </div>`).join('') : '<div style="font-size:13px;color:var(--gray-4);text-align:center;padding:12px">No categories yet</div>'}
     </div>`;
   const addCatForm = () => `
-    <div style="display:flex;gap:8px;align-items:flex-end">
-      <div style="flex:1"><label>Name</label><input id="cat-name" autocomplete="new-password"></div>
+    <div style="display:flex;gap:8px;align-items:flex-end;margin-top:10px">
+      <div style="flex:1"><label>New Category Name</label><input id="cat-name" autocomplete="new-password" placeholder="e.g. Hot Lead"></div>
       <div><label>Color</label><input type="color" id="cat-color" value="#6366f1" style="width:48px;height:38px;padding:2px;border-radius:4px;border:1px solid var(--gray-2)"></div>
-      <button class="btn btn-primary" onclick="
+      <button class="btn btn-primary" style="align-self:flex-end" onclick="
         const n=val('cat-name')?.trim(),c=val('cat-color');
         if(!n){toast('Enter a name','err');return;}
         API.post('/api/orgs/'+API.orgId+'/leads/categories/list',{name:n,color:c})
-          .then(r=>{_leadCategories.push(r.category);toast('Added');renderLeads($('page-leads'));Modal.close();})
+          .then(r=>{_leadCategories.push(r.category);toast('Added ✓');refresh();})
           .catch(e=>toast(e.message,'err'))
-      ">Add</button>
+      ">+ Add</button>
     </div>`;
-  Modal.open('Manage Lead Categories', `<div id="cat-modal-body">${renderCats()}<hr class="divider">${addCatForm()}</div>`, {sm:true});
+  Modal.open('Lead Categories', `<div id="cat-modal-body">${renderCats()}<hr class="divider">${addCatForm()}</div>`, {sm:true});
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -4866,34 +4991,38 @@ async function _markAllNotifRead() {
 // SUPER ADMIN ORG ACCESS
 // ══════════════════════════════════════════════════════════════════════════════
 async function _superAdminAccessOrg(orgId, orgName) {
-  Modal.open('Access Organisation', `
-    <div class="alert alert-warn" style="margin-bottom:14px;font-size:13px">
-      ⚠ You are about to access <strong>${orgName}</strong>'s data as a super admin.
-      This access will be logged including your reason.
+  Modal.open(`Request Access: ${orgName}`, `
+    <div class="alert alert-info" style="margin-bottom:14px;font-size:13px">
+      An access request will be sent to the org admin. They must approve it before you can view sensitive data.
+      You can edit account info and sub-users without approval.
     </div>
     <label>Reason for access <span style="color:var(--red)">*</span></label>
-    <input id="sa-reason" placeholder="e.g. Technical support, investigating issue…" autocomplete="new-password">
+    <input id="sa-reason" placeholder="e.g. Technical support, donor data check…" autocomplete="new-password">
     <div class="bg mt">
-      <button class="btn btn-primary" onclick="_superAdminDoAccess('${orgId}')">Grant Access & Switch</button>
+      <button class="btn btn-primary" onclick="_superAdminRequestAccess('${orgId}','${orgName.replace(/'/g,"\\'")}')">Send Request</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
     </div>`, {sm:true});
 }
 
-async function _superAdminDoAccess(orgId) {
+async function _superAdminRequestAccess(orgId, orgName) {
   const reason = val('sa-reason')?.trim();
   if (!reason) { toast('Enter a reason','err'); return; }
   try {
-    const r = await API.post('/api/auth/super-admin/access-org', { org_id: orgId, purpose: reason });
-    if (r.token) {
-      // Store original token so we can go back
-      if (!localStorage.getItem('drm_token_original')) {
-        localStorage.setItem('drm_token_original', localStorage.getItem('drm_token'));
-      }
-      localStorage.setItem('drm_token', r.token);
-    }
+    await API.post('/api/auth/super-admin/request-access', { org_id: orgId, purpose: reason });
     Modal.close();
-    toast(`Now accessing ${r.org.name}`);
-    // Reload the app with new org context
+    toast(`Access request sent to ${orgName} admin. You'll be notified when approved.`);
+  } catch(e) { toast(e.message||'Error','err'); }
+}
+
+async function _superAdminUseApprovedAccess(requestId, orgName) {
+  try {
+    const r = await API.get(`/api/auth/access-requests/${requestId}/token`);
+    if (!localStorage.getItem('drm_token_original')) {
+      localStorage.setItem('drm_token_original', localStorage.getItem('drm_token'));
+    }
+    localStorage.setItem('drm_token', r.token);
+    Modal.close();
+    toast(`Switching to ${orgName}…`);
     window.location.reload();
   } catch(e) { toast(e.message||'Error','err'); }
 }
@@ -5033,4 +5162,304 @@ async function _loadAllOrgs() {
         </tr>`).join('')}</tbody>
       </table></div>`;
   } catch(e) { wrap.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+
+// ── Access requests for org admins ────────────────────────────────────────────
+async function _checkAccessRequests() {
+  try {
+    const requests = await API.get('/api/auth/access-requests');
+    if (!requests.length) return;
+    // Show banner at top of settings page
+    const settings = $('page-settings');
+    if (!settings) return;
+    const existing = $('access-req-banner');
+    if (existing) existing.remove();
+    const banner = document.createElement('div');
+    banner.id = 'access-req-banner';
+    banner.innerHTML = `
+      <div class="alert alert-warn" style="margin-bottom:12px">
+        <strong>⚠ ${requests.length} pending super admin access request${requests.length>1?'s':''}</strong>
+        ${requests.map(r=>`
+          <div style="margin-top:8px;padding:8px 10px;background:#fff;border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+            <div>
+              <div style="font-size:13px;font-weight:600">${r.super_admin_name||'Super Admin'} wants access</div>
+              <div style="font-size:12px;color:var(--gray-5)">Reason: ${r.purpose}</div>
+              <div style="font-size:11px;color:var(--gray-4)">${fmtDT(r.created_at)}</div>
+            </div>
+            <div class="bg">
+              <button class="btn btn-green btn-sm" onclick="_respondAccessRequest('${r.id}','approve')">✓ Approve</button>
+              <button class="btn btn-ghost btn-sm" onclick="_respondAccessRequest('${r.id}','deny')">✕ Deny</button>
+            </div>
+          </div>`).join('')}
+      </div>`;
+    settings.insertBefore(banner, settings.firstChild);
+  } catch {}
+}
+
+async function _respondAccessRequest(requestId, action) {
+  try {
+    await API.post(`/api/auth/access-requests/${requestId}/respond`, { action });
+    toast(action === 'approve' ? 'Access approved ✓' : 'Access denied');
+    _checkAccessRequests();
+    _loadNotifications();
+  } catch(e) { toast(e.message,'err'); }
+}
+
+// ── Lead label helpers ────────────────────────────────────────────────────────
+function _lfAddLabel() {
+  const inp = $('lf-label-input');
+  const val2 = inp?.value?.trim();
+  if (!val2) return;
+  // Add chip
+  const chips = $('lf-labels-chips');
+  if (chips) {
+    const chip = document.createElement('span');
+    chip.className = 'pill pill-blue';
+    chip.style.fontSize = '11px';
+    chip.innerHTML = `${val2} <span onclick="this.parentElement.remove();_lfUpdateLabels()" style="cursor:pointer;margin-left:3px">×</span>`;
+    chips.appendChild(chip);
+  }
+  inp.value = '';
+  _lfUpdateLabels();
+}
+
+function _lfUpdateLabels() {
+  const chips = $('lf-labels-chips');
+  const valInput = $('lf-labels-val');
+  if (!chips || !valInput) return;
+  const labels = [...chips.querySelectorAll('.pill')].map(c => c.textContent.replace('×','').trim());
+  valInput.value = JSON.stringify(labels);
+}
+
+// ── Lead selection + mass actions ─────────────────────────────────────────────
+window._leadsSelected = new Set();
+
+function _leadsToggleAll(checked) {
+  window._leadsSelected.clear();
+  if (checked) _leadsData.forEach(l => window._leadsSelected.add(l.id));
+  document.querySelectorAll('#leads-list input[type=checkbox]').forEach(cb => cb.checked = checked);
+  _leadsUpdateMassBtn();
+}
+
+function _leadsToggleOne(id, checked) {
+  if (checked) window._leadsSelected.add(id);
+  else window._leadsSelected.delete(id);
+  _leadsUpdateMassBtn();
+  const all = $('leads-sel-all');
+  if (all) all.checked = window._leadsSelected.size === _leadsData.length;
+}
+
+function _leadsUpdateMassBtn() {
+  const btn = $('leads-mass-btn');
+  if (btn) btn.style.display = window._leadsSelected.size > 0 ? '' : 'none';
+}
+
+function _leadsMassAction() {
+  const count = window._leadsSelected.size;
+  if (!count) return;
+  Modal.open(`Mass Action — ${count} Lead${count>1?'s':''}`, `
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <button class="btn btn-ghost" style="text-align:left" onclick="Modal.close();_leadsMassCategory()">🏷 Set Category</button>
+      <button class="btn btn-ghost" style="text-align:left" onclick="Modal.close();_leadsMassStatus()">🔄 Set Status</button>
+      <button class="btn btn-ghost" style="text-align:left" onclick="Modal.close();_leadsMassAssign()">👤 Assign To</button>
+      <button class="btn btn-ghost" style="text-align:left" onclick="Modal.close();_leadsMassLabel()">+ Add Label</button>
+      <hr class="divider">
+      <button class="btn btn-ghost" style="text-align:left;color:var(--red)" onclick="Modal.close();_leadsMassDelete()">🗑 Delete Selected</button>
+    </div>`, {sm:true});
+}
+
+async function _leadsMassCategory() {
+  Modal.open('Set Category', `
+    <select id="mass-cat" style="width:100%;padding:8px;border:1.5px solid var(--gray-3);border-radius:6px;margin-bottom:12px">
+      <option value="">No category</option>
+      ${_leadCategories.map(c=>`<option value="${c.name}">${c.name}</option>`).join('')}
+    </select>
+    <div class="bg">
+      <button class="btn btn-primary" onclick="_leadsMassUpdate({category:val('mass-cat')})">Apply</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+async function _leadsMassStatus() {
+  Modal.open('Set Status', `
+    <select id="mass-status" style="width:100%;padding:8px;border:1.5px solid var(--gray-3);border-radius:6px;margin-bottom:12px">
+      ${['new','in_progress','lost'].map(s=>`<option value="${s}">${statusLabels[s]||s}</option>`).join('')}
+    </select>
+    <div class="bg">
+      <button class="btn btn-primary" onclick="_leadsMassUpdate({status:val('mass-status')})">Apply</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+async function _leadsMassAssign() {
+  Modal.open('Assign To', `
+    <select id="mass-assign" style="width:100%;padding:8px;border:1.5px solid var(--gray-3);border-radius:6px;margin-bottom:12px">
+      <option value="">Unassigned</option>
+      ${_leadStaff.map(s=>`<option value="${s.id}">${s.full_name}</option>`).join('')}
+    </select>
+    <div class="bg">
+      <button class="btn btn-primary" onclick="_leadsMassUpdate({assigned_to:val('mass-assign')||null})">Apply</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+async function _leadsMassLabel() {
+  Modal.open('Add Label', `
+    <input id="mass-label" placeholder="Label name…" autocomplete="new-password"
+      style="width:100%;padding:8px;border:1.5px solid var(--gray-3);border-radius:6px;margin-bottom:12px;box-sizing:border-box">
+    <div class="bg">
+      <button class="btn btn-primary" onclick="_leadsMassAddLabel()">Add Label</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+async function _leadsMassAddLabel() {
+  const label = val('mass-label')?.trim();
+  if (!label) { toast('Enter a label','err'); return; }
+  const ids = [...window._leadsSelected];
+  try {
+    await Promise.all(ids.map(async id => {
+      const lead = _leadsData.find(l=>l.id===id);
+      const labels = (() => { try { return JSON.parse(lead?.labels||'[]'); } catch { return []; } })();
+      if (!labels.includes(label)) {
+        labels.push(label);
+        await API.put(`/api/orgs/${API.orgId}/leads/${id}`, { labels });
+      }
+    }));
+    toast(`Label "${label}" added to ${ids.length} lead(s) ✓`);
+    Modal.close();
+    _loadLeads();
+  } catch(e) { toast(e.message,'err'); }
+}
+
+async function _leadsMassUpdate(data) {
+  const ids = [...window._leadsSelected];
+  try {
+    await Promise.all(ids.map(id => API.put(`/api/orgs/${API.orgId}/leads/${id}`, data)));
+    toast(`Updated ${ids.length} lead(s) ✓`);
+    Modal.close();
+    window._leadsSelected.clear();
+    _leadsUpdateMassBtn();
+    _loadLeads();
+  } catch(e) { toast(e.message,'err'); }
+}
+
+async function _leadsMassDelete() {
+  confirmDlg(`Delete ${window._leadsSelected.size} leads?`, async () => {
+    const ids = [...window._leadsSelected];
+    await Promise.all(ids.map(id => API.del(`/api/orgs/${API.orgId}/leads/${id}`).catch(()=>{})));
+    toast(`${ids.length} leads deleted`);
+    window._leadsSelected.clear();
+    _loadLeads();
+  });
+}
+
+// ── Donors mass neighborhood + autopay ───────────────────────────────────────
+Object.assign(Donors, {
+  async bulkNeighborhood() {
+    if (!this.selected.size) return;
+    const hoods = await API.get(API.o.hoods()).catch(()=>[]);
+    Modal.open(`Set Neighborhood — ${this.selected.size} Donor(s)`, `
+      <select id="bulk-hood-sel" style="width:100%;padding:8px 10px;border:1.5px solid var(--gray-3);border-radius:6px;margin-bottom:12px">
+        <option value="">No neighborhood</option>
+        ${hoods.map(h=>`<option value="${h.id}">${h.name_he}</option>`).join('')}
+      </select>
+      <div class="bg">
+        <button class="btn btn-primary" onclick="_donorsMassPut({neighborhood_id:val('bulk-hood-sel')||null})">Apply</button>
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+      </div>`, {sm:true});
+  },
+
+  async bulkAutopay() {
+    if (!this.selected.size) return;
+    Modal.open(`AutoPay — ${this.selected.size} Donor(s)`, `
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <button class="btn btn-green" onclick="_donorsMassPut({autopay_enabled:1})">✓ Enable AutoPay</button>
+        <button class="btn btn-ghost" onclick="_donorsMassPut({autopay_paused:1})">⏸ Pause AutoPay</button>
+        <button class="btn btn-ghost" onclick="_donorsMassPut({autopay_paused:0})">▶ Resume AutoPay</button>
+        <button class="btn btn-ghost" style="color:var(--red)" onclick="_donorsMassPut({autopay_enabled:0})">✕ Disable AutoPay</button>
+      </div>`, {sm:true});
+  }
+});
+
+async function _donorsMassPut(data) {
+  const ids = [...Donors.selected];
+  try {
+    await Promise.all(ids.map(id => API.put(`/api/orgs/${API.orgId}/donors/${id}`, data)));
+    toast(`Updated ${ids.length} donor(s) ✓`);
+    Modal.close();
+    Donors.selected.clear();
+    Donors.updateBulk();
+    Donors.load();
+  } catch(e) { toast(e.message,'err'); }
+}
+
+// ── Edit follow-up date ───────────────────────────────────────────────────────
+function _editFollowupDate(followupId, currentDate) {
+  Modal.open('Edit Follow-up Date', `
+    <label>Next Follow-up Date</label>
+    <input type="date" id="fu-edit-date" value="${currentDate||''}"
+      style="padding:10px 12px;border:1.5px solid var(--gray-3);border-radius:6px;width:100%;box-sizing:border-box">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_saveFollowupDate('${followupId}')">Save</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+async function _saveFollowupDate(followupId) {
+  const date = val('fu-edit-date');
+  try {
+    await API.put(`/api/orgs/${API.orgId}/leads/followups/${followupId}`, { next_followup_date: date||null });
+    toast('Follow-up date updated ✓');
+    Modal.close();
+    // Reload leads list
+    _loadLeads();
+  } catch(e) { toast(e.message||'Error','err'); }
+}
+
+// ── Scheduled Follow-ups page ─────────────────────────────────────────────────
+async function renderScheduledFollowups(el) {
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const followups = await API.get(`/api/orgs/${API.orgId}/leads/followups/scheduled`);
+    el.innerHTML = `
+      <div class="ph">
+        <div><div class="ph-title">Scheduled Follow-ups</div>
+          <div class="ph-sub">${followups.length} scheduled</div>
+        </div>
+      </div>
+      ${!followups.length ? '<div class="card"><div class="empty"><h3>No scheduled follow-ups</h3><p>Add follow-ups with a date from the Leads page.</p></div></div>' : `
+      <div class="card" style="padding:0;overflow:hidden"><div class="tw"><table>
+        <thead><tr>
+          <th>Lead</th><th>Follow-up Date</th><th>Notes</th><th>Assigned To</th><th>Fundraiser</th><th></th>
+        </tr></thead>
+        <tbody>${followups.map(f => {
+          const isOverdue = new Date(f.next_followup_date) < new Date();
+          const isToday   = f.next_followup_date === new Date().toISOString().slice(0,10);
+          return `<tr style="${isOverdue?'background:#fef2f2':isToday?'background:#fefce8':''}">
+            <td>
+              <div style="font-weight:600;font-size:13px">${f.lead_name||'Unknown Lead'}</div>
+              ${f.lead_cell?`<div style="font-size:11px;color:var(--gray-5)">${f.lead_cell}</div>`:''}
+            </td>
+            <td style="font-weight:600;color:${isOverdue?'var(--red)':isToday?'var(--amber)':'inherit'}">
+              ${fmtD(f.next_followup_date)}
+              ${isOverdue?'<span style="font-size:10px;margin-left:4px">⚠ Overdue</span>':''}
+              ${isToday?'<span style="font-size:10px;margin-left:4px">📅 Today</span>':''}
+            </td>
+            <td style="font-size:12px;max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${f.notes||'—'}</td>
+            <td style="font-size:12px">${f.lead_assigned_name||'—'}</td>
+            <td style="font-size:12px">${f.done_by_name||'—'}</td>
+            <td><div class="actions">
+              <button class="btn btn-blue btn-sm" onclick="_leadView('${f.lead_id}')">View Lead</button>
+              <button class="btn btn-ghost btn-sm" onclick="_leadAddFollowup('${f.lead_id}')">+ Follow Up</button>
+              <button class="btn btn-ghost btn-sm" onclick="_editFollowupDate('${f.id}','${f.next_followup_date||''}')">✏ Date</button>
+            </div></td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table></div></div>`}`;
+  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+
+function _showScheduledFollowups() {
+  navigateTo('followups');
 }

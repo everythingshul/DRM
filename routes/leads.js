@@ -161,6 +161,12 @@ router.post('/categories/list', requireOrgAdmin, (req, res) => {
   run('INSERT INTO lead_categories (id,org_id,name,color) VALUES (?,?,?,?)', [id,req.orgId,name,color||'#6366f1']);
   res.json({ success: true, category: get('SELECT * FROM lead_categories WHERE id=?', [id]) });
 });
+router.put('/categories/:id', requireOrgAdmin, (req, res) => {
+  const { name, color } = req.body;
+  run('UPDATE lead_categories SET name=?,color=? WHERE id=? AND org_id=?',
+    [name, color||'#6366f1', req.params.id, req.orgId]);
+  res.json({ success: true });
+});
 router.delete('/categories/:id', requireOrgAdmin, (req, res) => {
   run('DELETE FROM lead_categories WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
   res.json({ success: true });
@@ -171,6 +177,33 @@ router.get('/staff/list', (req, res) => {
   const staff = all(`SELECT u.id, u.full_name, u.email, ou.role FROM users u
     JOIN org_users ou ON ou.user_id=u.id WHERE ou.org_id=? ORDER BY u.full_name`, [req.orgId]);
   res.json(staff);
+});
+
+// ── Edit follow-up ────────────────────────────────────────────────────────────
+router.put('/followups/:id', (req, res) => {
+  const { next_followup_date, notes } = req.body;
+  const fu = get('SELECT * FROM lead_followups WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
+  if (!fu) return res.status(404).json({ error: 'Follow-up not found' });
+  run('UPDATE lead_followups SET next_followup_date=?,notes=? WHERE id=?',
+    [next_followup_date||null, notes||fu.notes, req.params.id]);
+  res.json({ success: true });
+});
+
+// ── List all scheduled follow-ups for this org ────────────────────────────────
+router.get('/followups/scheduled', (req, res) => {
+  const followups = all(`
+    SELECT lf.*,
+      l.first_name||' '||COALESCE(l.last_name,'') as lead_name,
+      l.cell as lead_cell, l.id as lead_id,
+      l.assigned_to, la.full_name as lead_assigned_name
+    FROM lead_followups lf
+    JOIN leads l ON l.id = lf.lead_id
+    LEFT JOIN users la ON la.id = l.assigned_to
+    WHERE lf.org_id=? AND lf.next_followup_date IS NOT NULL
+      AND l.status != 'converted'
+    ORDER BY lf.next_followup_date ASC
+  `, [req.orgId]);
+  res.json(followups);
 });
 
 module.exports = router;
