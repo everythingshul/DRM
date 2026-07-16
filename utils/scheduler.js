@@ -86,7 +86,7 @@ async function sendReceiptEmail(donor, donation, org) {
 
     let html, subject;
     if (defaultTpl) {
-      const { renderBlocks } = require('./routes/email-templates');
+      const { renderBlocks } = require('../routes/email-templates');
       const blocks = (() => { try { return JSON.parse(defaultTpl.blocks||'[]'); } catch { return []; } })();
       html    = renderBlocks(blocks, vars);
       subject = defaultTpl.subject.replace(/\{\{(\w+)\}\}/g, (_,k)=>vars[k]||'');
@@ -287,41 +287,72 @@ async function processAutopay() {
 }
 
 async function processScheduledEmails() {
-  // Get all pending emails and filter by their org's timezone
   const pending = all(`SELECT se.* FROM scheduled_emails se WHERE se.status='pending'`, []);
   const due = pending.filter(se => {
     try {
-      const org = get('SELECT settings FROM organizations WHERE id=?', [se.org_id]);
-      const tz = (() => { try { return JSON.parse(org?.settings||'{}').timezone || 'UTC'; } catch { return 'UTC'; } })();
-      // Compare scheduled_for interpreted as org-local time vs now in org-local time
-      const now = new Date();
       const scheduledUtc = new Date(se.scheduled_for + (se.scheduled_for.includes('Z') || se.scheduled_for.includes('+') ? '' : 'Z'));
-      return scheduledUtc <= now;
+      return scheduledUtc <= new Date();
     } catch { return false; }
   });
 
   for (const email of due) {
     try {
       const settings = get('SELECT * FROM email_settings WHERE org_id = ?', [email.org_id]);
-      if (!settings?.smtp_email) { run('UPDATE scheduled_emails SET status = ? WHERE id = ?', ['failed', email.id]); continue; }
-      const transporter = getTransporter(settings);
-      if (!transporter) { run('UPDATE scheduled_emails SET status = ? WHERE id = ?', ['failed', email.id]); continue; }
-
-      let to = settings.smtp_email;
-      if (email.donor_id) {
-        const donor = get('SELECT email FROM donors WHERE id = ?', [email.donor_id]);
-        if (donor?.email) to = donor.email;
+      if (!settings?.brevo_api_key && (!settings?.smtp_email || !settings?.smtp_password)) {
+        run('UPDATE scheduled_emails SET status=?, failure_reason=? WHERE id=?', ['failed', 'No email provider configured', email.id]);
+        continue;
       }
 
-      await transporter.sendMail({
-        from: `"${settings.from_name}" <${settings.smtp_email}>`,
-        to,
-        subject: email.subject,
-        html: email.html_body
-      });
-      run('UPDATE scheduled_emails SET status = ?, sent_at = CURRENT_TIMESTAMP WHERE id = ?', ['sent', email.id]);
-    } catch (e) {
-      run('UPDATE scheduled_emails SET status = ?, failure_reason = ? WHERE id = ?', ['failed', e.message, email.id]);
+      // Determine recipients based on recipient_group
+      let recipients = [];
+      const group = email.recipient_group || 'all_donors';
+
+      if (group === 'all_donors') {
+        const donors = all('SELECT email FROM donors WHERE org_id=? AND email IS NOT NULL AND email != "" AND donation_emails_paused=0', [email.org_id]);
+        recipients = donors.map(d => d.email);
+      } else if (group.startsWith('label:')) {
+        const label = group.replace('label:', '');
+        const donors = all('SELECT email, labels FROM donors WHERE org_id=? AND email IS NOT NULL AND email != "" AND donation_emails_paused=0', [email.org_id]);
+        recipients = donors.filter(d => {
+          try { return JSON.parse(d.labels||'[]').includes(label); } catch { return false; }
+        }).map(d => d.email);
+      } else if (email.donor_id) {
+        const donor = get('SELECT email FROM donors WHERE id=?', [email.donor_id]);
+        if (donor?.email) recipients = [donor.email];
+      } else {
+        // Fallback to org admin email
+        if (settings.smtp_email) recipients = [settings.smtp_email];
+      }
+
+      if (!recipients.length) {
+        run('UPDATE scheduled_emails SET status=?, sent_at=CURRENT_TIMESTAMP WHERE id=?', ['sent', email.id]);
+        continue;
+      }
+
+      const org = get('SELECT * FROM organizations WHERE id=?', [email.org_id]);
+      const from = `"${settings.from_name || org?.name || 'DRM'}" <${settings.smtp_email || 'noreply@everythingshul.com'}>`;
+
+      let sent = 0, failed = 0;
+      for (const to of recipients) {
+        try {
+          await mailer.sendMail({
+            settings, orgId: email.org_id,
+            to, from,
+            subject: email.subject,
+            html: email.html_body,
+            type: 'scheduled'
+          });
+          sent++;
+        } catch(e) {
+          failed++;
+          console.error(`[scheduled] Failed to ${to}: ${e.message}`);
+        }
+      }
+
+      run('UPDATE scheduled_emails SET status=?, sent_at=CURRENT_TIMESTAMP WHERE id=?', ['sent', email.id]);
+      console.log(`[scheduled] Email "${email.subject}" sent to ${sent} recipients, ${failed} failed`);
+    } catch(e) {
+      run('UPDATE scheduled_emails SET status=?, failure_reason=? WHERE id=?', ['failed', e.message, email.id]);
     }
   }
 }

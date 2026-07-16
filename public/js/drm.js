@@ -434,7 +434,14 @@ function navigateTo(page) {
   document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   const el = $('page-' + page);
-  if (el) { el.classList.add('active'); renderPage(page, el); } // always re-render on nav
+  if (!el) return;
+  el.classList.add('active');
+  // For donors page: if already rendered, just reload data (no flicker)
+  if (page === 'donors' && el.querySelector('#d-tbody')) {
+    Donors.load();
+  } else {
+    renderPage(page, el);
+  }
 }
 // Re-render current page (call after mutations)
 function reloadPage() { const el = $('page-' + _currentPage); if(el) renderPage(_currentPage, el); }
@@ -2056,9 +2063,9 @@ function _emailLogPreview(id) {
         style="width:100%;height:100%;border:none"
         sandbox="allow-same-origin"></iframe>
     </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
-      <button class="btn btn-ghost btn-sm" onclick="Modal.close()">Close</button>
-      <button class="btn btn-primary btn-sm" onclick="_emailLogForward('${id}')">Forward →</button>
+    <div style="display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-top:12px;padding-top:10px;border-top:1px solid var(--gray-2)">
+      <button class="btn btn-ghost" onclick="Modal.close()">Close</button>
+      <button class="btn btn-primary" onclick="_emailLogForward('${id}')">Forward</button>
     </div>`, {lg:true, tall:true});
 }
 
@@ -2239,6 +2246,7 @@ function _edRenderShell(name, subject) {
           <button class="btn btn-primary btn-sm" onclick="_edSave()">Save</button>
           <button class="btn btn-ghost btn-sm" onclick="_edScheduleModal()">Schedule</button>
           <button class="btn btn-ghost btn-sm" onclick="_edPreviewModal()">Preview</button>
+          <button class="btn btn-ghost btn-sm" id="ed-html-btn" onclick="_edToggleHtml()">‹/› HTML</button>
           <button class="btn btn-ghost btn-sm" onclick="Modal.close()">Cancel</button>
         </div>
         <div id="ed-canvas" style="background:#fff;max-width:600px;margin:0 auto;
@@ -2709,7 +2717,41 @@ function _testSchedEmail(id) {
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
     </div>`, {sm:true});
 }
-function _schedEmail(){const now=new Date();now.setHours(now.getHours()+1);Modal.open('Schedule Email',`<label>Subject</label><input id="se-subj"><label>Body (HTML)</label><textarea id="se-body" style="min-height:140px;font-size:12px"></textarea><label>Send At</label><input type="datetime-local" id="se-at" value="${toLocalDT(now.toISOString())}"><div class="bg mt"><button class="btn btn-primary" onclick="API.post(API.o.schedEmails(),{subject:val('se-subj'),html_body:val('se-body'),scheduled_for:val('se-at')}).then(()=>{toast('Scheduled');Modal.close();renderEmails($('page-emails'))}).catch(e=>toast(e.message||'Unknown error','err'))">Schedule</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});}
+function _schedEmail(){
+  const now=new Date();now.setHours(now.getHours()+1);
+  Modal.open('Schedule Email',`
+    <label>Subject</label><input id="se-subj" style="margin-bottom:8px">
+    <label>Recipients</label>
+    <div style="margin-bottom:10px">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:6px">
+        <input type="radio" name="se-recip" value="all" checked> All donors with email
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="radio" name="se-recip" value="label"> By label:
+        <select id="se-label-sel" style="margin-left:4px"><option value="">Loading...</option></select>
+      </label>
+    </div>
+    <label>Body (HTML)</label>
+    <textarea id="se-body" style="min-height:160px;font-size:12px;font-family:monospace"></textarea>
+    <label style="margin-top:8px">Send At</label>
+    <input type="datetime-local" id="se-at" value="${toLocalDT(now.toISOString())}">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="
+        const recip=document.querySelector('input[name=se-recip]:checked')?.value;
+        const label=val('se-label-sel');
+        API.post(API.o.schedEmails(),{
+          subject:val('se-subj'),html_body:val('se-body'),
+          scheduled_for:val('se-at'),
+          recipient_group:recip==='label'&&label?'label:'+label:'all_donors'
+        }).then(()=>{toast('Scheduled');Modal.close();renderEmails(\$('page-emails'))}).catch(e=>toast(e.message||'Unknown error','err'))
+      ">Schedule</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`,{sm:true});
+  API.get(`/api/orgs/${API.orgId}/labels`).then(l=>{
+    const sel=$('se-label-sel');
+    if(sel) sel.innerHTML='<option value="">— All in label —</option>'+(l||[]).map(x=>`<option value="${x}">${x}</option>`).join('');
+  }).catch(()=>{});
+}
 
 async function renderKvitel(el) {
   el.innerHTML = '<div class="spinner"></div>';
@@ -4243,18 +4285,82 @@ function _edScheduleModal() {
   const subject = val('ed-subject')?.trim();
   if (!name) { toast('Enter a template name first','err'); return; }
   if (!subject) { toast('Enter a subject first','err'); return; }
-
   const now = new Date(); now.setHours(now.getHours()+1);
   Modal.open('Schedule This Email', `
-    <p style="font-size:13px;color:var(--gray-5);margin-bottom:12px">
-      This will save the template and schedule it to send to all donors who have an email address.
-    </p>
+    <label>Recipients</label>
+    <div style="margin-bottom:10px">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:6px">
+        <input type="radio" name="sched-recip" value="all" id="sched-all" checked onchange="_schedRecipChange()">
+        <span>All donors with email address</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:6px">
+        <input type="radio" name="sched-recip" value="label" id="sched-label" onchange="_schedRecipChange()">
+        <span>By label</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="radio" name="sched-recip" value="specific" id="sched-specific" onchange="_schedRecipChange()">
+        <span>Select specific donors</span>
+      </label>
+    </div>
+    <div id="sched-label-wrap" style="display:none;margin-bottom:10px">
+      <select id="sched-label-sel" style="width:100%">
+        <option value="">Loading labels...</option>
+      </select>
+    </div>
+    <div id="sched-specific-wrap" style="display:none;margin-bottom:10px">
+      <input id="sched-donor-search" placeholder="Search donors by name, email, phone…" oninput="_schedDonorSearch(this.value)" autocomplete="off">
+      <div id="sched-donor-results" style="max-height:160px;overflow-y:auto;border:1px solid var(--gray-2);border-radius:4px;margin-top:4px"></div>
+      <div id="sched-donor-selected" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px"></div>
+    </div>
     <label>Send At</label>
     <input type="datetime-local" id="sched-at" value="${toLocalDT(now.toISOString())}">
     <div class="bg mt">
       <button class="btn btn-primary" id="sched-btn" onclick="_edDoSchedule()">Save & Schedule</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
     </div>`, {sm:true});
+
+  window._schedSelectedDonors = new Map();
+  // Load labels
+  API.get(`/api/orgs/${API.orgId}/labels`).then(l => {
+    const sel = $('sched-label-sel');
+    if (sel) sel.innerHTML = '<option value="">— Select label —</option>' + (l||[]).map(x=>`<option value="${x}">${x}</option>`).join('');
+  }).catch(()=>{});
+}
+
+function _schedRecipChange() {
+  const v = document.querySelector('input[name="sched-recip"]:checked')?.value;
+  $('sched-label-wrap').style.display    = v==='label'    ? '' : 'none';
+  $('sched-specific-wrap').style.display = v==='specific' ? '' : 'none';
+}
+
+let _schedDonorTimer;
+function _schedDonorSearch(q) {
+  clearTimeout(_schedDonorTimer);
+  if (!q.trim()) { const r=$('sched-donor-results'); if(r) r.innerHTML=''; return; }
+  _schedDonorTimer = setTimeout(async () => {
+    try {
+      const res = await API.get(`/api/orgs/${API.orgId}/donors/search?q=${encodeURIComponent(q)}`);
+      const r = $('sched-donor-results'); if (!r) return;
+      r.innerHTML = (res||[]).map(d => `
+        <label style="display:flex;align-items:center;gap:6px;padding:6px 8px;cursor:pointer;border-bottom:1px solid var(--gray-1)">
+          <input type="checkbox" value="${d.id}" data-name="${d.first_name} ${d.last_name}"
+            ${window._schedSelectedDonors?.has(d.id)?'checked':''}
+            onchange="_schedToggleDonor('${d.id}','${d.first_name} ${d.last_name}',this.checked)">
+          <span style="font-size:13px"><strong>${d.first_name} ${d.last_name}</strong>${d.email?` <span style="color:var(--gray-5);font-size:11px">${d.email}</span>`:''}</span>
+        </label>`).join('') || '<div style="padding:8px;font-size:13px;color:var(--gray-5)">No donors found</div>';
+    } catch {}
+  }, 300);
+}
+
+function _schedToggleDonor(id, name, checked) {
+  if (!window._schedSelectedDonors) window._schedSelectedDonors = new Map();
+  if (checked) window._schedSelectedDonors.set(id, name);
+  else window._schedSelectedDonors.delete(id);
+  const sel = $('sched-donor-selected');
+  if (sel) sel.innerHTML = [...window._schedSelectedDonors.entries()].map(([id,name]) =>
+    `<span class="pill pill-blue" style="font-size:11px">${name}
+      <span onclick="window._schedSelectedDonors.delete('${id}');document.querySelector('#sched-donor-results input[value=\'${id}\']')?.checked && (document.querySelector('#sched-donor-results input[value=\'${id}\']').checked=false);_schedToggleDonor('${id}','${name}',false)" style="cursor:pointer;margin-left:3px">×</span>
+    </span>`).join('');
 }
 
 async function _edDoSchedule() {
@@ -4300,3 +4406,40 @@ function _edBlocksToHtml(blocks) {
     }).join('')}
   </div>`;
 }
+
+// ── HTML mode toggle in email builder ─────────────────────────────────────────
+let _edHtmlMode = false;
+function _edToggleHtml() {
+  const canvas = $('ed-canvas');
+  if (!canvas) return;
+  _edHtmlMode = !_edHtmlMode;
+  const btn = $('ed-html-btn');
+  if (_edHtmlMode) {
+    // Switch to HTML editor — generate HTML from current blocks
+    if(btn) { btn.textContent='◀ Back to Builder'; btn.style.background='var(--amber)'; btn.style.color='#fff'; }
+    const html = _edBlocksToHtml(window._edBlocks||[]);
+    canvas.innerHTML = `<div style="padding:12px">
+      <div style="font-size:11px;color:var(--gray-5);margin-bottom:6px">Edit raw HTML — click "Back to Builder" to exit. Changes here won't sync back to blocks.</div>
+      <textarea id="ed-html-raw" style="width:100%;height:480px;font-size:12px;font-family:monospace;
+        border:1px solid var(--gray-2);border-radius:4px;padding:10px;resize:vertical;line-height:1.5
+      ">${html.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</textarea>
+    </div>`;
+  } else {
+    // Switch back to block builder — restore from blocks
+    if(btn) { btn.textContent='‹/› HTML'; btn.style.background=''; btn.style.color=''; }
+    _edRenderBlocks();
+  }
+}
+
+// Hook _edSave to use raw HTML when in HTML mode
+const _edSave_orig = _edSave;
+_edSave = async function(returnId = false) {
+  if (_edHtmlMode) {
+    // In HTML mode — save raw HTML as a single html block
+    const rawHtml = $('ed-html-raw')?.value?.replace(/&lt;/g,'<').replace(/&gt;/g,'>');
+    if (rawHtml) {
+      window._edBlocks = [{ type: 'raw_html', html: rawHtml }];
+    }
+  }
+  return _edSave_orig(returnId);
+};
