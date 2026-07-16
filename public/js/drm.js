@@ -2991,7 +2991,7 @@ async function renderSettings(el) {
             <button class="btn btn-ghost btn-sm" onclick="_editAccountInfo()">✏ Edit</button>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px">
-            <div><span style="color:var(--gray-5);font-size:11px">Organisation</span><div style="font-weight:600">${org.name}</div></div>
+            <div><span style="color:var(--gray-5);font-size:11px">Organisation</span><div style="font-weight:600">${DRM.org?.name||'—'}</div></div>
             <div><span style="color:var(--gray-5);font-size:11px">My Name</span><div>${DRM.user?.full_name||'—'}</div></div>
             <div><span style="color:var(--gray-5);font-size:11px">Email</span><div>${DRM.user?.email||'—'}</div></div>
             <div><span style="color:var(--gray-5);font-size:11px">Role</span><span class="pill ${DRM.user?.role==='admin'?'pill-blue':'pill-gray'}">${DRM.user?.role||'staff'}</span>${DRM.user?.is_super_admin?' <span class="pill pill-blue">Super Admin</span>':''}</div>
