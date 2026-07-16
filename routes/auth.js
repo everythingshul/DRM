@@ -128,7 +128,12 @@ router.post('/orgs', requireAuth, async (req, res) => {
 // List orgs (super admin)
 router.get('/orgs', requireAuth, (req, res) => {
   if (!req.user.is_super_admin) return res.status(403).json({ error: 'Forbidden' });
-  const orgs = all('SELECT * FROM organizations ORDER BY name', []);
+  const orgs = all(`
+    SELECT o.*,
+      (SELECT COUNT(*) FROM donors WHERE org_id=o.id) as donor_count,
+      (SELECT COUNT(*) FROM donations WHERE org_id=o.id) as donation_count
+    FROM organizations o ORDER BY name
+  `, []);
   res.json(orgs);
 });
 

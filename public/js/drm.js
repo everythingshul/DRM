@@ -2980,7 +2980,7 @@ async function renderSettings(el) {
     
     el.innerHTML = `
       <div class="ph"><div class="ph-title">Settings</div></div>
-      <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-labels">Labels</div><div class="tab" data-tc="st-tz">Timezone</div><div class="tab" data-tc="st-log">Login Log</div><div class="tab" data-tc="st-backup">Backup</div><div class="tab" data-tc="st-imports">Import History</div></div>
+      <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-labels">Labels</div><div class="tab" data-tc="st-tz">Timezone</div><div class="tab" data-tc="st-log">Login Log</div><div class="tab" data-tc="st-backup">Backup</div><div class="tab" data-tc="st-imports">Import History</div>${DRM.user?.is_super_admin?'<div class="tab" data-tc="st-all-orgs">All Orgs</div>':''}</div>
       <div id="st-users" class="tc on"><div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
           <strong>Users</strong>
@@ -3020,6 +3020,9 @@ async function renderSettings(el) {
       <div id="st-imports" class="tc">
         <div class="card" id="st-imports-card"><div class="spinner"></div></div>
       </div>
+      <div id="st-all-orgs" class="tc">
+        <div class="card" id="st-all-orgs-card"><div class="spinner"></div></div>
+      </div>
       <div id="st-log" class="tc"><div class="card">
         <div class="card-title">Login Audit Log</div>
         <div class="scroll-box"><table><thead><tr><th>Time</th><th>User</th><th>Action</th><th>IP</th></tr></thead>
@@ -3029,6 +3032,7 @@ async function renderSettings(el) {
     tabsInit('#page-settings');
     document.querySelector('#page-settings .tab[data-tc="st-backup"]')?.addEventListener('click', _loadBackupStatus);
     document.querySelector('#page-settings .tab[data-tc="st-imports"]')?.addEventListener('click', _loadImportHistory);
+    document.querySelector('#page-settings .tab[data-tc="st-all-orgs"]')?.addEventListener('click', _loadAllOrgs);
     // Load label lists when Labels tab is clicked
     document.querySelector('#page-settings .tab[data-tc="st-labels"]').addEventListener('click', _loadLabelSettings);
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
@@ -4902,24 +4906,79 @@ async function _loadImportHistory() {
   wrap.innerHTML = '<div class="spinner"></div>';
   try {
     const imports = await API.get(`/api/orgs/${API.orgId}/imports`);
-    if (!imports.length) { wrap.innerHTML = '<div class="empty"><p>No imports yet.</p></div>'; return; }
-    wrap.innerHTML = `
-      <div class="tw"><table>
-        <thead><tr><th>Date</th><th>File</th><th>By</th><th>Imported</th><th>Flagged</th><th>Status</th><th></th></tr></thead>
-        <tbody>${imports.map(i=>`<tr>
-          <td style="font-size:12px">${fmtDT(i.created_at)}</td>
-          <td style="font-size:12px;font-family:monospace">${i.filename||'—'}</td>
-          <td style="font-size:12px">${i.imported_by_name||'—'}</td>
-          <td style="font-weight:600">${i.imported}</td>
-          <td style="color:${i.flagged?'var(--amber)':'var(--gray-4)'}">${i.flagged||0}</td>
-          <td><span class="pill" style="font-size:10px;background:${i.status==='deleted'?'var(--red-pale)':'var(--green-pale)'};color:${i.status==='deleted'?'var(--red)':'var(--green)'}">${i.status}</span></td>
-          <td>${DRM.user?.is_super_admin && i.status!=='deleted' ?
-            `<button class="btn btn-ghost btn-sm" onclick="_viewImport('${i.id}')">View</button>
-             <button class="btn btn-icon" style="color:var(--red)" onclick="_deleteImport('${i.id}')">🗑</button>` : '—'
-          }</td>
-        </tr>`).join('')}</tbody>
-      </table></div>`;
+    if (!imports.length) {
+      wrap.innerHTML = '<div class="empty"><p>No imports yet. Use the Import button on the Donors page to upload an Excel file.</p></div>';
+      return;
+    }
+    // Render each import as an expandable batch card, sorted newest first
+    wrap.innerHTML = imports.map((i,idx) => `
+      <div style="border:1px solid var(--gray-2);border-radius:8px;margin-bottom:10px;overflow:hidden">
+        <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;background:${i.status==='deleted'?'var(--gray-05)':'#fff'};cursor:pointer"
+          onclick="_toggleImportBatch('${i.id}')">
+          <div style="flex:1">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <strong style="font-size:13px">${i.filename||'Upload'}</strong>
+              <span class="pill" style="font-size:10px;background:${i.status==='deleted'?'#fee2e2':'#dcfce7'};color:${i.status==='deleted'?'var(--red)':'var(--green)'}">${i.status}</span>
+              ${i.flagged?`<span class="pill" style="font-size:10px;background:#fef3c7;color:#b45309">${i.flagged} duplicates flagged</span>`:''}
+            </div>
+            <div style="font-size:11px;color:var(--gray-5);margin-top:3px">
+              ${fmtDT(i.created_at)} · by ${i.imported_by_name||'Unknown'} · <strong>${i.imported}</strong> donors imported
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            ${DRM.user?.is_super_admin && i.status!=='deleted' ? `
+              <button class="btn btn-icon" style="color:var(--red)" title="Delete this entire import batch"
+                onclick="event.stopPropagation();_deleteImport('${i.id}')">🗑</button>` : ''}
+            <span id="imp-arrow-${i.id}" style="color:var(--gray-4);font-size:12px;transition:transform .2s">▼</span>
+          </div>
+        </div>
+        <div id="imp-batch-${i.id}" style="display:none;border-top:1px solid var(--gray-1)">
+          <div class="spinner" style="padding:16px"></div>
+        </div>
+      </div>`).join('');
   } catch(e) { wrap.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+
+async function _toggleImportBatch(id) {
+  const batch = $('imp-batch-'+id);
+  const arrow = $('imp-arrow-'+id);
+  if (!batch) return;
+  const isOpen = batch.style.display !== 'none';
+  batch.style.display = isOpen ? 'none' : '';
+  if (arrow) arrow.style.transform = isOpen ? '' : 'rotate(180deg)';
+  if (!isOpen && batch.querySelector('.spinner')) {
+    // Load donors in this batch
+    try {
+      const imp = await API.get(`/api/orgs/${API.orgId}/imports/${id}`);
+      batch.innerHTML = `
+        <div style="padding:10px 16px;font-size:12px;color:var(--gray-5);border-bottom:1px solid var(--gray-1)">
+          ${imp.items?.length||0} donors in this batch
+          ${imp.items?.some(x=>x.was_flagged) ? ' · <span style="color:var(--amber)">⚠ Some flagged as duplicates</span>' : ''}
+        </div>
+        <div style="max-height:320px;overflow-y:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead><tr style="background:var(--gray-05)">
+              <th style="padding:6px 12px;text-align:left">Name</th>
+              <th style="padding:6px 12px;text-align:left">Email</th>
+              <th style="padding:6px 12px;text-align:left">Cell</th>
+              <th style="padding:6px 12px;text-align:left">Added</th>
+              <th style="padding:6px 12px;text-align:left">Flag</th>
+            </tr></thead>
+            <tbody>
+              ${(imp.items||[]).map(item=>`<tr style="border-bottom:1px solid var(--gray-1)">
+                <td style="padding:6px 12px">${item.first_name||''} ${item.last_name||''}</td>
+                <td style="padding:6px 12px;color:var(--gray-5)">${item.email||'—'}</td>
+                <td style="padding:6px 12px;color:var(--gray-5)">${item.cell||'—'}</td>
+                <td style="padding:6px 12px;color:var(--gray-5)">${item.donor_created?fmtD(item.donor_created):'—'}</td>
+                <td style="padding:6px 12px">${item.was_flagged?`<span class="pill" style="font-size:10px;background:#fef3c7;color:#b45309">${item.flag_reasons||'duplicate'}</span>`:'—'}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    } catch(e) {
+      batch.innerHTML = `<div class="alert alert-err" style="margin:12px">${e.message}</div>`;
+    }
+  }
 }
 
 async function _viewImport(id) {
@@ -4949,4 +5008,29 @@ async function _deleteImport(id) {
       _loadImportHistory();
     } catch(e) { toast(e.message,'err'); }
   });
+}
+
+// ── All Orgs page (super admin) ───────────────────────────────────────────────
+async function _loadAllOrgs() {
+  const wrap = $('st-all-orgs-card'); if(!wrap) return;
+  wrap.innerHTML = '<div class="spinner"></div>';
+  try {
+    const orgs = await API.get('/api/auth/orgs');
+    wrap.innerHTML = `
+      <div class="card-title" style="margin-bottom:12px">All Organisations (${orgs.length})</div>
+      <div class="tw"><table>
+        <thead><tr><th>Name</th><th>Slug</th><th>Expires</th><th>Donors</th><th></th></tr></thead>
+        <tbody>${orgs.map(o=>`<tr>
+          <td><strong style="font-size:13px">${o.name}</strong></td>
+          <td style="font-size:11px;font-family:monospace;color:var(--gray-5)">${o.slug}</td>
+          <td style="font-size:12px;color:${o.expires_at&&new Date(o.expires_at)<new Date()?'var(--red)':'var(--gray-5)'}">${o.expires_at?fmtD(o.expires_at):'No expiry'}</td>
+          <td style="font-size:12px">${o.donor_count||'—'}</td>
+          <td>
+            <button class="btn btn-blue btn-sm" onclick="_superAdminAccessOrg('${o.id}','${o.name.replace(/'/g,"\\\\'")}')">
+              Access →
+            </button>
+          </td>
+        </tr>`).join('')}</tbody>
+      </table></div>`;
+  } catch(e) { wrap.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
