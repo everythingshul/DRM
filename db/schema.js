@@ -480,9 +480,10 @@ function runMigrations() {
     id TEXT PRIMARY KEY, super_admin_id TEXT NOT NULL,
     super_admin_name TEXT, org_id TEXT NOT NULL,
     purpose TEXT, status TEXT DEFAULT 'pending',
-    token TEXT, expires_at DATETIME,
+    token TEXT, granted_by TEXT, expires_at DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`); saveDb(); } catch(e) {}
+  try { db.run(`ALTER TABLE access_requests ADD COLUMN granted_by TEXT`); saveDb(); } catch(e) {}
   // Verify column exists
   try {
     const cols = db.exec("PRAGMA table_info(email_settings)");

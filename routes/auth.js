@@ -498,6 +498,39 @@ router.post('/new-account', async (req, res) => {
   }
 });
 
+// ── Update user profile ───────────────────────────────────────────────────────
+router.put('/orgs/:orgId/users/:userId/profile', requireAuth, requireOrg, async (req, res) => {
+  try {
+    const { full_name, email, role } = req.body;
+    const isOwnProfile = req.params.userId === req.user.id;
+    const isAdmin = req.orgRole === 'admin' || req.user.is_super_admin;
+    if (!isOwnProfile && !isAdmin) return res.status(403).json({ error: 'Not authorized' });
+    if (full_name) run('UPDATE users SET full_name=? WHERE id=?', [full_name, req.params.userId]);
+    if (email) run('UPDATE users SET email=? WHERE id=?', [email.toLowerCase().trim(), req.params.userId]);
+    if (role && isAdmin && !isOwnProfile) run('UPDATE org_users SET role=? WHERE user_id=? AND org_id=?', [role, req.params.userId, req.params.orgId]);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Change own password ────────────────────────────────────────────────────────
+router.post('/orgs/:orgId/users/change-password', requireAuth, requireOrg, async (req, res) => {
+  try {
+    const { current_password, new_password } = req.body;
+    if (!current_password || !new_password) return res.status(400).json({ error: 'Both passwords required' });
+    if (new_password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    const user = get('SELECT * FROM users WHERE id=?', [req.user.id]);
+    const bcrypt = require('bcryptjs');
+    const valid = await bcrypt.compare(current_password, user.password_hash);
+    if (!valid) return res.status(400).json({ error: 'Current password is incorrect' });
+    const hash = await bcrypt.hash(new_password, 10);
+    run('UPDATE users SET password_hash=? WHERE id=?', [hash, req.user.id]);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Update org settings (name etc) ────────────────────────────────────────────
+// Already handled in org router — this is just a convenience alias
+
 // ── Super admin: request access to an org (org admin must approve) ───────────
 router.post('/super-admin/request-access', requireAuth, async (req, res) => {
   try {

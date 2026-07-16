@@ -20,6 +20,15 @@ router.put('/info', requireOrgAdmin, (req, res) => {
   res.json({ success: true, org: get('SELECT * FROM organizations WHERE id = ?', [req.orgId]) });
 });
 
+// ── Update org name/settings ──────────────────────────────────────────────────
+router.put('/settings', requireOrgAdmin, (req, res) => {
+  try {
+    const { name } = req.body;
+    if (name) run('UPDATE organizations SET name=? WHERE id=?', [name.trim(), req.orgId]);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // --- EMAIL SETTINGS ---
 router.get('/email-settings', requireOrgAdmin, (req, res) => {
   const s = get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]);

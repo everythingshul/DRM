@@ -576,7 +576,6 @@ const Donors = {
       <div id="d-bulk" class="bulk-bar">
         <span id="d-bulk-cnt">0 selected</span>
         <button class="btn btn-ghost btn-sm" onclick="Donors.bulkLabel()">+ Label</button>
-        <button class="btn btn-ghost btn-sm" onclick="Donors.bulkNeighborhood()">🏘 Neighborhood</button>
         <button class="btn btn-ghost btn-sm" onclick="Donors.bulkAutopay()">⚡ AutoPay</button>
         <button class="btn btn-ghost btn-sm" onclick="Donors.bulkDelete()">Delete</button>
         <button class="btn btn-ghost btn-sm" onclick="Donors.clearSel()">Clear</button>
@@ -685,8 +684,8 @@ const Donors = {
   updateBulk() { const bar=$('d-bulk'),cnt=$('d-bulk-cnt'); if(bar)bar.className='bulk-bar'+(this.selected.size>0?' show':''); if(cnt)cnt.textContent=`${this.selected.size} selected`; },
   async bulkLabel() {
     if(!this.selected.size) return;
-    const labels = await API.get(`/api/orgs/${API.orgId}/labels`);
-    const donorLabels = (labels?.donor_labels || labels || []);
+    const labels = await API.get(`/api/orgs/${API.orgId}/label-lists`);
+    const donorLabels = (labels?.donor_labels || []);
     Modal.open(`Add Label to ${this.selected.size} Donor(s)`, `
       <div style="margin-bottom:10px">
         <div style="font-size:12px;color:var(--gray-5);margin-bottom:8px">Select a label to add to all selected donors:</div>
@@ -2784,7 +2783,8 @@ function _schedEmail(){
       ">Schedule</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
     </div>`,{sm:true});
-  API.get(`/api/orgs/${API.orgId}/labels`).then(l=>{
+  API.get(`/api/orgs/${API.orgId}/label-lists`).then(ll=>{
+    const l = ll?.donor_labels||[];
     const sel=$('se-label-sel');
     if(sel) sel.innerHTML='<option value="">— All in label —</option>'+(l||[]).map(x=>`<option value="${x}">${x}</option>`).join('');
   }).catch(()=>{});
@@ -2984,19 +2984,44 @@ async function renderSettings(el) {
     el.innerHTML = `
       <div class="ph"><div class="ph-title">Settings</div></div>
       <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-labels">Labels</div><div class="tab" data-tc="st-tz">Timezone</div><div class="tab" data-tc="st-log">Login Log</div><div class="tab" data-tc="st-backup">Backup</div><div class="tab" data-tc="st-imports">Import History</div>${DRM.user?.is_super_admin?'<div class="tab" data-tc="st-all-orgs">All Orgs</div>':''}</div>
-      <div id="st-users" class="tc on"><div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <strong>Users</strong>
-          <div class="bg">
-            ${DRM.user?.is_super_admin?`<button class="btn btn-outline btn-sm" onclick="_inviteAcct()">+ Invite New Account</button>`:''}
-            <button class="btn btn-primary btn-sm" onclick="_inviteUser()">+ Invite User</button>
+      <div id="st-users" class="tc on">
+        <div class="card" style="margin-bottom:12px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+            <strong>My Account</strong>
+            <button class="btn btn-ghost btn-sm" onclick="_editAccountInfo()">✏ Edit</button>
           </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px">
+            <div><span style="color:var(--gray-5);font-size:11px">Organisation</span><div style="font-weight:600">${org.name}</div></div>
+            <div><span style="color:var(--gray-5);font-size:11px">My Name</span><div>${DRM.user?.full_name||'—'}</div></div>
+            <div><span style="color:var(--gray-5);font-size:11px">Email</span><div>${DRM.user?.email||'—'}</div></div>
+            <div><span style="color:var(--gray-5);font-size:11px">Role</span><span class="pill ${DRM.user?.role==='admin'?'pill-blue':'pill-gray'}">${DRM.user?.role||'staff'}</span>${DRM.user?.is_super_admin?' <span class="pill pill-blue">Super Admin</span>':''}</div>
+          </div>
+          <button class="btn btn-ghost btn-sm" style="margin-top:10px" onclick="_changeMyPassword()">🔒 Change My Password</button>
         </div>
-        <div class="tw"><table>
-          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Last Login</th><th></th></tr></thead>
-          <tbody>${users.map(u=>`<tr><td><strong>${u.full_name}</strong></td><td style="font-size:12px">${u.email}</td><td><span class="pill ${u.role==='admin'?'pill-blue':'pill-gray'}">${u.role}</span></td><td style="font-size:12px">${fmtDT(u.last_login)}</td><td><div class="actions"><button class="btn btn-ghost btn-sm" onclick="_resetPw('${u.id}','${u.full_name}')">Reset PW</button><button class="btn btn-icon" style="color:var(--red)" onclick="_removeUser('${u.id}','${u.full_name}')">&#10005;</button></div></td></tr>`).join('')}</tbody>
-        </table></div>
-      </div></div>
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <strong>Users</strong>
+            <div class="bg">
+              ${DRM.user?.is_super_admin?`<button class="btn btn-outline btn-sm" onclick="_inviteAcct()">+ Invite New Account</button>`:''}
+              <button class="btn btn-primary btn-sm" onclick="_inviteUser()">+ Invite User</button>
+            </div>
+          </div>
+          <div class="tw"><table>
+            <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Last Login</th><th></th></tr></thead>
+            <tbody>${users.map(u=>`<tr>
+              <td><strong>${u.full_name}</strong></td>
+              <td style="font-size:12px">${u.email}</td>
+              <td><span class="pill ${u.role==='admin'?'pill-blue':'pill-gray'}">${u.role}</span></td>
+              <td style="font-size:12px">${fmtDT(u.last_login)}</td>
+              <td><div class="actions">
+                <button class="btn btn-ghost btn-sm" onclick="_editUser('${u.id}','${(u.full_name||'').replace(/'/g,"\\'")}','${u.email}','${u.role}')">Edit</button>
+                <button class="btn btn-ghost btn-sm" onclick="_resetPw('${u.id}','${(u.full_name||'').replace(/'/g,"\\'")}')">Reset PW</button>
+                <button class="btn btn-icon" style="color:var(--red)" onclick="_removeUser('${u.id}','${(u.full_name||'').replace(/'/g,"\\'")}')">&#10005;</button>
+              </div></td>
+            </tr>`).join('')}</tbody>
+          </table></div>
+        </div>
+      </div>
       <div id="st-nh" class="tc"><div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><strong>Neighborhoods</strong><button class="btn btn-primary btn-sm" onclick="_addHood()">+ Add</button></div>
         ${hoods.map(h=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--gray-1)"><span style="font-family:var(--font-he);font-size:15px">${h.name_he}</span><button class="btn btn-icon" style="color:var(--red)" onclick="API.del(API.o.hoods()+'/${h.id}').then(()=>{toast('Removed');renderSettings($('page-settings'))}).catch(e=>toast(e.message||'Unknown error','err'))">&#10005;</button></div>`).join('')||'<p style="color:var(--gray-5)">No neighborhoods yet</p>'}
@@ -4436,7 +4461,7 @@ function _edScheduleModal() {
 
   window._schedSelectedDonors = new Map();
   // Load labels
-  API.get(`/api/orgs/${API.orgId}/labels`).then(l => {
+  API.get(`/api/orgs/${API.orgId}/label-lists`).then(ll => { const l = ll?.donor_labels || [];
     const sel = $('sched-label-sel');
     if (sel) sel.innerHTML = '<option value="">— Select label —</option>' + (l||[]).map(x=>`<option value="${x}">${x}</option>`).join('');
   }).catch(()=>{});
@@ -4588,7 +4613,7 @@ async function _bulkLabelApplyDonors() {
 
 async function _donBulkLabel() {
   if(!window._donSelected?.size) return;
-  const labels = await API.get(`/api/orgs/${API.orgId}/labels`);
+  const labels = await API.get(`/api/orgs/${API.orgId}/label-lists`);
   const donationLabels = (labels?.donation_labels || []);
   Modal.open(`Add Label to ${window._donSelected.size} Donation(s)`, `
     <div style="margin-bottom:10px">
@@ -5304,7 +5329,7 @@ async function _leadsMassAssign() {
 }
 
 async function _leadsMassLabel() {
-  Modal.open('Add Label', `
+  Modal.open('Add Label to Selected Leads', `
     <input id="mass-label" placeholder="Label name…" autocomplete="new-password"
       style="width:100%;padding:8px;border:1.5px solid var(--gray-3);border-radius:6px;margin-bottom:12px;box-sizing:border-box">
     <div class="bg">
@@ -5462,4 +5487,95 @@ async function renderScheduledFollowups(el) {
 
 function _showScheduledFollowups() {
   navigateTo('followups');
+}
+
+// ── Account info editing ──────────────────────────────────────────────────────
+function _editAccountInfo() {
+  Modal.open('Edit Account Info', `
+    <label>Organisation Name</label>
+    <input id="acc-org-name" value="${DRM.org?.name||''}" autocomplete="new-password">
+    <hr class="divider">
+    <label>My Full Name</label>
+    <input id="acc-my-name" value="${DRM.user?.full_name||''}" autocomplete="new-password">
+    <label>My Email</label>
+    <input id="acc-my-email" type="email" value="${DRM.user?.email||''}" autocomplete="new-password">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_saveAccountInfo()">Save</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+async function _saveAccountInfo() {
+  try {
+    const orgName = val('acc-org-name')?.trim();
+    const myName  = val('acc-my-name')?.trim();
+    const myEmail = val('acc-my-email')?.trim();
+    // Update org name
+    if (orgName && orgName !== DRM.org?.name) {
+      await API.put(`/api/orgs/${API.orgId}/settings`, { name: orgName });
+    }
+    // Update my profile
+    if (myName || myEmail) {
+      await API.put(`/api/orgs/${API.orgId}/users/${DRM.user.id}/profile`, { full_name: myName, email: myEmail });
+    }
+    toast('Saved ✓');
+    Modal.close();
+    renderSettings($('page-settings'));
+  } catch(e) { toast(e.message||'Error','err'); }
+}
+
+function _changeMyPassword() {
+  Modal.open('Change My Password', `
+    <label>Current Password</label>
+    <input type="password" id="cp-current" autocomplete="current-password">
+    <label>New Password</label>
+    <input type="password" id="cp-new" autocomplete="new-password">
+    <label>Confirm New Password</label>
+    <input type="password" id="cp-confirm" autocomplete="new-password">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_doChangePassword()">Change Password</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+async function _doChangePassword() {
+  const current = val('cp-current');
+  const newPw   = val('cp-new');
+  const confirm = val('cp-confirm');
+  if (!current || !newPw) { toast('Fill in all fields','err'); return; }
+  if (newPw !== confirm) { toast('Passwords do not match','err'); return; }
+  if (newPw.length < 8) { toast('Password must be at least 8 characters','err'); return; }
+  try {
+    await API.post(`/api/orgs/${API.orgId}/users/change-password`, { current_password: current, new_password: newPw });
+    toast('Password changed ✓');
+    Modal.close();
+  } catch(e) { toast(e.message||'Error','err'); }
+}
+
+function _editUser(id, name, email, role) {
+  Modal.open(`Edit User: ${name}`, `
+    <label>Full Name</label>
+    <input id="eu-name" value="${name}" autocomplete="new-password">
+    <label>Email</label>
+    <input id="eu-email" type="email" value="${email}" autocomplete="new-password">
+    <label>Role</label>
+    <select id="eu-role">
+      <option value="staff" ${role==='staff'?'selected':''}>Staff</option>
+      <option value="admin" ${role==='admin'?'selected':''}>Admin</option>
+    </select>
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_saveUserEdit('${id}')">Save</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+async function _saveUserEdit(userId) {
+  try {
+    await API.put(`/api/orgs/${API.orgId}/users/${userId}/profile`, {
+      full_name: val('eu-name'), email: val('eu-email'), role: val('eu-role')
+    });
+    toast('User updated ✓');
+    Modal.close();
+    renderSettings($('page-settings'));
+  } catch(e) { toast(e.message||'Error','err'); }
 }
