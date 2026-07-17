@@ -18,6 +18,12 @@ router.get('/', (req, res) => {
   res.json(notifs);
 });
 
+// Mark as unread
+router.put('/:id/unread', (req, res) => {
+  run('UPDATE notifications SET is_read=0 WHERE id=? AND user_id=?', [req.params.id, req.user.id]);
+  res.json({ success: true });
+});
+
 // Mark as read
 router.put('/:id/read', (req, res) => {
   run('UPDATE notifications SET is_read=1 WHERE id=? AND user_id=?', [req.params.id, req.user.id]);

@@ -568,7 +568,7 @@ const Donors = {
     <div class="card" style="margin-bottom:12px;padding:12px 14px">
       <div class="search-bar">
         <div class="sw" style="flex:2">
-          <input id="d-search" placeholder="Search name, email, phone, Hebrew…" autocomplete="new-password" autocorrect="off" spellcheck="false">
+          <input id="d-search" placeholder="Search name, email, phone, Hebrew, #ID…" autocomplete="new-password" autocorrect="off" spellcheck="false">
         </div>
         <select id="d-hood"><option value="">All Neighborhoods</option></select>
         <select id="d-label"><option value="">All Labels</option></select>
@@ -651,7 +651,8 @@ const Donors = {
         <td><div style="display:flex;align-items:center;gap:8px">
           ${avatar(d, 28)}
           <div>
-            <div style="font-weight:600;font-size:13px">${d.title?d.title+' ':''}${d.first_name} ${d.last_name}</div>
+            <div style="font-weight:600;font-size:13px">${d.first_name} ${d.last_name}</div>
+            ${d.donor_number?`<div style="font-size:10px;color:var(--gray-4);font-family:monospace">#${d.donor_number}</div>`:''}
             ${lbls.length ? `<div class="bg" style="gap:3px;margin-top:2px;flex-wrap:wrap">${lbls.map(l=>`<span class="pill pill-blue" style="font-size:10px">${l}</span>`).join('')}</div>` : ''}
             ${d.needs_verification ? '<div style="font-size:10px;color:var(--amber);font-weight:600">⚠ Verify</div>' : ''}
           </div>
@@ -775,6 +776,7 @@ const Donors = {
       }
       if (btn){btn.textContent='Import';btn.disabled=false;}
       this.load();
+      Modal.close();
     } catch(e) {
       toast(e.message||'Import failed','err');
       if (btn){btn.textContent='Import';btn.disabled=false;}
@@ -4753,6 +4755,7 @@ function _renderLeadsList() {
         <td style="font-size:12px;${isOverdue?'color:var(--red);font-weight:700':'color:var(--gray-5)'}">${nextFu}${isOverdue?' ⚠':''}</td>
         <td><div class="actions">
           <button class="btn btn-blue btn-sm" onclick="_leadView('${l.id}')">View</button>
+              <button class="btn btn-ghost btn-sm" onclick="_leadLabels('${l.id}','${(l.labels||'[]').replace(/'/g,"\\'")}')" title="Labels">🏷</button>
           <button class="btn btn-ghost btn-sm" onclick="_leadAddFollowup('${l.id}')">Follow Up</button>
           ${l.status!=='converted'?`<button class="btn btn-green btn-sm" onclick="_leadConvert('${l.id}')">Convert</button>`:'<span class="pill pill-green" style="font-size:10px">Converted</span>'}
         </div></td>
@@ -4894,14 +4897,37 @@ async function _leadEdit(id) {
 }
 
 function _leadAddFollowup(leadId) {
+  // Load current lead for quick updates
+  const lead = _leadsData?.find(l=>l.id===leadId) || {};
   Modal.open('Add Follow-Up', `
-    <div style="font-size:13px;color:var(--gray-5);margin-bottom:12px">
-      Your name will be auto-signed on this follow-up.
-    </div>
+    <div style="font-size:12px;color:var(--gray-5);margin-bottom:10px">Auto-signed with your name.</div>
     <label>Notes <span style="color:var(--red)">*</span></label>
-    <textarea id="fu-notes" placeholder="How did the call go? What was discussed?" style="min-height:100px"></textarea>
-    <label style="margin-top:10px">Next Follow-up Date</label>
-    <input type="date" id="fu-date" value="${new Date(Date.now()+7*86400000).toISOString().slice(0,10)}">
+    <textarea id="fu-notes" placeholder="How did the call go?" style="min-height:80px"></textarea>
+    <label style="margin-top:8px">Next Follow-up Date <span style="font-size:11px;color:var(--gray-4)">(optional)</span></label>
+    <input type="date" id="fu-date" value="">
+    <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--gray-1)">
+      <div style="font-size:11px;font-weight:700;color:var(--gray-5);margin-bottom:6px">Quick Update (optional)</div>
+      <div class="r2">
+        <div><label style="font-size:11px">Status</label>
+          <select id="fu-status">
+            <option value="">No change</option>
+            ${['new','in_progress','lost'].map(s=>`<option value="${s}">${statusLabels[s]||s}</option>`).join('')}
+          </select>
+        </div>
+        <div><label style="font-size:11px">Category</label>
+          <select id="fu-category">
+            <option value="">No change</option>
+            ${_leadCategories.map(c=>`<option value="${c.name}">${c.name}</option>`).join('')}
+          </select>
+        </div>
+        <div><label style="font-size:11px">Assign To</label>
+          <select id="fu-assigned">
+            <option value="">No change</option>
+            ${_leadStaff.map(s=>`<option value="${s.id}">${s.full_name}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+    </div>
     <div class="bg mt">
       <button class="btn btn-primary" onclick="_leadSaveFollowup('${leadId}')">Save Follow-up</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
@@ -4912,9 +4938,15 @@ async function _leadSaveFollowup(leadId) {
   const notes = val('fu-notes')?.trim();
   if (!notes) { toast('Notes required','err'); return; }
   try {
-    await API.post(`/api/orgs/${API.orgId}/leads/${leadId}/followup`, {
-      notes, next_followup_date: val('fu-date')||null
-    });
+    const nextDate = val('fu-date')||null;
+    // Save the follow-up
+    await API.post(`/api/orgs/${API.orgId}/leads/${leadId}/followup`, { notes, next_followup_date: nextDate });
+    // Apply quick updates if set
+    const updates = {};
+    if (val('fu-status'))   updates.status      = val('fu-status');
+    if (val('fu-category')) updates.category    = val('fu-category');
+    if (val('fu-assigned')) updates.assigned_to = val('fu-assigned');
+    if (Object.keys(updates).length) await API.put(`/api/orgs/${API.orgId}/leads/${leadId}`, updates);
     toast('Follow-up saved ✓'); Modal.close(); _loadLeads();
   } catch(e) { toast(e.message||'Error','err'); }
 }
@@ -5579,4 +5611,176 @@ async function _saveUserEdit(userId) {
     Modal.close();
     renderSettings($('page-settings'));
   } catch(e) { toast(e.message||'Error','err'); }
+}
+
+// ── Mark notification as unread ───────────────────────────────────────────────
+async function _markNotifUnread(id) {
+  try {
+    await API.put(`/api/orgs/${API.orgId}/notifications/${id}/unread`, {});
+    _loadNotifications();
+  } catch(e) {}
+}
+
+// ── Donation multi-label management ──────────────────────────────────────────
+async function _donationLabels(donationId, currentLabelsJson) {
+  const labels = await API.get(`/api/orgs/${API.orgId}/label-lists`).catch(()=>({}));
+  const donLabels = labels?.donation_labels || [];
+  let current = [];
+  try { current = JSON.parse(currentLabelsJson||'[]'); } catch {}
+
+  Modal.open('Donation Labels', `
+    <div style="margin-bottom:10px">
+      <div style="font-size:11px;font-weight:700;color:var(--gray-5);margin-bottom:6px">Current Labels</div>
+      <div id="don-label-current" style="display:flex;flex-wrap:wrap;gap:4px;min-height:24px">
+        ${current.map(l=>`<span class="pill pill-blue" style="font-size:11px">${l}
+          <span onclick="this.parentElement.remove();_donLabelSync('${donationId}')" style="cursor:pointer;margin-left:3px">×</span>
+        </span>`).join('')}
+      </div>
+    </div>
+    <div style="font-size:11px;font-weight:700;color:var(--gray-5);margin-bottom:6px">Add Label</div>
+    <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px">
+      ${donLabels.map(l=>`<button type="button" class="btn btn-ghost btn-sm" style="font-size:11px"
+        onclick="_donLabelAdd('${donationId}','${l.replace(/'/g,"\\\\'")}',this)">${l}</button>`).join('')}
+    </div>
+    <div style="display:flex;gap:6px">
+      <input id="don-label-custom" placeholder="Custom label…" autocomplete="new-password" style="flex:1;font-size:12px">
+      <button class="btn btn-ghost btn-sm" onclick="_donLabelAddCustom('${donationId}')">Add</button>
+    </div>
+    <input type="hidden" id="don-label-donid" value="${donationId}">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_donLabelSave('${donationId}')">Save</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+  window._donLabelCurrent = [...current];
+}
+
+function _donLabelAdd(donId, label, btn) {
+  if (!window._donLabelCurrent) window._donLabelCurrent = [];
+  if (window._donLabelCurrent.includes(label)) return;
+  window._donLabelCurrent.push(label);
+  const cur = $('don-label-current');
+  if (cur) {
+    const chip = document.createElement('span');
+    chip.className = 'pill pill-blue';
+    chip.style.fontSize = '11px';
+    chip.innerHTML = `${label} <span onclick="this.parentElement.remove();window._donLabelCurrent=window._donLabelCurrent.filter(x=>x!=='${label.replace(/'/g,"\\\\'")}');" style="cursor:pointer;margin-left:3px">×</span>`;
+    cur.appendChild(chip);
+  }
+  if (btn) { btn.className = 'btn btn-primary btn-sm'; btn.style.fontSize = '11px'; }
+}
+
+function _donLabelAddCustom(donId) {
+  const v = val('don-label-custom')?.trim();
+  if (v) { _donLabelAdd(donId, v, null); $('don-label-custom').value = ''; }
+}
+
+async function _donLabelSave(donId) {
+  const labels = [...($('don-label-current')?.querySelectorAll('.pill')||[])].map(c=>c.textContent.replace('×','').trim()).filter(Boolean);
+  try {
+    await API.put(`/api/orgs/${API.orgId}/donations/${donId}/label`, { labels });
+    toast('Labels saved ✓'); Modal.close();
+    // Refresh donor detail if open
+    if (window.DonorDetail?.data) DonorDetail.open(window.DonorDetail.data.id);
+  } catch(e) { toast(e.message,'err'); }
+}
+
+// ── Lead labels — same as donors ─────────────────────────────────────────────
+async function _leadLabels(leadId, currentLabelsJson) {
+  const labels = await API.get(`/api/orgs/${API.orgId}/label-lists`).catch(()=>({}));
+  const donorLabels = labels?.donor_labels || [];
+  let current = [];
+  try { current = JSON.parse(currentLabelsJson||'[]'); } catch {}
+
+  Modal.open('Lead Labels', `
+    <div style="margin-bottom:10px">
+      <div style="font-size:11px;font-weight:700;color:var(--gray-5);margin-bottom:6px">Current Labels</div>
+      <div id="lead-label-current" style="display:flex;flex-wrap:wrap;gap:4px;min-height:24px">
+        ${current.map(l=>`<span class="pill pill-blue" style="font-size:11px">${l}
+          <span onclick="this.parentElement.remove()" style="cursor:pointer;margin-left:3px">×</span>
+        </span>`).join('')}
+      </div>
+    </div>
+    <div style="font-size:11px;font-weight:700;color:var(--gray-5);margin-bottom:6px">Add Label</div>
+    <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px">
+      ${donorLabels.map(l=>`<button type="button" class="btn btn-ghost btn-sm" style="font-size:11px"
+        onclick="_leadLabelAdd('${l.replace(/'/g,"\\\\'")}',this)">${l}</button>`).join('')}
+    </div>
+    <div style="display:flex;gap:6px">
+      <input id="lead-label-custom" placeholder="Custom label…" autocomplete="new-password" style="flex:1;font-size:12px">
+      <button class="btn btn-ghost btn-sm" onclick="
+        const v=val('lead-label-custom')?.trim();
+        if(v){_leadLabelAdd(v,null);$('lead-label-custom').value='';}
+      ">Add</button>
+    </div>
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_leadLabelSave('${leadId}')">Save</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+function _leadLabelAdd(label, btn) {
+  const cur = $('lead-label-current');
+  if (!cur) return;
+  const existing = [...cur.querySelectorAll('.pill')].map(c=>c.textContent.replace('×','').trim());
+  if (existing.includes(label)) return;
+  const chip = document.createElement('span');
+  chip.className = 'pill pill-blue';
+  chip.style.fontSize = '11px';
+  chip.innerHTML = `${label} <span onclick="this.parentElement.remove()" style="cursor:pointer;margin-left:3px">×</span>`;
+  cur.appendChild(chip);
+  if (btn) { btn.className = 'btn btn-primary btn-sm'; btn.style.fontSize='11px'; }
+}
+
+async function _leadLabelSave(leadId) {
+  const labels = [...($('lead-label-current')?.querySelectorAll('.pill')||[])].map(c=>c.textContent.replace('×','').trim()).filter(Boolean);
+  try {
+    await API.put(`/api/orgs/${API.orgId}/leads/${leadId}`, { labels });
+    toast('Labels saved ✓'); Modal.close(); _loadLeads();
+  } catch(e) { toast(e.message,'err'); }
+}
+
+// ── Duplicate flags ───────────────────────────────────────────────────────────
+async function _loadDuplicateFlags() {
+  try {
+    const dups = await API.get(`/api/orgs/${API.orgId}/donors/duplicates`);
+    if (!dups.length) return;
+    // Show on verification page
+    const pg = $('page-verification');
+    if (!pg) return;
+    const existing = $('dup-flags-section');
+    if (existing) existing.remove();
+    const wrap = document.createElement('div');
+    wrap.id = 'dup-flags-section';
+    wrap.innerHTML = `
+      <div class="ph" style="margin-top:24px">
+        <div><div class="ph-title" style="color:var(--red)">⚠ Duplicate Donors (${dups.length})</div>
+          <div class="ph-sub">These donors were flagged as possible duplicates on import. Resolve each pair.</div>
+        </div>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden"><div class="tw"><table>
+        <thead><tr><th>Donor A</th><th>Donor B</th><th>Status</th><th></th></tr></thead>
+        <tbody>${dups.map(d=>`<tr>
+          <td><div style="font-weight:600;font-size:13px">#${d.number_a||'?'} ${d.name_a}</div><div style="font-size:11px;color:var(--gray-5)">${d.email_a||d.cell_a||''}</div></td>
+          <td><div style="font-weight:600;font-size:13px">#${d.number_b||'?'} ${d.name_b}</div><div style="font-size:11px;color:var(--gray-5)">${d.email_b||d.cell_b||''}</div></td>
+          <td><span class="pill" style="font-size:10px;background:#fef3c7;color:#b45309">${d.status}</span></td>
+          <td><div class="actions">
+            <button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${d.donor_id_a}')">View A</button>
+            <button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${d.donor_id_b}')">View B</button>
+            <button class="btn btn-green btn-sm" onclick="_resolveDup('${d.id}','keep_both')">Keep Both</button>
+            <button class="btn btn-ghost btn-sm" onclick="_resolveDup('${d.id}','merge_into_a')">Merge→A</button>
+            <button class="btn btn-ghost btn-sm" onclick="_resolveDup('${d.id}','merge_into_b')">Merge→B</button>
+          </div></td>
+        </tr>`).join('')}</tbody>
+      </table></div></div>`;
+    pg.insertBefore(wrap, pg.firstChild);
+  } catch {}
+}
+
+async function _resolveDup(dupId, action) {
+  try {
+    await API.post(`/api/orgs/${API.orgId}/donors/duplicates/${dupId}/resolve`, { action });
+    toast('Resolved ✓');
+    _loadDuplicateFlags();
+    loadBadges();
+  } catch(e) { toast(e.message,'err'); }
 }

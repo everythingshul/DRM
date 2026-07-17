@@ -46,11 +46,18 @@ router.post('/', (req, res) => {
   const { title,first_name,last_name,hebrew_title,hebrew_full_name,email,cell,home_phone,
           street,apt,city,state,zip,neighborhood_id,labels,category,notes,assigned_to,status } = req.body;
   const id = uuidv4();
-  run(`INSERT INTO leads (id,org_id,title,first_name,last_name,hebrew_title,hebrew_full_name,
+  let donorNum;
+  for (let attempts = 0; attempts < 20; attempts++) {
+    const candidate = Math.floor(100000 + Math.random() * 900000);
+    const { get: g } = require('../db/schema');
+    const exists = g('SELECT id FROM donors WHERE donor_number=? UNION SELECT id FROM leads WHERE donor_number=?', [candidate, candidate]);
+    if (!exists) { donorNum = candidate; break; }
+  }
+  run(`INSERT INTO leads (id,org_id,donor_number,title,first_name,last_name,hebrew_title,hebrew_full_name,
        email,cell,home_phone,street,apt,city,state,zip,neighborhood_id,labels,category,notes,
        assigned_to,status,created_by)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [id,req.orgId,title||null,first_name||null,last_name||null,hebrew_title||null,hebrew_full_name||null,
+    [id,req.orgId,donorNum||null,title||null,first_name||null,last_name||null,hebrew_title||null,hebrew_full_name||null,
      email||null,cell||null,home_phone||null,street||null,apt||null,city||null,state||null,zip||null,
      neighborhood_id||null,JSON.stringify(labels||[]),category||null,notes||null,
      assigned_to||null,status||'new',req.user.id]);
@@ -139,10 +146,10 @@ router.post('/:id/convert', requireOrgAdmin, (req, res) => {
   if (lead.converted_donor_id) return res.status(400).json({ error: 'Already converted' });
 
   const donorId = uuidv4();
-  run(`INSERT INTO donors (id,org_id,title,first_name,last_name,hebrew_title,hebrew_full_name,
+  run(`INSERT INTO donors (id,org_id,donor_number,title,first_name,last_name,hebrew_title,hebrew_full_name,
        email,cell,home_phone,street,apt,city,state,zip,neighborhood_id,labels,notes)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [donorId,req.orgId,lead.title,lead.first_name||'',lead.last_name||'',
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [donorId,req.orgId,lead.donor_number||null,lead.title,lead.first_name||'',lead.last_name||'',
      lead.hebrew_title,lead.hebrew_full_name,lead.email,lead.cell,lead.home_phone,
      lead.street,lead.apt,lead.city,lead.state,lead.zip,lead.neighborhood_id,
      lead.labels||'[]',lead.notes]);

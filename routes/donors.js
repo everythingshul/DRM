@@ -128,15 +128,22 @@ router.post('/', (req, res) => {
     if (!first_name || !last_name) return res.status(400).json({ error: 'First and last name required' });
 
     const id = uuidv4();
+    // Generate unique 6-digit donor number
+    let donorNum;
+    for (let attempts = 0; attempts < 20; attempts++) {
+      const candidate = Math.floor(100000 + Math.random() * 900000);
+      const exists = get('SELECT id FROM donors WHERE donor_number=? UNION SELECT id FROM leads WHERE donor_number=?', [candidate, candidate]);
+      if (!exists) { donorNum = candidate; break; }
+    }
     run(`
       INSERT INTO donors (
-        id, org_id, title, first_name, last_name, hebrew_title, hebrew_full_name,
+        id, org_id, donor_number, title, first_name, last_name, hebrew_title, hebrew_full_name,
         cell, home_phone, email, neighborhood_id,
         street, apt, city, state, zip,
         labels, kvitel, kvitel_enabled
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
-      id, req.orgId, title || null, first_name, last_name, hebrew_title || null, hebrew_full_name || null,
+      id, req.orgId, donorNum||null, title || null, first_name, last_name, hebrew_title || null, hebrew_full_name || null,
       cell || null, home_phone || null, email || null, neighborhood_id || null,
       street || null, apt || null, city || null, state || null, zip || null,
       JSON.stringify(labels), kvitel, kvitel_enabled ? 1 : 0
@@ -257,6 +264,48 @@ router.delete('/:id', (req, res) => {
   run('UPDATE donations SET donor_id = NULL WHERE donor_id = ?', [req.params.id]);
   run('DELETE FROM donors WHERE id = ?', [req.params.id]);
   res.json({ success: true });
+});
+
+// ── Duplicate flags ───────────────────────────────────────────────────────────
+router.get('/duplicates', (req, res) => {
+  const dups = all(`
+    SELECT dd.*,
+      da.first_name||' '||COALESCE(da.last_name,'') as name_a, da.email as email_a, da.cell as cell_a, da.donor_number as number_a,
+      db.first_name||' '||COALESCE(db.last_name,'') as name_b, db.email as email_b, db.cell as cell_b, db.donor_number as number_b
+    FROM donor_duplicates dd
+    JOIN donors da ON da.id=dd.donor_id_a
+    JOIN donors db ON db.id=dd.donor_id_b
+    WHERE dd.org_id=? AND dd.status='pending'
+    ORDER BY dd.created_at DESC
+  `, [req.orgId]);
+  res.json(dups);
+});
+
+router.post('/duplicates/:id/resolve', requireOrgAdmin, (req, res) => {
+  try {
+    const { action } = req.body;
+    const dup = get('SELECT * FROM donor_duplicates WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
+    if (!dup) return res.status(404).json({ error: 'Not found' });
+
+    if (action === 'keep_both') {
+      run('UPDATE donor_duplicates SET status=?,resolved_by=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?',
+        ['resolved_separate', req.user.id, req.params.id]);
+    } else if (action === 'merge_into_a') {
+      // Move donations from B to A, delete B
+      run('UPDATE donations SET donor_id=? WHERE donor_id=?', [dup.donor_id_a, dup.donor_id_b]);
+      run('UPDATE payment_methods SET donor_id=? WHERE donor_id=?', [dup.donor_id_a, dup.donor_id_b]);
+      run('DELETE FROM donors WHERE id=?', [dup.donor_id_b]);
+      run('UPDATE donor_duplicates SET status=?,resolved_by=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?',
+        ['merged', req.user.id, req.params.id]);
+    } else if (action === 'merge_into_b') {
+      run('UPDATE donations SET donor_id=? WHERE donor_id=?', [dup.donor_id_b, dup.donor_id_a]);
+      run('UPDATE payment_methods SET donor_id=? WHERE donor_id=?', [dup.donor_id_b, dup.donor_id_a]);
+      run('DELETE FROM donors WHERE id=?', [dup.donor_id_a]);
+      run('UPDATE donor_duplicates SET status=?,resolved_by=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?',
+        ['merged', req.user.id, req.params.id]);
+    }
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // --- AUTOPAY CONTROLS ---

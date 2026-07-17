@@ -129,6 +129,7 @@ function createTables() {
     );
     CREATE TABLE IF NOT EXISTS donors (
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
+      donor_number INTEGER,
       title TEXT, first_name TEXT, last_name TEXT,
       hebrew_title TEXT, hebrew_full_name TEXT, neighborhood_id TEXT,
       cell TEXT, home_phone TEXT, email TEXT,
@@ -151,7 +152,7 @@ function createTables() {
       amount REAL NOT NULL, method TEXT NOT NULL, payment_method_id TEXT,
       transaction_id TEXT, status TEXT DEFAULT 'completed', label TEXT,
       donation_date DATETIME NOT NULL, notes TEXT,
-      donation_notes TEXT DEFAULT '[]', refund_amount REAL DEFAULT 0, refund_notes TEXT,
+      donation_notes TEXT DEFAULT '[]', labels TEXT DEFAULT '[]', refund_amount REAL DEFAULT 0, refund_notes TEXT,
       is_manual INTEGER DEFAULT 0, is_autopay INTEGER DEFAULT 0, is_recurring INTEGER DEFAULT 0,
       receipt_sent INTEGER DEFAULT 0, failure_reason TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP, created_by TEXT
@@ -310,6 +311,7 @@ function createTables() {
     -- Leads
     CREATE TABLE IF NOT EXISTS leads (
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
+      donor_number INTEGER,
       title TEXT, first_name TEXT, last_name TEXT,
       hebrew_title TEXT, hebrew_full_name TEXT,
       email TEXT, cell TEXT, home_phone TEXT,
@@ -408,6 +410,9 @@ function runMigrations() {
   safe("ALTER TABLE kvitel_settings ADD COLUMN neighborhood_size REAL DEFAULT 14");
   safe("ALTER TABLE kvitel_settings ADD COLUMN neighborhood_bold INTEGER DEFAULT 1");
   safe("ALTER TABLE donors ADD COLUMN sola_customer_id TEXT");
+  safe("ALTER TABLE donors ADD COLUMN donor_number INTEGER");
+  safe("ALTER TABLE leads ADD COLUMN donor_number INTEGER");
+  safe("ALTER TABLE donations ADD COLUMN labels TEXT DEFAULT '[]'");
   safe("ALTER TABLE email_settings ADD COLUMN brevo_api_key TEXT DEFAULT ''");
   // Invite permissions column
   safe("ALTER TABLE org_users ADD COLUMN permissions TEXT DEFAULT '{}'");

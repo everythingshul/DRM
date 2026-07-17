@@ -129,8 +129,35 @@ app.post('/api/orgs/:orgId/import/donors',
 
         // Skip only completely empty rows
         const allEmpty = !fn && !ln && !email && !cell && !hebrew && !street;
-        if (allEmpty) continue; // silently skip blank rows
+        if (allEmpty) continue;
         const displayName = [fn, ln].filter(Boolean).join(' ') || email || cell || 'Unknown';
+
+        // Check for existing donor by ID number
+        const importedNum = row['ID #'] || row['ID#'] || row['Donor ID'] || row['donor_number'] || '';
+        const existingById = importedNum ? get('SELECT * FROM donors WHERE donor_number=? AND org_id=?', [parseInt(importedNum), req.params.orgId]) : null;
+        if (existingById) {
+          // Update only non-empty fields
+          const updates = [];
+          const vals = [];
+          const fieldMap = {
+            'First Name': 'first_name', 'Last Name': 'last_name',
+            'Hebrew Title': 'hebrew_title', 'Hebrew Name': 'hebrew_full_name',
+            'Email': 'email', 'Cell': 'cell', 'Home Phone': 'home_phone',
+            'Street': 'street', 'Apt': 'apt', 'City': 'city',
+            'State': 'state', 'Zip': 'zip', 'Title': 'title', 'Notes': 'notes'
+          };
+          for (const [col, field] of Object.entries(fieldMap)) {
+            const v = (row[col]||'').toString().trim();
+            if (v) { updates.push(`${field}=?`); vals.push(v); }
+          }
+          if (updates.length) {
+            vals.push(existingById.id, req.params.orgId);
+            run(`UPDATE donors SET ${updates.join(',')} WHERE id=? AND org_id=?`, vals);
+          }
+          donorIds.push({ id: existingById.id, flagged: false, reasons: '' });
+          imported++;
+          continue;
+        }
 
         // Duplicate detection — flag on any field match, still import
         const dupReasons = [];
