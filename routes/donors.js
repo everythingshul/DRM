@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router({ mergeParams: true });
 const { v4: uuidv4 } = require('uuid');
 const { all, get, run } = require('../db/schema');
-const { requireAuth, requireOrg } = require('../middleware/auth');
+const { requireAuth, requireOrg, requireOrgAdmin } = require('../middleware/auth');
 
 // Apply auth + org middleware
 router.use(requireAuth, requireOrg);
