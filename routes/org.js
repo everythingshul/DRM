@@ -319,6 +319,7 @@ router.get('/reports/donors', (req, res) => {
       }).join(' | ');
 
       return {
+        'ID #':               d.donor_number || '',
         'Title':              d.title || '',
         'First Name':         d.first_name || '',
         'Last Name':          d.last_name || '',
@@ -349,7 +350,7 @@ router.get('/reports/donors', (req, res) => {
       };
     }));
     ws1['!cols'] = [
-      {wch:8},{wch:14},{wch:16},{wch:12},{wch:18},{wch:28},{wch:14},{wch:14},
+      {wch:9},{wch:8},{wch:14},{wch:16},{wch:12},{wch:18},{wch:28},{wch:14},{wch:14},
       {wch:22},{wch:6},{wch:14},{wch:6},{wch:8},{wch:16},{wch:20},{wch:30},
       {wch:12},{wch:10},{wch:14},{wch:10},{wch:10},{wch:40},{wch:10},{wch:10},{wch:18},{wch:12},{wch:14}
     ];
@@ -357,7 +358,7 @@ router.get('/reports/donors', (req, res) => {
 
     // ── Sheet 2: Payment Methods ──────────────────────────────────────────────
     const allCards = all(`
-      SELECT pm.*, d.first_name, d.last_name, d.email
+      SELECT pm.*, d.first_name, d.last_name, d.email, d.donor_number
       FROM payment_methods pm
       JOIN donors d ON pm.donor_id = d.id
       WHERE pm.org_id = ?
@@ -365,6 +366,7 @@ router.get('/reports/donors', (req, res) => {
     `, [req.orgId]);
     if (allCards.length) {
       const ws2 = XLSX.utils.json_to_sheet(allCards.map(c => ({
+        'ID #':              c.donor_number || '',
         'Donor First Name':  c.first_name,
         'Donor Last Name':   c.last_name,
         'Donor Email':       c.email || '',
@@ -383,7 +385,7 @@ router.get('/reports/donors', (req, res) => {
 
     // ── Sheet 3: Donation History ─────────────────────────────────────────────
     const donations = all(`
-      SELECT don.*, d.first_name, d.last_name, d.email,
+      SELECT don.*, d.first_name, d.last_name, d.email, d.donor_number,
              pm.label as card_label, pm.last_four, pm.card_brand, pm.type as card_type
       FROM donations don
       JOIN donors d ON don.donor_id = d.id
@@ -394,6 +396,7 @@ router.get('/reports/donors', (req, res) => {
     if (donations.length) {
       const ws3 = XLSX.utils.json_to_sheet(donations.map(d => ({
         'Date':              d.donation_date ? d.donation_date.slice(0,10) : '',
+        'ID #':              d.donor_number || '',
         'First Name':        d.first_name,
         'Last Name':         d.last_name,
         'Email':             d.email || '',

@@ -373,6 +373,8 @@ router.post('/:id/donations', async (req, res) => {
 
     const donor = get('SELECT * FROM donors WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!donor) return res.status(404).json({ error: 'Donor not found' });
+    const _dup = get(`SELECT id FROM donor_duplicates WHERE status='pending' AND (donor_id_a=? OR donor_id_b=?)`, [req.params.id, req.params.id]);
+    if (_dup) return res.status(400).json({ error: 'Unresolved duplicate flag on this donor. Resolve in Info Check first.' });
 
     const id = uuidv4();
     const autoTxId = transaction_id || ('ES' + String(Math.floor(Math.random() * 1000000000)).padStart(9, '0'));

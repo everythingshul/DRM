@@ -390,6 +390,7 @@ function showNewAcct(token) {
 }
 
 async function setOrg(org) {
+  try { window._orgTz = JSON.parse(org?.settings||'{}').timezone || window._orgTz; } catch {}
   DRM.org = org; API.orgId = org.id;
   DRM.orgs = _allOrgs;
   const sel = $('org-select');
@@ -418,6 +419,7 @@ function showApp() {
   // Poll notifications every 15 seconds for liveness
   setInterval(_loadNotifications, 15000);
   setTimeout(_loadNotifications, 500);
+  setTimeout(()=>{ if(typeof _checkAccessRequests==='function') _checkAccessRequests(); }, 800);
   // Also refresh when window gets focus
   window.addEventListener('focus', _loadNotifications);
   // Show recovery link for super admins
@@ -462,7 +464,7 @@ function navigateTo(page) {
 function reloadPage() { const el = $('page-' + _currentPage); if(el) renderPage(_currentPage, el); }
 window.addEventListener('popstate', () => {
   const page = location.hash.replace('#','') || 'dashboard';
-  const valid = ['dashboard','donors','leads','followups','donations','verification','failures','bank','emails','kvitel','reports','settings','whatsapp','recovery'];
+  const valid = ['dashboard','donors','leads','followups','accounts','donations','verification','failures','bank','emails','kvitel','reports','settings','whatsapp','recovery'];
   if (valid.includes(page)) { const el=$('page-'+page); if(el) el.innerHTML=''; navigateTo(page); }
 });
 
@@ -472,6 +474,7 @@ function renderPage(page, el) {
     donors:       el => Donors.render(el),
     leads:        renderLeads,
     followups:    renderScheduledFollowups,
+    accounts:     renderAccounts,
     donations:    renderDonations,
     verification: renderVerification,
     failures:     renderFailures,
@@ -653,6 +656,7 @@ const Donors = {
           <div>
             <div style="font-weight:600;font-size:13px">${d.first_name} ${d.last_name}</div>
             ${d.donor_number?`<div style="font-size:10px;color:var(--gray-4);font-family:monospace">#${d.donor_number}</div>`:''}
+            ${d.dup_id?`<button class="pill" style="font-size:9px;background:#fef3c7;color:#b45309;border:1px solid #f59e0b;cursor:pointer" onclick="event.stopPropagation();DonorDetail.open('${d.dup_other_id}')" title="Open linked duplicate">⚠ DUPLICATE ↗</button>`:''}
             ${lbls.length ? `<div class="bg" style="gap:3px;margin-top:2px;flex-wrap:wrap">${lbls.map(l=>`<span class="pill pill-blue" style="font-size:10px">${l}</span>`).join('')}</div>` : ''}
             ${d.needs_verification ? '<div style="font-size:10px;color:var(--amber);font-weight:600">⚠ Verify</div>' : ''}
           </div>
@@ -881,7 +885,7 @@ const DonorDetail = {
       <div class="donor-detail-hdr">
         <div class="dd-av">${inits(donor.first_name, donor.last_name)}</div>
         <div style="flex:1">
-          <div style="font-size:19px;font-weight:700">${donor.title?donor.title+' ':''}${donor.first_name} ${donor.last_name}</div>
+          <div style="font-size:19px;font-weight:700">${donor.title?donor.title+' ':''}${donor.first_name} ${donor.last_name} ${donor.donor_number?`<span style=\"font-size:12px;color:var(--gray-4);font-family:monospace\">#${donor.donor_number}</span>`:''} ${donor.dup_id?`<button class=\"pill\" style=\"font-size:10px;background:#fef3c7;color:#b45309;border:1px solid #f59e0b;cursor:pointer;vertical-align:middle\" onclick=\"DonorDetail.open('${donor.dup_other_id}')\">⚠ DUPLICATE — view other ↗</button>`:''}</div>
           ${donor.hebrew_full_name?`<div style="font-family:var(--font-he);direction:rtl;opacity:.85;font-size:14px">${donor.hebrew_title||''} ${donor.hebrew_full_name}</div>`:''}
           <div style="font-size:12px;opacity:.7;margin-top:3px">${age(donor.months_old)} · ${donor.email||''} ${donor.cell?'· '+donor.cell:''} ${donor.neighborhood_name?'· '+donor.neighborhood_name:''}</div>
           <div class="bg" style="gap:4px;margin-top:5px;flex-wrap:wrap">${lbls.map(l=>`<span class="pill pill-blue" style="font-size:10px">${l}</span>`).join('')}${donor.needs_verification?'<span class="pill pill-amber" style="font-size:10px">⚠ Verify</span>':''}</div>
@@ -2269,7 +2273,7 @@ function _edRenderShell(name, subject) {
           </div>`).join('')}
 
         <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;letter-spacing:.5px;margin:16px 0 8px">Merge Tags</div>
-        ${['{{first_name}}','{{last_name}}','{{title}}','{{hebrew_title}}','{{hebrew_name}}','{{amount}}','{{date}}','{{transaction_id}}','{{method}}','{{org_name}}'].map(tag =>
+        ${['{{donor_number}}','{{first_name}}','{{last_name}}','{{title}}','{{hebrew_title}}','{{hebrew_name}}','{{amount}}','{{date}}','{{transaction_id}}','{{method}}','{{org_name}}'].map(tag =>
           `<div onclick="navigator.clipboard.writeText('${tag}').then(()=>toast('Copied'))"
             style="font-size:11px;font-family:monospace;background:#fff;border:1px solid var(--gray-1);
             border-radius:4px;padding:4px 8px;margin-bottom:3px;cursor:pointer;color:var(--blue)"
@@ -5017,9 +5021,8 @@ async function _loadNotifications() {
   try {
     const notifs = await API.get(`/api/orgs/${API.orgId}/notifications`);
     const unread = notifs.filter(n=>!n.is_read).length;
-    const badge = $('notif-badge'), count = $('notif-count');
+    const badge = $('notif-badge');
     if (badge) badge.style.display = unread > 0 ? '' : 'none';
-    if (count) count.textContent = unread;
     const list = $('notif-list');
     if (list) {
       list.innerHTML = notifs.length ? notifs.map(n=>`
@@ -5783,4 +5786,17 @@ async function _resolveDup(dupId, action) {
     _loadDuplicateFlags();
     loadBadges();
   } catch(e) { toast(e.message,'err'); }
+}
+
+
+// ══ ACCOUNTS PAGE (super admin) ═══════════════════════════════════════════════
+async function renderAccounts(el) {
+  if (!DRM.user?.is_super_admin) { el.innerHTML='<div class="alert alert-err">Super admin only</div>'; return; }
+  el.innerHTML = `
+    <div class="ph">
+      <div><div class="ph-title">Accounts</div><div class="ph-sub">Create, edit, and access organisations</div></div>
+      <button class="btn btn-primary btn-sm" onclick="_inviteAcct()">+ Create Account</button>
+    </div>
+    <div class="card" id="st-all-orgs-card"><div class="spinner"></div></div>`;
+  _loadAllOrgs();
 }

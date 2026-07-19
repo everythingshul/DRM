@@ -124,6 +124,9 @@
       <a class="nav-item" data-page="bank">
         <span class="ni">&#127968;</span><span class="nl">Bank</span>
       </a>
+      <a class="nav-item nav-super-admin" data-page="accounts" style="display:none">
+        <span class="ni">🏢</span><span class="nl">Accounts</span>
+      </a>
       <a class="nav-item nav-super-admin" data-page="whatsapp" style="display:none">
         <span class="ni">💬</span><span class="nl">WhatsApp</span>
       </a>
@@ -147,8 +150,9 @@
     <div class="sb-footer">
       <span id="sb-user" class="sb-user-name"></span>
       <div style="display:flex;align-items:center;gap:8px">
-        <button id="notif-btn" class="btn-link" onclick="_toggleNotifications()" style="position:relative;font-size:18px;line-height:1">
-          🔔<span id="notif-badge" style="display:none;position:absolute;top:-4px;right:-4px;background:var(--red);color:#fff;font-size:9px;font-weight:700;border-radius:50%;width:16px;height:16px;line-height:16px;text-align:center" id="notif-count">0</span>
+        <button id="notif-btn" class="btn-link" onclick="_toggleNotifications()" style="position:relative;line-height:1;padding:2px">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          <span id="notif-badge" style="display:none;position:absolute;top:-5px;right:-6px;background:var(--red);color:#fff;font-size:9px;font-weight:700;border-radius:8px;min-width:16px;height:16px;line-height:16px;text-align:center;padding:0 3px">0</span>
         </button>
         <button id="logout-btn" class="btn-link">Sign Out</button>
       </div>
@@ -177,6 +181,7 @@
     <div id="page-whatsapp"     class="page"></div>
     <div id="page-leads"        class="page"></div>
     <div id="page-followups"    class="page"></div>
+    <div id="page-accounts"     class="page"></div>
     <div id="page-recovery"     class="page"></div>
   </main>
 </div>

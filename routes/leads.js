@@ -121,6 +121,8 @@ router.post('/:id/followup', (req, res) => {
   const { notes, next_followup_date } = req.body;
   if (!notes) return res.status(400).json({ error: 'Notes required' });
   const id = uuidv4();
+  // Supersede previous scheduled follow-ups for this lead
+  run('UPDATE lead_followups SET next_followup_date=NULL WHERE lead_id=?', [req.params.id]);
   run(`INSERT INTO lead_followups (id,lead_id,org_id,notes,next_followup_date,done_by,done_by_name)
        VALUES (?,?,?,?,?,?,?)`,
     [id,req.params.id,req.orgId,notes,next_followup_date||null,req.user.id,req.user.full_name]);
