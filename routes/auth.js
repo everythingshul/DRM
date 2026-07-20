@@ -643,3 +643,5 @@ router.put('/orgs/:orgId/expiry', requireAuth, (req, res) => {
   run('UPDATE organizations SET expires_at=?, expiry_warned=0 WHERE id=?', [expiryVal, req.params.orgId]);
   res.json({ success: true });
 });
+
+module.exports = router;
