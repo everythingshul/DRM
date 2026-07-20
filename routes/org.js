@@ -342,6 +342,7 @@ router.get('/reports/donors', (req, res) => {
         'Active Recurring':   d.active_recurring ? 'Yes' : 'No',
         'Auto Pay':           d.autopay_enabled ? 'Yes' : 'No',
         'Cards on File':      cardsStr,
+        'Kvitel Names':       d.kvitel || '',
         'Kvitel Enabled':     d.kvitel_enabled ? 'Yes' : 'No',
         'Emails Paused':      d.donation_emails_paused ? 'Yes' : 'No',
         'Sola Customer ID':   d.sola_customer_id || '',
@@ -559,11 +560,11 @@ router.get('/reports/full-export', (req, res) => {
 
     // ── Tab 2: Donors ─────────────────────────────────────────────────────────
     const donors = all(`
-      SELECT d.title, d.first_name, d.last_name, d.hebrew_title, d.hebrew_full_name,
+      SELECT d.donor_number, d.title, d.first_name, d.last_name, d.hebrew_title, d.hebrew_full_name,
              d.cell, d.home_phone, d.email,
              n.name_he as neighborhood,
              d.street, d.apt, d.city, d.state, d.zip,
-             d.labels, d.autopay_enabled, d.autopay_paused,
+             d.labels, d.autopay_enabled, d.autopay_paused, d.kvitel,
              COALESCE(SUM(don.amount),0) as total_donated,
              COUNT(don.id) as donation_count,
              MAX(don.donation_date) as last_donation,
@@ -576,6 +577,7 @@ router.get('/reports/full-export', (req, res) => {
       ORDER BY d.last_name, d.first_name
     `, [req.orgId]);
     const wsDonors = XLSX.utils.json_to_sheet(donors.map(d => ({
+      'ID #':            d.donor_number || '',
       'Title':           d.title || '',
       'First Name':      d.first_name,
       'Last Name':       d.last_name,
@@ -596,13 +598,14 @@ router.get('/reports/full-export', (req, res) => {
       'Gifts':           d.donation_count || 0,
       'Last Donation':   d.last_donation ? d.last_donation.slice(0,10) : '',
       'Donor Since':     d.created_at ? d.created_at.slice(0,10) : '',
+      'Kvitel Names':    d.kvitel || '',
     })));
-    wsDonors['!cols'] = [6,10,10,10,16,12,12,22,14,18,5,12,5,8,14,8,12,6,12,12].map(w=>({wch:w}));
+    wsDonors['!cols'] = [9,6,10,10,10,16,12,12,22,14,18,5,12,5,8,14,8,12,6,12,12,30].map(w=>({wch:w}));
     XLSX.utils.book_append_sheet(wb, wsDonors, 'Donors');
 
     // ── Tab 3: Donations ──────────────────────────────────────────────────────
     const donations = all(`
-      SELECT don.donation_date, d.first_name, d.last_name,
+      SELECT don.donation_date, d.first_name, d.last_name, d.donor_number,
              don.amount, don.method, don.transaction_id, don.status,
              don.refund_amount, don.refund_notes, don.notes,
              pm.card_brand, pm.last_four
@@ -614,6 +617,7 @@ router.get('/reports/full-export', (req, res) => {
     `, [req.orgId]);
     const wsDonations = XLSX.utils.json_to_sheet(donations.map(d => ({
       'Date':            d.donation_date ? d.donation_date.slice(0,10) : '',
+      'ID #':            d.donor_number || '',
       'Donor':           d.first_name ? `${d.first_name} ${d.last_name}` : '(Unlinked)',
       'Amount':          parseFloat(d.amount || 0).toFixed(2),
       'Method':          (d.method||'').replace('_',' ').replace(/\b\w/g,c=>c.toUpperCase()),
@@ -624,8 +628,38 @@ router.get('/reports/full-export', (req, res) => {
       'Refund Notes':    d.refund_notes || '',
       'Notes':           d.notes || '',
     })));
-    wsDonations['!cols'] = [12,20,10,12,14,18,12,10,20,24].map(w=>({wch:w}));
+    wsDonations['!cols'] = [12,9,20,10,12,14,18,12,10,20,24].map(w=>({wch:w}));
     XLSX.utils.book_append_sheet(wb, wsDonations, 'Donations');
+
+    // ── Tab: Leads ────────────────────────────────────────────────────────────
+    const leadsForExport = all(`
+      SELECT l.donor_number, l.title, l.first_name, l.last_name, l.hebrew_title, l.hebrew_full_name,
+             l.email, l.cell, l.home_phone, l.category, l.status,
+             l.labels, l.notes, u.full_name as assigned_name, l.created_at
+      FROM leads l
+      LEFT JOIN users u ON u.id = l.assigned_to
+      WHERE l.org_id=?
+      ORDER BY l.created_at DESC
+    `, [req.orgId]);
+    const wsLeads = XLSX.utils.json_to_sheet(leadsForExport.map(l => ({
+      'ID #':          l.donor_number || '',
+      'Title':         l.title || '',
+      'First Name':    l.first_name || '',
+      'Last Name':     l.last_name || '',
+      'Hebrew Title':  l.hebrew_title || '',
+      'Hebrew Name':   l.hebrew_full_name || '',
+      'Email':         l.email || '',
+      'Cell':          l.cell || '',
+      'Home Phone':    l.home_phone || '',
+      'Category':      l.category || '',
+      'Status':        l.status || '',
+      'Labels':        (() => { try { return JSON.parse(l.labels||'[]').join(', '); } catch { return ''; } })(),
+      'Assigned To':   l.assigned_name || '',
+      'Notes':         l.notes || '',
+      'Created':       l.created_at ? l.created_at.slice(0,10) : ''
+    })));
+    wsLeads['!cols'] = [9,6,10,10,10,16,22,14,14,14,12,20,16,30,12].map(w=>({wch:w}));
+    XLSX.utils.book_append_sheet(wb, wsLeads, 'Leads');
 
     // ── Tab 4: Expenses ───────────────────────────────────────────────────────
     const expenses = all(`

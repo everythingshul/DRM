@@ -18,13 +18,15 @@ router.post('/login', async (req, res) => {
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
 
-    // Get user's orgs
-    const orgs = all(`
-      SELECT o.*, ou.role as user_role FROM organizations o
-      JOIN org_users ou ON o.id = ou.org_id
-      WHERE ou.user_id = ?
-      ORDER BY o.name
-    `, [user.id]);
+    // Get user's orgs (super admins see every org)
+    const orgs = user.is_super_admin
+      ? all(`SELECT o.*, 'admin' as user_role FROM organizations o ORDER BY o.name`, [])
+      : all(`
+          SELECT o.*, ou.role as user_role FROM organizations o
+          JOIN org_users ou ON o.id = ou.org_id
+          WHERE ou.user_id = ?
+          ORDER BY o.name
+        `, [user.id]);
 
     let activeOrg = null;
     if (orgSlug) {
@@ -87,12 +89,18 @@ router.post('/logout', requireAuth, (req, res) => {
 
 // Get current user
 router.get('/me', requireAuth, (req, res) => {
-  const orgs = all(`
-    SELECT o.*, ou.role as user_role FROM organizations o
-    JOIN org_users ou ON o.id = ou.org_id
-    WHERE ou.user_id = ?
-    ORDER BY o.name
-  `, [req.user.id]);
+  let orgs;
+  if (req.user.is_super_admin) {
+    // Super admins can access every org directly (API layer already permits this via requireOrg)
+    orgs = all(`SELECT o.*, 'admin' as user_role FROM organizations o ORDER BY o.name`, []);
+  } else {
+    orgs = all(`
+      SELECT o.*, ou.role as user_role FROM organizations o
+      JOIN org_users ou ON o.id = ou.org_id
+      WHERE ou.user_id = ?
+      ORDER BY o.name
+    `, [req.user.id]);
+  }
 
   res.json({
     user: { id: req.user.id, email: req.user.email, full_name: req.user.full_name, role: req.user.role, is_super_admin: req.user.is_super_admin },
@@ -626,25 +634,7 @@ router.put('/orgs/:orgId/user-permissions/:userId', requireAuth, (req, res) => {
   res.json({ success: true });
 });
 
-module.exports = router;
-
-// Super admin: list all orgs with expiry status
-const authRouter = require('express').Router();
-// (re-using existing router export, adding to it)
-
-router.get('/orgs', requireAuth, (req, res) => {
-  if (!req.user.is_super_admin) return res.status(403).json({ error: 'Super admin only' });
-  const orgs = all(`
-    SELECT o.id, o.name, o.slug, o.created_at, o.expires_at,
-           COUNT(DISTINCT ou.user_id) as user_count
-    FROM organizations o
-    LEFT JOIN org_users ou ON ou.org_id = o.id
-    GROUP BY o.id ORDER BY o.created_at DESC
-  `, []);
-  res.json(orgs);
-});
-
-// Super admin: set/update expiry date for an org
+// Super admin: set/update expiry date (and optionally name) for an org
 router.put('/orgs/:orgId/expiry', requireAuth, (req, res) => {
   if (!req.user.is_super_admin) return res.status(403).json({ error: 'Super admin only' });
   const { expires_at, expiry_date, name } = req.body;

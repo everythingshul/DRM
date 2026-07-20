@@ -69,11 +69,11 @@ app.get('/api/orgs/:orgId/import/donors/template',
   (req, res) => {
     try {
       const wb = XLSX.utils.book_new();
-      const headers = [['Title','First Name','Last Name','Hebrew Title','Hebrew Name',
-        'Email','Cell','Home Phone','Street','Apt','City','State','Zip','Neighborhood','Labels','Notes']];
-      const sample = [['R\'','Moshe','Cohen','הרב','משה כהן',
+      const headers = [['ID #','Title','First Name','Last Name','Hebrew Title','Hebrew Name',
+        'Email','Cell','Home Phone','Street','Apt','City','State','Zip','Neighborhood','Labels','Notes','Kvitel Names']];
+      const sample = [['','R\'','Moshe','Cohen','הרב','משה כהן',
         'moshe@example.com','9175551234','7185551234',
-        '123 Main St','Apt 2','Brooklyn','NY','11201','Boro Park','Major Donor','Sample donor']];
+        '123 Main St','Apt 2','Brooklyn','NY','11201','Boro Park','Major Donor','Sample donor','משה כהן\nשרה כהן']];
       const ws = XLSX.utils.aoa_to_sheet([...headers, ...sample]);
       ws['!cols'] = headers[0].map(h => ({ wch: Math.max(h.length + 4, 14) }));
       XLSX.utils.book_append_sheet(wb, ws, 'Donors');
@@ -144,7 +144,8 @@ app.post('/api/orgs/:orgId/import/donors',
             'Hebrew Title': 'hebrew_title', 'Hebrew Name': 'hebrew_full_name',
             'Email': 'email', 'Cell': 'cell', 'Home Phone': 'home_phone',
             'Street': 'street', 'Apt': 'apt', 'City': 'city',
-            'State': 'state', 'Zip': 'zip', 'Title': 'title', 'Notes': 'notes'
+            'State': 'state', 'Zip': 'zip', 'Title': 'title', 'Notes': 'notes',
+            'Kvitel Names': 'kvitel'
           };
           for (const [col, field] of Object.entries(fieldMap)) {
             const v = (row[col]||'').toString().trim();
@@ -169,11 +170,18 @@ app.post('/api/orgs/:orgId/import/donors',
 
         try {
           const newId = uuidv4();
+          // Generate unique 6-digit donor number for new import rows too
+          let importDonorNum;
+          for (let attempts = 0; attempts < 20; attempts++) {
+            const candidate = Math.floor(100000 + Math.random() * 900000);
+            const exists = get('SELECT id FROM donors WHERE donor_number=? UNION SELECT id FROM leads WHERE donor_number=?', [candidate, candidate]);
+            if (!exists) { importDonorNum = candidate; break; }
+          }
           run(`INSERT INTO donors
-            (id,org_id,title,first_name,last_name,hebrew_title,hebrew_full_name,
-             email,cell,home_phone,street,apt,city,state,zip,notes,created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
-            [newId, req.params.orgId,
+            (id,org_id,donor_number,title,first_name,last_name,hebrew_title,hebrew_full_name,
+             email,cell,home_phone,street,apt,city,state,zip,notes,kvitel,created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
+            [newId, req.params.orgId, importDonorNum||null,
              (row['Title']||row['title']||'').toString().trim()||null,
              fn||'', ln||'',
              (row['Hebrew Title']||'').toString().trim()||null,
@@ -185,7 +193,8 @@ app.post('/api/orgs/:orgId/import/donors',
              (row['City']||row['city']||'').toString().trim()||null,
              (row['State']||row['state']||'').toString().trim()||null,
              zip||null,
-             (row['Notes']||row['notes']||'').toString().trim()||null
+             (row['Notes']||row['notes']||'').toString().trim()||null,
+             (row['Kvitel Names']||row['kvitel']||'').toString().trim()||null
             ]);
 
           // If flagged as duplicate, create duplicate record

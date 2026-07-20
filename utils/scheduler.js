@@ -71,6 +71,7 @@ async function sendReceiptEmail(donor, donation, org) {
     const pm = donation.payment_method_id ? get('SELECT * FROM payment_methods WHERE id = ?', [donation.payment_method_id]) : null;
 
     const vars = {
+      donor_number:   donor.donor_number || '',
       title:          donor.title || '',
       hebrew_title:   donor.hebrew_title || '',
       first_name:     donor.first_name,
@@ -97,6 +98,7 @@ async function sendReceiptEmail(donor, donation, org) {
           <p>Dear {{title}} {{first_name}} {{last_name}},</p>
           <p>Thank you for your generous donation of <strong>{{amount}}</strong> on {{date}}.</p>
           <table style="width:100%;border-collapse:collapse;margin:12px 0">
+            <tr><td style="padding:6px 0;color:#666">Donor ID:</td><td style="padding:6px 0">#{{donor_number}}</td></tr>
             <tr><td style="padding:6px 0;color:#666">Amount:</td><td style="padding:6px 0;font-weight:bold">{{amount}}</td></tr>
             <tr><td style="padding:6px 0;color:#666">Date:</td><td style="padding:6px 0">{{date}}</td></tr>
             <tr><td style="padding:6px 0;color:#666">Method:</td><td style="padding:6px 0">{{method}}</td></tr>
@@ -605,12 +607,15 @@ async function runDailyBackup() {
 
 async function processFollowupNotifications() {
   const today = new Date().toISOString().slice(0, 10);
-  // Find follow-ups due today that haven't been notified yet
+  // Find follow-ups due today that haven't been notified yet —
+  // only the lead's CURRENTLY ACTIVE scheduled date counts (l.next_followup_date),
+  // so a superseded/historical follow-up row never fires a stale notification
   const due = all(`
     SELECT lf.*, l.first_name, l.last_name, l.org_id, l.assigned_to
     FROM lead_followups lf
     JOIN leads l ON l.id = lf.lead_id
     WHERE lf.next_followup_date = ? AND lf.notified = 0 AND l.assigned_to IS NOT NULL
+      AND l.next_followup_date = lf.next_followup_date
   `, [today]);
 
   for (const fu of due) {

@@ -157,12 +157,15 @@
         <button id="logout-btn" class="btn-link">Sign Out</button>
       </div>
     </div>
-    <div id="notif-panel" style="display:none;position:absolute;bottom:60px;left:0;right:0;background:#fff;border-top:1px solid var(--gray-2);border-radius:8px 8px 0 0;max-height:300px;overflow-y:auto;z-index:100;box-shadow:0 -4px 12px rgba(0,0,0,.1)">
+    <div id="notif-panel" style="display:none;position:absolute;bottom:60px;left:0;right:0;background:#fff;border-top:1px solid var(--gray-2);border-radius:8px 8px 0 0;max-height:340px;overflow-y:auto;z-index:100;box-shadow:0 -4px 12px rgba(0,0,0,.1)">
       <div style="padding:10px 14px;font-weight:700;font-size:13px;border-bottom:1px solid var(--gray-1);display:flex;justify-content:space-between;align-items:center">
         Notifications
         <button class="btn btn-ghost btn-sm" onclick="_markAllNotifRead()" style="font-size:11px">Mark all read</button>
       </div>
       <div id="notif-list" style="padding:8px"></div>
+      <div id="notif-footer" style="display:none;padding:8px 14px;border-top:1px solid var(--gray-1);text-align:center">
+        <span onclick="_openNotifPage()" style="font-size:12px;color:var(--blue);cursor:pointer;font-weight:600">See all notifications →</span>
+      </div>
     </div>
   </aside>
 
@@ -182,6 +185,7 @@
     <div id="page-leads"        class="page"></div>
     <div id="page-followups"    class="page"></div>
     <div id="page-accounts"     class="page"></div>
+    <div id="page-notifications" class="page"></div>
     <div id="page-recovery"     class="page"></div>
   </main>
 </div>

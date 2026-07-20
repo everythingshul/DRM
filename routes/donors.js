@@ -19,7 +19,9 @@ router.get('/', (req, res) => {
       (SELECT COALESCE(SUM(amount),0) FROM donations WHERE donor_id = d.id AND status = 'completed') as total_amount,
       (SELECT MAX(donation_date) FROM donations WHERE donor_id = d.id AND status = 'completed') as last_donation_date,
       CASE WHEN d.info_verified_at IS NULL OR julianday('now') - julianday(d.info_verified_at) > 180
-           THEN 1 ELSE 0 END as needs_verification
+           THEN 1 ELSE 0 END as needs_verification,
+      (SELECT dd.id FROM donor_duplicates dd WHERE dd.status='pending' AND (dd.donor_id_a=d.id OR dd.donor_id_b=d.id) LIMIT 1) as dup_id,
+      (SELECT CASE WHEN dd.donor_id_a=d.id THEN dd.donor_id_b ELSE dd.donor_id_a END FROM donor_duplicates dd WHERE dd.status='pending' AND (dd.donor_id_a=d.id OR dd.donor_id_b=d.id) LIMIT 1) as dup_other_id
     FROM donors d
     LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
     WHERE d.org_id = ?
@@ -27,9 +29,9 @@ router.get('/', (req, res) => {
   const params = [req.orgId];
 
   if (search) {
-    sql += ` AND (d.first_name LIKE ? OR d.last_name LIKE ? OR d.email LIKE ? OR d.cell LIKE ? OR d.hebrew_full_name LIKE ?)`;
-    const s = `%${search}%`;
-    params.push(s, s, s, s, s);
+    sql += ` AND (d.first_name LIKE ? OR d.last_name LIKE ? OR d.email LIKE ? OR d.cell LIKE ? OR d.hebrew_full_name LIKE ? OR CAST(d.donor_number AS TEXT) LIKE ?)`;
+    const s = `%${search.replace(/^#/, '')}%`;
+    params.push(s, s, s, s, s, s);
   }
   if (neighborhood) { sql += ' AND d.neighborhood_id = ?'; params.push(neighborhood); }
   if (kvitel_enabled !== undefined) { sql += ' AND d.kvitel_enabled = ?'; params.push(kvitel_enabled); }
@@ -93,7 +95,9 @@ router.get('/:id', (req, res) => {
       (SELECT COALESCE(SUM(amount),0) FROM donations WHERE donor_id = d.id AND status = 'completed') as total_amount,
       (SELECT MAX(donation_date) FROM donations WHERE donor_id = d.id AND status = 'completed') as last_donation_date,
       CASE WHEN d.info_verified_at IS NULL OR julianday('now') - julianday(d.info_verified_at) > 180
-           THEN 1 ELSE 0 END as needs_verification
+           THEN 1 ELSE 0 END as needs_verification,
+      (SELECT dd.id FROM donor_duplicates dd WHERE dd.status='pending' AND (dd.donor_id_a=d.id OR dd.donor_id_b=d.id) LIMIT 1) as dup_id,
+      (SELECT CASE WHEN dd.donor_id_a=d.id THEN dd.donor_id_b ELSE dd.donor_id_a END FROM donor_duplicates dd WHERE dd.status='pending' AND (dd.donor_id_a=d.id OR dd.donor_id_b=d.id) LIMIT 1) as dup_other_id
     FROM donors d
     LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
     WHERE d.id = ? AND d.org_id = ?

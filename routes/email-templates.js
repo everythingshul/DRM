@@ -100,6 +100,7 @@ function renderBlocks(blocks, vars = {}) {
               </td>
             </tr>
             ${[
+              ['Donor ID', '{{donor_number}}'],
               ['Amount', '{{amount}}'],
               ['Date', '{{date}}'],
               ['Method', '{{method}}'],

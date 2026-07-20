@@ -175,7 +175,19 @@ function fmtDT(d) {
 function age(m) { if (!m && m !== 0) return '—'; const mo = parseInt(m); if (mo < 12) return mo + 'mo'; const y = Math.floor(mo / 12), r = mo % 12; return r ? `${y}y ${r}mo` : `${y}y`; }
 function fmtMethod(m) { return { credit_card: 'Credit Card', daf: 'DAF', check: 'Check', cash: 'Cash', wire: 'Wire', other: 'Other' }[m] || m; }
 function fmtFreq(f) { return { weekly: 'Weekly', biweekly: 'Bi-Weekly', monthly: 'Monthly', quarterly: 'Quarterly', yearly: 'Yearly', once: 'One-Time' }[f] || f; }
-function toLocalDT(d) { if (!d) return ''; try { const dt = new Date(d), p = n => String(n).padStart(2, '0'); return `${dt.getFullYear()}-${p(dt.getMonth()+1)}-${p(dt.getDate())}T${p(dt.getHours())}:${p(dt.getMinutes())}`; } catch { return ''; } }
+function toLocalDT(d) {
+  if (!d) return '';
+  try {
+    const dt = new Date(d);
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: _tz(), year:'numeric', month:'2-digit', day:'2-digit',
+      hour:'2-digit', minute:'2-digit', hour12:false
+    }).formatToParts(dt);
+    const g = t => parts.find(p=>p.type===t)?.value || '00';
+    let hh = g('hour'); if (hh === '24') hh = '00';
+    return `${g('year')}-${g('month')}-${g('day')}T${hh}:${g('minute')}`;
+  } catch { return ''; }
+}
 function inits(f, l) { return ((f || '')[0] || '').toUpperCase() + ((l || '')[0] || '').toUpperCase(); }
 function avatar(d, sz=30) { return `<div class="av" style="width:${sz}px;height:${sz}px;font-size:${Math.round(sz/2.8)}px">${inits(d.first_name, d.last_name)}</div>`; }
 function sbadge(s) { const m = { completed:'Completed', pending:'Pending', failed:'Failed', scheduled:'Scheduled', cancelled:'Cancelled', active:'Active', paused:'Paused', refunded:'Refunded', partial_refund:'Partial Refund' }; return `<span class="sbadge s-${s}">${m[s] || s}</span>`; }
@@ -428,7 +440,7 @@ function showApp() {
   }
   // Navigate to hash if present, else dashboard
   const initPage = location.hash.replace('#','') || 'dashboard';
-  const validPages = ['dashboard','donors','donations','verification','failures','bank','emails','kvitel','reports','settings'];
+  const validPages = ['dashboard','donors','leads','followups','accounts','notifications','donations','verification','failures','bank','emails','kvitel','reports','settings'];
   navigateTo(validPages.includes(initPage) ? initPage : 'dashboard');
   loadBadges();
   setInterval(loadBadges, 60000);
@@ -464,7 +476,7 @@ function navigateTo(page) {
 function reloadPage() { const el = $('page-' + _currentPage); if(el) renderPage(_currentPage, el); }
 window.addEventListener('popstate', () => {
   const page = location.hash.replace('#','') || 'dashboard';
-  const valid = ['dashboard','donors','leads','followups','accounts','donations','verification','failures','bank','emails','kvitel','reports','settings','whatsapp','recovery'];
+  const valid = ['dashboard','donors','leads','followups','accounts','notifications','donations','verification','failures','bank','emails','kvitel','reports','settings','whatsapp','recovery'];
   if (valid.includes(page)) { const el=$('page-'+page); if(el) el.innerHTML=''; navigateTo(page); }
 });
 
@@ -474,6 +486,7 @@ function renderPage(page, el) {
     donors:       el => Donors.render(el),
     leads:        renderLeads,
     followups:    renderScheduledFollowups,
+    notifications: renderNotificationsPage,
     accounts:     renderAccounts,
     donations:    renderDonations,
     verification: renderVerification,
@@ -775,12 +788,19 @@ const Donors = {
           <strong>${r.imported}</strong> donor${r.imported!==1?'s':''} imported
           ${r.flagged?.length ? `· <span style="color:var(--amber)">${r.flagged.length} flagged as possible duplicates</span>` : ''}
           ${flaggedHtml}${errHtml}
+        </div>
+        <div class="bg mt">
+          ${r.flagged?.length ? `<button class="btn btn-primary btn-sm" onclick="Modal.close();navigateTo('verification')">Review Duplicates →</button>` : ''}
+          <button class="btn btn-ghost btn-sm" onclick="Modal.close();navigateTo('settings');setTimeout(()=>document.querySelector('[data-tc=st-imports]')?.click(),200)">View Import Report</button>
+          <button class="btn btn-ghost btn-sm" onclick="Modal.close()">Close</button>
         </div>`;
         res.style.display = 'block';
       }
-      if (btn){btn.textContent='Import';btn.disabled=false;}
+      if (btn){btn.textContent='Import';btn.disabled=false;btn.style.display='none';}
+      const footer = btn?.closest('.bg.mt');
+      if (footer) footer.style.display = 'none';
       this.load();
-      Modal.close();
+      // Do NOT auto-close — let the user see the summary and choose next step
     } catch(e) {
       toast(e.message||'Import failed','err');
       if (btn){btn.textContent='Import';btn.disabled=false;}
@@ -886,7 +906,7 @@ const DonorDetail = {
         <div class="dd-av">${inits(donor.first_name, donor.last_name)}</div>
         <div style="flex:1">
           <div style="font-size:19px;font-weight:700">${donor.title?donor.title+' ':''}${donor.first_name} ${donor.last_name} ${donor.donor_number?`<span style=\"font-size:12px;color:var(--gray-4);font-family:monospace\">#${donor.donor_number}</span>`:''} ${donor.dup_id?`<button class=\"pill\" style=\"font-size:10px;background:#fef3c7;color:#b45309;border:1px solid #f59e0b;cursor:pointer;vertical-align:middle\" onclick=\"DonorDetail.open('${donor.dup_other_id}')\">⚠ DUPLICATE — view other ↗</button>`:''}</div>
-          ${donor.hebrew_full_name?`<div style="font-family:var(--font-he);direction:rtl;opacity:.85;font-size:14px">${donor.hebrew_title||''} ${donor.hebrew_full_name}</div>`:''}
+          ${donor.hebrew_full_name?`<div style="font-family:var(--font-he);direction:rtl;text-align:left;opacity:.85;font-size:14px">${donor.hebrew_title||''} ${donor.hebrew_full_name}</div>`:''}
           <div style="font-size:12px;opacity:.7;margin-top:3px">${age(donor.months_old)} · ${donor.email||''} ${donor.cell?'· '+donor.cell:''} ${donor.neighborhood_name?'· '+donor.neighborhood_name:''}</div>
           <div class="bg" style="gap:4px;margin-top:5px;flex-wrap:wrap">${lbls.map(l=>`<span class="pill pill-blue" style="font-size:10px">${l}</span>`).join('')}${donor.needs_verification?'<span class="pill pill-amber" style="font-size:10px">⚠ Verify</span>':''}</div>
         </div>
@@ -996,13 +1016,17 @@ const DonorDetail = {
       <td style="font-weight:600">${fmt$(d.amount)}${d.refund_amount>0?`<br><span style="font-size:11px;color:var(--red)">−${fmt$(d.refund_amount)}</span>`:''}</td>
       <td style="font-size:12px">${fmtMethod(d.method)}${d.last_four?` ••${d.last_four}`:''}</td>
       <td style="font-size:11px;color:var(--gray-5)">${d.transaction_id||'—'}</td>
-      <td>${sbadge(d.status)}${d.label?` <span class="pill pill-blue" style="font-size:10px">${d.label}</span>`:''}</td>
+      <td>${sbadge(d.status)}
+        <span style="display:inline-flex;flex-wrap:wrap;gap:3px;vertical-align:middle;margin-left:4px">
+          ${jsonParse(d.labels||'[]').map(l=>`<span class="pill pill-blue" style="font-size:10px">${l}</span>`).join('')}
+        </span>
+      </td>
       <td><div class="actions">
         <button class="btn btn-icon" title="Expand" onclick="DonorDetail._togDPR('${d.id}')">&#8964;</button>
         <button class="btn btn-icon" title="Edit" onclick="DonorDetail._editDon('${did}','${d.id}')">&#9998;</button>
         <button class="btn btn-icon" title="Add note" onclick="DonorDetail.addDonNote('${did}','${d.id}')">&#9997;</button>
         ${(d.status==='completed'||d.status==='partial_refund')?`<button class="btn btn-icon" title="Refund" onclick="DonorDetail.refund('${did}','${d.id}','${d.amount}','${d.transaction_id||''}')">&#8617;</button>`:''}
-        <button class="btn btn-icon" title="Label" onclick="DonorDetail._lblDon('${did}','${d.id}')">&#9990;</button>
+        <button class="btn btn-icon" title="Labels" onclick="_donationLabels('${d.id}','${(d.labels||'[]').replace(/'/g,"\\'")}')">&#9990;</button>
         <button class="btn btn-icon" style="color:var(--red)" title="Delete" onclick="DonorDetail._delDon('${did}','${d.id}')">&#10005;</button>
       </div></td>
     </tr>
@@ -1534,14 +1558,18 @@ function _donRows(rows) {
       <td style="font-weight:600">${fmt$(d.amount)}${d.refund_amount>0?`<br><span style="font-size:11px;color:var(--red)">−${fmt$(d.refund_amount)}</span>`:''}</td>
       <td style="font-size:12px">${fmtMethod(d.method)}${d.last_four?` ••${d.last_four}`:''}</td>
       <td style="font-size:11px;color:var(--gray-5)">${d.transaction_id||'—'}</td>
-      <td>${sbadge(d.status)}${d.label?` <span class="pill pill-blue" style="font-size:10px">${d.label}</span>`:''}</td>
+      <td>${sbadge(d.status)}
+        <span style="display:inline-flex;flex-wrap:wrap;gap:3px;vertical-align:middle;margin-left:4px">
+          ${jsonParse(d.labels||'[]').map(l=>`<span class="pill pill-blue" style="font-size:10px">${l}</span>`).join('')}
+        </span>
+      </td>
       <td><div class="actions">
         <button class="btn btn-icon" title="Expand" onclick="_togDlr('${d.id}')">&#8964;</button>
         <button class="btn btn-icon" title="Add note" onclick="_addDonationNote('${d.donor_id}','${d.id}')">&#9997;</button>
         <button class="btn btn-icon" title="Edit" onclick="_editDonList('${d.id}')">&#9998;</button>
         <a class="btn btn-ghost btn-sm" href="/api/orgs/${API.orgId}/payments/receipt/${d.id}" download="receipt.pdf" title="Receipt">&#8681;</a>
         ${(d.status==='completed'||d.status==='partial_refund')?`<button class="btn btn-icon" title="Refund" onclick="_refundFromList('${d.donor_id}','${d.id}','${d.amount}','${d.transaction_id||''}')">&#8617;</button>`:''}
-        <button class="btn btn-icon" title="Label" onclick="_labelDonation('${d.id}')">&#9990;</button>
+        <button class="btn btn-icon" title="Labels" onclick="_donationLabels('${d.id}','${(d.labels||'[]').replace(/'/g,"\\'")}')">&#9990;</button>
         ${d.donor_id&&d.donor_id!='null'?`<button class="btn btn-icon" title="Unlink" onclick="_unlinkDonation('${d.id}')">&#8854;</button>`:`<button class="btn btn-icon" title="Link" onclick="_linkDonation('${d.id}')">&#8853;</button>`}
         <button class="btn btn-icon" style="color:var(--red)" title="Delete" onclick="_delDonList('${d.id}')">&#10005;</button>
       </div></td>
@@ -1558,7 +1586,7 @@ function _donRows(rows) {
             Status: ${d.status}<br>
             ${d.refund_amount>0?'Refunded: '+fmt$(d.refund_amount)+(d.refund_notes?' — '+d.refund_notes:'')+'<br>':''}
             ${d.notes?'Notes: '+d.notes+'<br>':''}
-            ${d.label?'Label: '+d.label:''}
+            ${(jsonParse(d.labels||'[]')).length?'Labels: '+jsonParse(d.labels||'[]').join(', '):''}
           </div>
           <div>
             <div style="font-size:12px;font-weight:600;margin-bottom:6px">Notes (${dn.length})</div>
@@ -4680,13 +4708,15 @@ async function renderLeads(el) {
         <div class="bg">
           <button class="btn btn-ghost btn-sm" onclick="_leadCategories_manage()">⚙ Categories</button>
           <button class="btn btn-ghost btn-sm" onclick="_showScheduledFollowups()">📅 Follow-up Schedule</button>
+          <button class="btn btn-ghost btn-sm" onclick="_leadsImportModal()">&#8593; Import</button>
+          <button class="btn btn-ghost btn-sm" onclick="_leadsExport()">&#8595; Export</button>
           <button class="btn btn-ghost btn-sm" id="leads-mass-btn" style="display:none" onclick="_leadsMassAction()">⚡ Mass Action</button>
           <button class="btn btn-primary btn-sm" onclick="_leadAdd()">+ Add Lead</button>
         </div>
       </div>
       <div class="card" style="padding:12px 14px;margin-bottom:12px">
         <div class="search-bar">
-          <div class="sw" style="flex:2"><input id="leads-search" placeholder="Search name, email, phone…" oninput="_leadsFilter()" autocomplete="new-password"></div>
+          <div class="sw" style="flex:2"><input id="leads-search" placeholder="Search name, email, phone, #ID…" oninput="_leadsFilter()" autocomplete="new-password"></div>
           <select id="leads-status" onchange="_leadsFilter()">
             <option value="">All Statuses</option>
             <option value="new">New</option>
@@ -4749,6 +4779,7 @@ function _renderLeadsList() {
       return `<tr>
         <td><input type="checkbox" value="${l.id}" onchange="_leadsToggleOne('${l.id}',this.checked)"></td>
         <td><div style="font-weight:600;font-size:13px">${name}</div>
+          ${l.donor_number?`<div style="font-size:10px;color:var(--gray-4);font-family:monospace">#${l.donor_number}</div>`:''}
           ${l.hebrew_full_name?`<div style="font-family:var(--font-he);font-size:11px;color:var(--gray-5)">${l.hebrew_full_name}</div>`:''}
         </td>
         <td style="font-size:12px">${l.cell||l.email||'—'}</td>
@@ -4802,7 +4833,7 @@ async function _leadView(id) {
               <div style="display:flex;align-items:center;gap:6px">
                 <span style="font-size:11px;color:var(--gray-5)">${fmtDT(fu.created_at)}</span>
                 <button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px"
-                  onclick="event.stopPropagation();_editFollowupDate('${fu.id}','${fu.next_followup_date||''}')">✏ Date</button>
+                  onclick="event.stopPropagation();_editFollowupDate('${fu.id}','${fu.next_followup_date||''}','${(fu.notes||'').replace(/'/g,"\\'").replace(/\n/g,' ')}')">✏ Edit</button>
               </div>
             </div>
             <div style="font-size:13px;margin-bottom:4px">${fu.notes}</div>
@@ -5017,44 +5048,158 @@ function _leadCategories_manage() {
 // ══════════════════════════════════════════════════════════════════════════════
 let _notifOpen = false;
 
+const _notifIcons = {
+  lead_assigned:    '🎯',
+  followup_due:     '📅',
+  access_request:   '🔑',
+  access_approved:  '✅',
+  access_denied:    '❌',
+  lead_converted:   '🎉',
+  default:          '🔔'
+};
+
+function _timeAgo(dt) {
+  if (!dt) return '';
+  const diff = Date.now() - new Date(dt).getTime();
+  const mins = Math.floor(diff/60000), hrs = Math.floor(diff/3600000), days = Math.floor(diff/86400000);
+  if (mins < 1)  return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  if (hrs  < 24) return `${hrs}h ago`;
+  if (days < 7)  return `${days}d ago`;
+  return fmtD(dt);
+}
+
+let _notifCache = [];
+
 async function _loadNotifications() {
   try {
-    const notifs = await API.get(`/api/orgs/${API.orgId}/notifications`);
-    const unread = notifs.filter(n=>!n.is_read).length;
+    _notifCache = await API.get(`/api/orgs/${API.orgId}/notifications`);
+    const unread = _notifCache.filter(n=>!n.is_read).length;
     const badge = $('notif-badge');
-    if (badge) badge.style.display = unread > 0 ? '' : 'none';
-    const list = $('notif-list');
-    if (list) {
-      list.innerHTML = notifs.length ? notifs.map(n=>`
-        <div onclick="_notifClick('${n.id}','${n.link||''}')"
-          style="padding:8px 10px;border-radius:6px;cursor:pointer;margin-bottom:4px;
-          background:${n.is_read?'transparent':'var(--blue-pale)'};border:1px solid ${n.is_read?'transparent':'var(--blue-light)'}">
-          <div style="font-size:12px;font-weight:${n.is_read?'400':'700'}">${n.title}</div>
-          ${n.body?`<div style="font-size:11px;color:var(--gray-5);margin-top:2px">${n.body}</div>`:''}
-          <div style="font-size:10px;color:var(--gray-4);margin-top:2px">${fmtDT(n.created_at)}</div>
-        </div>`).join('')
-        : '<div style="text-align:center;color:var(--gray-4);font-size:13px;padding:12px">No notifications</div>';
+    if (badge) {
+      badge.style.display = unread > 0 ? '' : 'none';
+      badge.textContent = unread > 9 ? '9+' : String(unread);
     }
+    _renderNotifDropdown();
+    if ($('page-notifications')?.classList.contains('active')) _renderNotifPage();
   } catch {}
+}
+
+function _notifItemHtml(n, compact) {
+  const icon = _notifIcons[n.type] || _notifIcons.default;
+  return `<div onclick="_notifClick('${n.id}','${(n.link||'').replace(/'/g,"\\\\'")}')"
+      style="display:flex;gap:10px;align-items:flex-start;padding:${compact?'8px 10px':'12px 14px'};cursor:pointer;border-radius:6px;
+      background:${n.is_read?'transparent':'var(--blue-pale)'};margin-bottom:3px" onmouseover="this.style.background='var(--gray-05)'"
+      onmouseout="this.style.background='${n.is_read?'transparent':'var(--blue-pale)'}'">
+      <div style="font-size:${compact?'16':'20'}px;flex-shrink:0;line-height:1.3">${icon}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:${compact?'12':'13'}px;font-weight:${n.is_read?'500':'700'};color:var(--navy)">${n.title}</div>
+        ${n.body?`<div style="font-size:${compact?'11':'12'}px;color:var(--gray-5);margin-top:2px">${n.body}</div>`:''}
+        <div style="font-size:10px;color:var(--gray-4);margin-top:3px">${_timeAgo(n.created_at)}</div>
+      </div>
+      ${!n.is_read?`<div style="width:7px;height:7px;border-radius:50%;background:var(--blue);flex-shrink:0;margin-top:5px"></div>`:
+        `<span onclick="event.stopPropagation();_markNotifUnread('${n.id}')" style="font-size:9px;color:var(--gray-3);cursor:pointer;flex-shrink:0" title="Mark unread">↩</span>`}
+    </div>`;
+}
+
+function _renderNotifDropdown() {
+  const list = $('notif-list'); if (!list) return;
+  const unread = _notifCache.filter(n=>!n.is_read);
+  const preview = unread.slice(0, 8);
+  if (!_notifCache.length) {
+    list.innerHTML = '<div style="text-align:center;color:var(--gray-4);font-size:13px;padding:20px 12px">No notifications yet</div>';
+    return;
+  }
+  if (!unread.length) {
+    list.innerHTML = `<div style="text-align:center;padding:16px;color:var(--gray-4);font-size:13px">All caught up! 🎉</div>`;
+  } else {
+    list.innerHTML = preview.map(n=>_notifItemHtml(n,true)).join('');
+  }
+  const footer = $('notif-footer');
+  if (footer) footer.style.display = '';
 }
 
 function _toggleNotifications() {
   _notifOpen = !_notifOpen;
   const panel = $('notif-panel');
   if (panel) panel.style.display = _notifOpen ? '' : 'none';
-  if (_notifOpen) _loadNotifications();
+  if (_notifOpen) {
+    _loadNotifications();
+    setTimeout(() => {
+      document.addEventListener('click', function _closeNotif(e) {
+        if (!e.target.closest('#notif-panel') && !e.target.closest('#notif-btn')) {
+          _notifOpen = false;
+          if (panel) panel.style.display = 'none';
+          document.removeEventListener('click', _closeNotif);
+        }
+      });
+    }, 0);
+  }
 }
 
 async function _notifClick(id, link) {
   await API.put(`/api/orgs/${API.orgId}/notifications/${id}/read`, {}).catch(()=>{});
-  if (link && link.startsWith('#')) navigateTo(link.replace('#',''));
+  _notifOpen = false;
+  const panel = $('notif-panel'); if (panel) panel.style.display = 'none';
+  if (link) {
+    const page = link.replace('#','').split('/')[0];
+    const valid = ['leads','donors','donations','settings','verification','failures','bank','emails','kvitel','reports','followups'];
+    if (valid.includes(page)) navigateTo(page);
+  }
   _loadNotifications();
-  _toggleNotifications();
 }
 
 async function _markAllNotifRead() {
   await API.put(`/api/orgs/${API.orgId}/notifications/read-all`, {}).catch(()=>{});
   _loadNotifications();
+}
+
+function _openNotifPage() {
+  _notifOpen = false;
+  const panel = $('notif-panel'); if (panel) panel.style.display = 'none';
+  navigateTo('notifications');
+}
+
+// ── Full Notifications page ───────────────────────────────────────────────────
+window._notifPageFilter = 'unread';
+async function renderNotificationsPage(el) {
+  el.innerHTML = `
+    <div class="ph">
+      <div><div class="ph-title">Notifications</div><div class="ph-sub" id="notif-page-sub"></div></div>
+      <div class="bg">
+        <button class="btn btn-ghost btn-sm" onclick="_markAllNotifRead();_renderNotifPage()">Mark all read</button>
+      </div>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <div style="display:flex;gap:6px;padding:10px 14px;border-bottom:1px solid var(--gray-1)">
+        <button class="btn btn-sm ${window._notifPageFilter==='unread'?'btn-primary':'btn-ghost'}" onclick="window._notifPageFilter='unread';_renderNotifPage()">Unread</button>
+        <button class="btn btn-sm ${window._notifPageFilter==='all'?'btn-primary':'btn-ghost'}" onclick="window._notifPageFilter='all';_renderNotifPage()">All</button>
+      </div>
+      <div id="notif-page-list" style="padding:10px 14px"></div>
+    </div>`;
+  await _loadNotifications();
+  _renderNotifPage();
+}
+
+function _renderNotifPage() {
+  const wrap = $('notif-page-list'); if (!wrap) return;
+  const items = window._notifPageFilter === 'unread' ? _notifCache.filter(n=>!n.is_read) : _notifCache;
+  const sub = $('notif-page-sub');
+  if (sub) sub.textContent = `${_notifCache.filter(n=>!n.is_read).length} unread of ${_notifCache.length} total`;
+  if (!items.length) {
+    wrap.innerHTML = `<div class="empty"><h3>${window._notifPageFilter==='unread'?'All caught up!':'No notifications'}</h3></div>`;
+    return;
+  }
+  // Group by day
+  const groups = {};
+  for (const n of items) {
+    const day = new Date(n.created_at).toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric',timeZone:_tz()});
+    (groups[day] = groups[day]||[]).push(n);
+  }
+  wrap.innerHTML = Object.entries(groups).map(([day, list]) => `
+    <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;letter-spacing:.5px;margin:12px 0 6px">${day}</div>
+    ${list.map(n=>_notifItemHtml(n,false)).join('')}
+  `).join('');
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -5086,14 +5231,18 @@ async function _superAdminRequestAccess(orgId, orgName) {
 
 async function _superAdminUseApprovedAccess(requestId, orgName) {
   try {
-    const r = await API.get(`/api/auth/access-requests/${requestId}/token`);
-    if (!localStorage.getItem('drm_token_original')) {
-      localStorage.setItem('drm_token_original', localStorage.getItem('drm_token'));
+    // Super admins already have every org in _allOrgs (see /me) — just switch directly
+    let target = _allOrgs.find(o => o.name === orgName);
+    if (!target) {
+      // Fallback: refetch org list
+      const fresh = await API.get('/api/auth/orgs');
+      target = fresh.find(o => o.name === orgName);
     }
-    localStorage.setItem('drm_token', r.token);
+    if (!target) { toast('Could not find that organisation','err'); return; }
     Modal.close();
-    toast(`Switching to ${orgName}…`);
-    window.location.reload();
+    await setOrg(target);
+    navigateTo('dashboard');
+    toast(`Switched to ${orgName}`);
   } catch(e) { toast(e.message||'Error','err'); }
 }
 
@@ -5214,24 +5363,87 @@ async function _loadAllOrgs() {
   const wrap = $('st-all-orgs-card'); if(!wrap) return;
   wrap.innerHTML = '<div class="spinner"></div>';
   try {
-    const orgs = await API.get('/api/auth/orgs');
+    const [orgs, myRequests] = await Promise.all([
+      API.get('/api/auth/orgs'),
+      API.get('/api/auth/access-requests/mine').catch(()=>[])
+    ]);
+    const approvedMap = {};
+    const pendingSet = new Set();
+    for (const r of myRequests) {
+      if (r.status === 'approved') approvedMap[r.org_id] = r.id;
+      else if (r.status === 'pending') pendingSet.add(r.org_id);
+    }
     wrap.innerHTML = `
-      <div class="card-title" style="margin-bottom:12px">All Organisations (${orgs.length})</div>
-      <div class="tw"><table>
-        <thead><tr><th>Name</th><th>Slug</th><th>Expires</th><th>Donors</th><th></th></tr></thead>
-        <tbody>${orgs.map(o=>`<tr>
-          <td><strong style="font-size:13px">${o.name}</strong></td>
-          <td style="font-size:11px;font-family:monospace;color:var(--gray-5)">${o.slug}</td>
-          <td style="font-size:12px;color:${o.expires_at&&new Date(o.expires_at)<new Date()?'var(--red)':'var(--gray-5)'}">${o.expires_at?fmtD(o.expires_at):'No expiry'}</td>
-          <td style="font-size:12px">${o.donor_count||'—'}</td>
-          <td>
-            <button class="btn btn-blue btn-sm" onclick="_superAdminAccessOrg('${o.id}','${o.name.replace(/'/g,"\\\\'")}')">
-              Access →
-            </button>
-          </td>
-        </tr>`).join('')}</tbody>
-      </table></div>`;
+      <div style="font-size:11px;color:var(--gray-5);margin-bottom:12px">
+        Edit info and users directly — no approval needed. To view donor/donation data, request access; the org admin must approve it.
+      </div>
+      ${orgs.map(o=>`
+        <div style="border:1px solid var(--gray-2);border-radius:8px;padding:14px 16px;margin-bottom:10px">
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap">
+            <div>
+              <div style="font-weight:700;font-size:14px;color:var(--navy)">${o.name}</div>
+              <div style="font-size:11px;color:var(--gray-5);margin-top:2px">
+                ${o.donor_count||0} donors · ${o.donation_count||0} donations
+                ${o.expires_at?`· Expires: <span style="color:${new Date(o.expires_at)<new Date()?'var(--red)':'inherit'}">${fmtD(o.expires_at)}</span>`:'· No expiry'}
+              </div>
+            </div>
+            <div class="bg">
+              <button class="btn btn-ghost btn-sm" onclick="_superAdminEditOrg('${o.id}','${o.name.replace(/'/g,"\\\\'")}','${o.expires_at||''}')">✏ Edit Info</button>
+              <button class="btn btn-ghost btn-sm" onclick="_superAdminEditUsers('${o.id}')">👥 Users</button>
+              ${approvedMap[o.id]
+                ? `<button class="btn btn-green btn-sm" onclick="_superAdminUseApprovedAccess('${approvedMap[o.id]}','${o.name.replace(/'/g,"\\\\'")}')">✓ Switch In</button>`
+                : pendingSet.has(o.id)
+                  ? `<button class="btn btn-ghost btn-sm" disabled style="color:var(--gray-4)">⏳ Pending…</button>`
+                  : `<button class="btn btn-blue btn-sm" onclick="_superAdminAccessOrg('${o.id}','${o.name.replace(/'/g,"\\\\'")}')">🔑 Request Access</button>`
+              }
+            </div>
+          </div>
+        </div>`).join('')}`;
   } catch(e) { wrap.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+
+async function _superAdminEditOrg(orgId, orgName, expiresAt) {
+  Modal.open(`Edit: ${orgName}`, `
+    <label>Organisation Name</label>
+    <input id="sae-name" value="${orgName}" autocomplete="new-password">
+    <label style="margin-top:10px">Expiry Date <span style="font-size:11px;color:var(--gray-5)">(leave blank = no expiry)</span></label>
+    <input type="date" id="sae-expires" value="${expiresAt?expiresAt.slice(0,10):''}">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_superAdminSaveOrg('${orgId}')">Save</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+async function _superAdminSaveOrg(orgId) {
+  const name    = val('sae-name')?.trim();
+  const expires = val('sae-expires')||null;
+  if (!name) { toast('Name required','err'); return; }
+  try {
+    await API.put(`/api/auth/orgs/${orgId}/expiry`, { expiry_date: expires, name });
+    toast('Saved ✓'); Modal.close(); _loadAllOrgs();
+  } catch(e) { toast(e.message,'err'); }
+}
+
+async function _superAdminEditUsers(orgId) {
+  try {
+    const users = await API.get(`/api/auth/orgs/${orgId}/users`);
+    Modal.open('Manage Users', `
+      <div class="tw" style="margin-bottom:12px"><table>
+        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Last Login</th><th></th></tr></thead>
+        <tbody>${users.map(u=>`<tr>
+          <td style="font-size:13px;font-weight:600">${u.full_name||'—'}</td>
+          <td style="font-size:12px;color:var(--gray-5)">${u.email}</td>
+          <td><span class="pill ${u.role==='admin'?'pill-blue':'pill-gray'}" style="font-size:10px">${u.role}</span></td>
+          <td style="font-size:11px;color:var(--gray-5)">${u.last_login?fmtDT(u.last_login):'Never'}</td>
+          <td><div class="actions">
+            <button class="btn btn-ghost btn-sm" onclick="_editUser('${u.id}','${(u.full_name||'').replace(/'/g,"\\\\'")}','${u.email}','${u.role}')">Edit</button>
+            <button class="btn btn-icon" style="color:var(--red)"
+              onclick="confirmDlg('Remove ${(u.full_name||u.email).replace(/'/g,"\\\\'")}?',async()=>{await API.del('/api/auth/orgs/${orgId}/users/${u.id}');toast('Removed');_superAdminEditUsers('${orgId}');})">✕</button>
+          </div></td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+      <div class="bg"><button class="btn btn-ghost" onclick="Modal.close()">Close</button></div>`, {lg:true});
+  } catch(e) { toast(e.message,'err'); }
 }
 
 // ── Access requests for org admins ────────────────────────────────────────────
@@ -5469,9 +5681,11 @@ async function _donorsMassPut(data) {
 }
 
 // ── Edit follow-up date ───────────────────────────────────────────────────────
-function _editFollowupDate(followupId, currentDate) {
-  Modal.open('Edit Follow-up Date', `
-    <label>Next Follow-up Date</label>
+function _editFollowupDate(followupId, currentDate, currentNotes) {
+  Modal.open('Edit Follow-Up', `
+    <label>Notes</label>
+    <textarea id="fu-edit-notes" style="min-height:90px">${(currentNotes||'').replace(/"/g,'&quot;')}</textarea>
+    <label style="margin-top:10px">Next Follow-up Date <span style="font-size:11px;color:var(--gray-4)">(optional)</span></label>
     <input type="date" id="fu-edit-date" value="${currentDate||''}"
       style="padding:10px 12px;border:1.5px solid var(--gray-3);border-radius:6px;width:100%;box-sizing:border-box">
     <div class="bg mt">
@@ -5481,13 +5695,16 @@ function _editFollowupDate(followupId, currentDate) {
 }
 
 async function _saveFollowupDate(followupId) {
-  const date = val('fu-edit-date');
+  const date  = val('fu-edit-date');
+  const notes = val('fu-edit-notes');
   try {
-    await API.put(`/api/orgs/${API.orgId}/leads/followups/${followupId}`, { next_followup_date: date||null });
-    toast('Follow-up date updated ✓');
+    await API.put(`/api/orgs/${API.orgId}/leads/followups/${followupId}`, { next_followup_date: date||null, notes });
+    toast('Follow-up updated ✓');
     Modal.close();
-    // Reload leads list
     _loadLeads();
+    if (typeof renderScheduledFollowups === 'function' && $('page-followups')?.classList.contains('active')) {
+      renderScheduledFollowups($('page-followups'));
+    }
   } catch(e) { toast(e.message||'Error','err'); }
 }
 
@@ -5526,7 +5743,7 @@ async function renderScheduledFollowups(el) {
             <td><div class="actions">
               <button class="btn btn-blue btn-sm" onclick="_leadView('${f.lead_id}')">View Lead</button>
               <button class="btn btn-ghost btn-sm" onclick="_leadAddFollowup('${f.lead_id}')">+ Follow Up</button>
-              <button class="btn btn-ghost btn-sm" onclick="_editFollowupDate('${f.id}','${f.next_followup_date||''}')">✏ Date</button>
+              <button class="btn btn-ghost btn-sm" onclick="_editFollowupDate('${f.id}','${f.next_followup_date||''}','${(f.notes||'').replace(/'/g,"\\'").replace(/\n/g,' ')}')">✏ Edit</button>
             </div></td>
           </tr>`;
         }).join('')}</tbody>
@@ -5682,8 +5899,8 @@ async function _donLabelSave(donId) {
   try {
     await API.put(`/api/orgs/${API.orgId}/donations/${donId}/label`, { labels });
     toast('Labels saved ✓'); Modal.close();
-    // Refresh donor detail if open
     if (window.DonorDetail?.data) DonorDetail.open(window.DonorDetail.data.id);
+    if ($('page-donations')?.classList.contains('active')) renderDonations($('page-donations'));
   } catch(e) { toast(e.message,'err'); }
 }
 
@@ -5799,4 +6016,64 @@ async function renderAccounts(el) {
     </div>
     <div class="card" id="st-all-orgs-card"><div class="spinner"></div></div>`;
   _loadAllOrgs();
+}
+
+// ── Leads import/export (mirrors Donors import/export) ────────────────────────
+function _leadsImportModal() {
+  Modal.open('Import Leads', `
+    <div class="alert alert-info" style="font-size:12px;margin-bottom:12px">
+      <strong>Step 1:</strong> Download the template, fill it in, then upload it below.<br>
+      Rows with an existing <strong>ID #</strong> update that lead's non-empty fields only. Rows without an ID create a new lead with a fresh ID.
+    </div>
+    <div class="bg" style="margin-bottom:14px">
+      <a class="btn btn-outline btn-sm" href="/api/orgs/${API.orgId}/leads/import/template" download="lead-import-template.xlsx">
+        &#8681; Download Template
+      </a>
+    </div>
+    <label>Upload filled Excel file</label>
+    <input type="file" id="limp-f" accept=".xlsx,.xls" style="margin-bottom:4px">
+    <div id="limp-res" style="display:none;margin-top:10px"></div>
+    <div class="bg mt">
+      <button class="btn btn-primary" id="limp-btn" onclick="_leadsDoImport()">Import</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, { sm: true });
+}
+
+async function _leadsDoImport() {
+  const f = $('limp-f')?.files[0]; if (!f) { toast('Select a file','err'); return; }
+  const btn = $('limp-btn'); if(btn){btn.textContent='Importing…';btn.disabled=true;}
+  const fd = new FormData(); fd.append('file', f);
+  try {
+    const r = await fetch(`/api/orgs/${API.orgId}/leads/import`,
+      { method:'POST', body:fd, credentials:'include', headers:{'x-org-id':API.orgId,'Authorization':'Bearer '+localStorage.getItem('drm_token')} }
+    ).then(r=>r.json());
+    if (r.error) throw new Error(r.error);
+    const res = $('limp-res');
+    if (res) {
+      const errHtml = r.errors?.length ? `
+        <details style="margin-top:6px">
+          <summary style="cursor:pointer;font-size:11px;color:var(--red)">${r.errors.length} row${r.errors.length>1?'s':''} skipped</summary>
+          <pre style="font-size:11px;margin-top:4px;white-space:pre-wrap">${r.errors.join('\n')}</pre>
+        </details>` : '';
+      res.innerHTML = `<div class="alert alert-ok" style="font-size:13px">
+        <strong>✓ Import complete</strong><br>
+        <strong>${r.imported}</strong> lead${r.imported!==1?'s':''} imported/updated
+        ${errHtml}
+      </div>
+      <div class="bg mt">
+        <button class="btn btn-ghost btn-sm" onclick="Modal.close()">Close</button>
+      </div>`;
+      res.style.display = 'block';
+    }
+    const footer = btn?.closest('.bg.mt');
+    if (footer) footer.style.display = 'none';
+    _loadLeads();
+  } catch(e) {
+    toast(e.message||'Import failed','err');
+    if (btn){btn.textContent='Import';btn.disabled=false;}
+  }
+}
+
+function _leadsExport() {
+  API.dl(`/api/orgs/${API.orgId}/leads/export`, 'leads-export.xlsx').catch(e=>toast(e.message||'Unknown error','err'));
 }

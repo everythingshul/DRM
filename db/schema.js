@@ -413,6 +413,7 @@ function runMigrations() {
   safe("ALTER TABLE donors ADD COLUMN donor_number INTEGER");
   safe("ALTER TABLE leads ADD COLUMN donor_number INTEGER");
   safe("ALTER TABLE donations ADD COLUMN labels TEXT DEFAULT '[]'");
+  safe("ALTER TABLE leads ADD COLUMN next_followup_date DATE");
   safe("ALTER TABLE email_settings ADD COLUMN brevo_api_key TEXT DEFAULT ''");
   // Invite permissions column
   safe("ALTER TABLE org_users ADD COLUMN permissions TEXT DEFAULT '{}'");
@@ -495,6 +496,27 @@ function runMigrations() {
     const hasBrevo = cols[0]?.values?.some(c => c[1] === 'brevo_api_key');
     console.log('[db] email_settings.brevo_api_key column:', hasBrevo ? 'EXISTS' : 'MISSING');
   } catch(e) {}
+
+  // Backfill donor_number for existing donors/leads created before this feature existed
+  try {
+    const missingDonors = all('SELECT id FROM donors WHERE donor_number IS NULL', []);
+    const missingLeads  = all('SELECT id FROM leads WHERE donor_number IS NULL', []);
+    const usedNumbers = new Set(
+      all('SELECT donor_number FROM donors WHERE donor_number IS NOT NULL UNION SELECT donor_number FROM leads WHERE donor_number IS NOT NULL', [])
+        .map(r => r.donor_number)
+    );
+    function nextNumber() {
+      let candidate;
+      do { candidate = Math.floor(100000 + Math.random() * 900000); } while (usedNumbers.has(candidate));
+      usedNumbers.add(candidate);
+      return candidate;
+    }
+    for (const d of missingDonors) run('UPDATE donors SET donor_number=? WHERE id=?', [nextNumber(), d.id]);
+    for (const l of missingLeads)  run('UPDATE leads SET donor_number=? WHERE id=?', [nextNumber(), l.id]);
+    if (missingDonors.length || missingLeads.length) {
+      console.log(`[db] Backfilled donor_number for ${missingDonors.length} donors and ${missingLeads.length} leads`);
+    }
+  } catch(e) { console.error('[db] donor_number backfill error:', e.message); }
 }
 
 module.exports = { initDb, all, get, run, saveDb };
