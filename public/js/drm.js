@@ -916,6 +916,7 @@ const DonorDetail = {
           <div class="bg" style="justify-content:flex-end;margin-top:6px">
             <button class="btn btn-blue btn-sm" onclick="Donors.openEdit('${donor.id}')">Edit</button>
             ${donor.needs_verification?`<button class="btn btn-green btn-sm" onclick="DonorDetail.verify('${donor.id}')">Verify</button>`:''}
+            ${!donor.total_donations?`<button class="btn btn-ghost btn-sm" onclick="DonorDetail.moveToLead('${donor.id}','${(donor.first_name+' '+donor.last_name).replace(/'/g,"\\\\'")}')">↩ Move to Lead</button>`:''}
           </div>
         </div>
       </div>
@@ -1102,6 +1103,16 @@ const DonorDetail = {
   },
 
   async verify(id) { await API.post(`/api/orgs/${API.orgId}/donors/${id}/verify`,{}); toast('Verified ✓'); this.open(id); loadBadges(); },
+  moveToLead(id, name) {
+    confirmDlg(`Move "${name}" back to Leads? They'll be removed from Donors and appear on the Leads page instead.`, async () => {
+      try {
+        await API.post(`/api/orgs/${API.orgId}/donors/${id}/move-to-lead`, {});
+        toast('Moved to Leads ✓');
+        Modal.close();
+        Donors.load();
+      } catch(e) { toast(e.message||'Error','err'); }
+    });
+  },
   async pref(id, f, v) { await API.put(API.o.donor(id), {[f]:v}); },
   async saveKv(id) { await API.put(API.o.donor(id), {kvitel:val('kv-txt'),kvitel_enabled:$('kv-on')?.checked?1:0}); toast('Saved'); },
   async addNote(id) {
@@ -1516,7 +1527,10 @@ function _deleteDonationNote(donId, idx, did, fromDonorProfile) {
 async function renderDonations(el) {
   el.innerHTML = '<div class="spinner"></div>';
   try {
-    const rows = await API.get(`/api/orgs/${API.orgId}/reports/donations`);
+    const [rows, labelLists] = await Promise.all([
+      API.get(`/api/orgs/${API.orgId}/reports/donations`),
+      API.get(`/api/orgs/${API.orgId}/label-lists`).catch(()=>({donation_labels:[]}))
+    ]);
     window._donAll = rows;
     el.innerHTML = `
       <div class="ph"><div><div class="ph-title">Donations</div><div class="ph-sub">${rows.length} records</div></div>
@@ -1530,6 +1544,7 @@ async function renderDonations(el) {
             <div class="sw" style="flex:1"><input id="don-s" placeholder="Search donor or trans ID…" oninput="_filterDon()" autocomplete="off"></div>
             <select id="don-meth" onchange="_filterDon()"><option value="">All Methods</option>${[...new Set(rows.map(d=>d.method))].map(m=>`<option value="${m}">${fmtMethod(m)}</option>`).join('')}</select>
             <select id="don-stat" onchange="_filterDon()"><option value="">All Status</option><option value="completed">Completed</option><option value="pending">Pending</option><option value="failed">Failed</option></select>
+            <select id="don-label" onchange="_filterDon()"><option value="">All Labels</option>${(labelLists.donation_labels||[]).map(l=>`<option value="${l}">${l}</option>`).join('')}</select>
           </div>
         </div>
         <div class="tw"><table>
@@ -1539,6 +1554,7 @@ async function renderDonations(el) {
             <th class="sort" onclick="_sortDon('amount')">Amount</th>
             <th class="sort" onclick="_sortDon('method')">Method</th>
             <th>Trans ID</th>
+            <th>Labels</th>
             <th class="sort" onclick="_sortDon('status')">Status</th>
             <th></th>
           </tr></thead>
@@ -1548,7 +1564,7 @@ async function renderDonations(el) {
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
 function _donRows(rows) {
-  if (!rows.length) return '<tr><td colspan="7"><div class="empty">No donations</div></td></tr>';
+  if (!rows.length) return '<tr><td colspan="8"><div class="empty">No donations</div></td></tr>';
   return rows.map(d => {
     const dn = (() => { try{return JSON.parse(d.donation_notes||'[]');}catch{return[];} })();
     const rid = 'dlr-'+d.id;
@@ -1558,11 +1574,10 @@ function _donRows(rows) {
       <td style="font-weight:600">${fmt$(d.amount)}${d.refund_amount>0?`<br><span style="font-size:11px;color:var(--red)">−${fmt$(d.refund_amount)}</span>`:''}</td>
       <td style="font-size:12px">${fmtMethod(d.method)}${d.last_four?` ••${d.last_four}`:''}</td>
       <td style="font-size:11px;color:var(--gray-5)">${d.transaction_id||'—'}</td>
-      <td>${sbadge(d.status)}
-        <span style="display:inline-flex;flex-wrap:wrap;gap:3px;vertical-align:middle;margin-left:4px">
-          ${jsonParse(d.labels||'[]').map(l=>`<span class="pill pill-blue" style="font-size:10px">${l}</span>`).join('')}
-        </span>
-      </td>
+      <td><div style="display:flex;flex-wrap:wrap;gap:3px">
+          ${jsonParse(d.labels||'[]').map(l=>`<span class="pill pill-blue" style="font-size:10px">${l}</span>`).join('') || '<span style="color:var(--gray-4);font-size:11px">—</span>'}
+        </div></td>
+      <td>${sbadge(d.status)}</td>
       <td><div class="actions">
         <button class="btn btn-icon" title="Expand" onclick="_togDlr('${d.id}')">&#8964;</button>
         <button class="btn btn-icon" title="Add note" onclick="_addDonationNote('${d.donor_id}','${d.id}')">&#9997;</button>
@@ -1575,7 +1590,7 @@ function _donRows(rows) {
       </div></td>
     </tr>
     <tr id="${rid}" style="display:none;background:var(--gray-05)">
-      <td colspan="7" style="padding:12px 16px">
+      <td colspan="8" style="padding:12px 16px">
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
           <div style="font-size:12px;line-height:1.9">
             <strong>Full Details</strong><br>
@@ -1652,8 +1667,13 @@ function _sortDon(key) {
   _filterDon();
 }
 function _filterDon() {
-  const s=val('don-s').toLowerCase(),m=val('don-meth'),st=val('don-stat');
-  let f=(window._donAll||[]).filter(d=>(!s||`${d.first_name} ${d.last_name} ${d.transaction_id||''}`.toLowerCase().includes(s))&&(!m||d.method===m)&&(!st||d.status===st));
+  const s=val('don-s').toLowerCase(),m=val('don-meth'),st=val('don-stat'),lbl=val('don-label');
+  let f=(window._donAll||[]).filter(d=>
+    (!s||`${d.first_name} ${d.last_name} ${d.transaction_id||''}`.toLowerCase().includes(s))
+    &&(!m||d.method===m)
+    &&(!st||d.status===st)
+    &&(!lbl||jsonParse(d.labels||'[]').includes(lbl))
+  );
   const srt = window._donSort;
   if (srt) {
     f = [...f].sort((a,b) => {
@@ -3064,6 +3084,7 @@ async function renderSettings(el) {
               </div></td>
             </tr>`).join('')}</tbody>
           </table></div>
+          <div id="removed-users-section" style="margin-top:14px"></div>
         </div>
       </div>
       <div id="st-nh" class="tc"><div class="card">
@@ -3107,6 +3128,7 @@ async function renderSettings(el) {
     document.querySelector('#page-settings .tab[data-tc="st-all-orgs"]')?.addEventListener('click', _loadAllOrgs);
     // Check for pending access requests for org admins
     _checkAccessRequests();
+    _loadRemovedUsers();
     // Load label lists when Labels tab is clicked
     document.querySelector('#page-settings .tab[data-tc="st-labels"]').addEventListener('click', _loadLabelSettings);
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
@@ -3196,6 +3218,7 @@ async function _loadLabelSettings() {
     const lists = await API.get(`/api/orgs/${API.orgId}/label-lists`);
     let donorLbls    = [...(lists.donor_labels||[])];
     let donationLbls = [...(lists.donation_labels||[])];
+    let leadLbls      = [...(lists.lead_labels||[])];
 
     function renderLabelList(containerId, arr, type) {
       const el = $(containerId); if(!el) return;
@@ -3210,16 +3233,18 @@ async function _loadLabelSettings() {
     window._removeLabel = (type, idx) => {
       if(type==='donor')    { donorLbls.splice(idx,1);    renderLabelList('donor-lbl-list', donorLbls,'donor'); }
       if(type==='donation') { donationLbls.splice(idx,1); renderLabelList('donation-lbl-list', donationLbls,'donation'); }
+      if(type==='lead')     { leadLbls.splice(idx,1);      renderLabelList('lead-lbl-list', leadLbls,'lead'); }
     };
     window._addLabel = (type) => {
       const inp = $(type+'-lbl-inp');
       const v = inp?.value?.trim(); if(!v) return;
       if(type==='donor')    { if(!donorLbls.includes(v)) donorLbls.push(v);    renderLabelList('donor-lbl-list', donorLbls,'donor'); }
       if(type==='donation') { if(!donationLbls.includes(v)) donationLbls.push(v); renderLabelList('donation-lbl-list', donationLbls,'donation'); }
+      if(type==='lead')     { if(!leadLbls.includes(v)) leadLbls.push(v);      renderLabelList('lead-lbl-list', leadLbls,'lead'); }
       inp.value = '';
     };
     window._saveLabelLists = async () => {
-      await API.put(`/api/orgs/${API.orgId}/label-lists`,{donor_labels:donorLbls,donation_labels:donationLbls});
+      await API.put(`/api/orgs/${API.orgId}/label-lists`,{donor_labels:donorLbls,donation_labels:donationLbls,lead_labels:leadLbls});
       toast('Labels saved ✓');
     };
 
@@ -3245,11 +3270,22 @@ async function _loadLabelSettings() {
             <button class="btn btn-blue btn-sm" onclick="window._addLabel('donation')">Add</button>
           </div>
         </div>
+        <div>
+          <div class="card-title">Lead Labels</div>
+          <p style="font-size:12px;color:var(--gray-5);margin-bottom:10px">Tags applied to leads (e.g. Hot Lead, Cold Call, Referral)</p>
+          <div id="lead-lbl-list"></div>
+          <div class="bg mt">
+            <input id="lead-lbl-inp" placeholder="New label…" style="flex:1" autocomplete="off"
+              onkeydown="if(event.key==='Enter'){event.preventDefault();window._addLabel('lead')}">
+            <button class="btn btn-blue btn-sm" onclick="window._addLabel('lead')">Add</button>
+          </div>
+        </div>
       </div>
       <div class="bg mt"><button class="btn btn-primary" onclick="window._saveLabelLists()">Save Labels</button></div>`;
 
     renderLabelList('donor-lbl-list',    donorLbls,    'donor');
     renderLabelList('donation-lbl-list', donationLbls, 'donation');
+    renderLabelList('lead-lbl-list',     leadLbls,     'lead');
   } catch(e) { c.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
 async function _loadBackupStatus() {
@@ -4801,6 +4837,7 @@ function _renderLeadsList() {
 
 function _leadAdd() {
   Modal.open('Add Lead', _leadForm(), {lg:true});
+  window._lwLead = labelPicker('lf-labels-picker', [], 'lead_labels');
 }
 
 async function _leadView(id) {
@@ -4887,17 +4924,7 @@ function _leadForm(lead={}) {
       </div>
     </div>
     <label style="margin-top:10px">Labels</label>
-    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px" id="lf-labels-chips">
-      ${existingLabels.map(l=>`<span class="pill pill-blue" style="font-size:11px">${l}
-        <span onclick="this.parentElement.remove();_lfUpdateLabels()" style="cursor:pointer;margin-left:3px">×</span>
-      </span>`).join('')}
-    </div>
-    <div style="display:flex;gap:6px">
-      <input id="lf-label-input" placeholder="Add label…" autocomplete="new-password" style="flex:1"
-        onkeydown="if(event.key==='Enter'){event.preventDefault();_lfAddLabel()}">
-      <button class="btn btn-ghost btn-sm" onclick="_lfAddLabel()">Add</button>
-    </div>
-    <input type="hidden" id="lf-labels-val" value="${lead.labels||'[]'}">
+    <div id="lf-labels-picker"></div>
     <label style="margin-top:10px">Notes</label>
     <textarea id="lf-notes" style="min-height:80px">${lead.notes||''}</textarea>
     <div class="bg mt">
@@ -4913,7 +4940,7 @@ async function _leadSave(id='') {
     email: val('lf-email'), cell: val('lf-cell'), home_phone: val('lf-home'),
     street: val('lf-street'), apt: val('lf-apt'), city: val('lf-city'),
     state: val('lf-state'), zip: val('lf-zip'),
-    labels: (() => { try { return JSON.parse(val('lf-labels-val')||'[]'); } catch { return []; } })(),
+    labels: window._lwLead?.get() || [],
     category: val('lf-category'), status: val('lf-status'),
     assigned_to: val('lf-assigned')||null, notes: val('lf-notes')
   };
@@ -4928,6 +4955,8 @@ async function _leadEdit(id) {
   try {
     const lead = await API.get(`/api/orgs/${API.orgId}/leads/${id}`);
     Modal.open('Edit Lead', _leadForm(lead), {lg:true});
+    const existing = (() => { try { return JSON.parse(lead.labels||'[]'); } catch { return []; } })();
+    window._lwLead = labelPicker('lf-labels-picker', existing, 'lead_labels');
   } catch(e) { toast(e.message,'err'); }
 }
 
@@ -5590,9 +5619,19 @@ async function _leadsMassAssign() {
 }
 
 async function _leadsMassLabel() {
+  const labels = await API.get(`/api/orgs/${API.orgId}/label-lists`);
+  const leadLabels = (labels?.lead_labels || []);
   Modal.open('Add Label to Selected Leads', `
-    <input id="mass-label" placeholder="Label name…" autocomplete="new-password"
-      style="width:100%;padding:8px;border:1.5px solid var(--gray-3);border-radius:6px;margin-bottom:12px;box-sizing:border-box">
+    <div style="margin-bottom:10px">
+      <div style="font-size:12px;color:var(--gray-5);margin-bottom:8px">Select a label to add to all selected leads:</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px" id="bulk-label-pills">
+        ${leadLabels.map(l=>`<button type="button" class="btn btn-ghost btn-sm"
+          onclick="_bulkLabelSelect('${l.replace(/'/g,"\\\\'")}',this)">${l}</button>`).join('')}
+      </div>
+      <input id="bulk-label-custom" placeholder="Or type a new label…" autocomplete="new-password"
+        style="padding:8px 12px;border:1.5px solid var(--gray-3);border-radius:6px;width:100%;box-sizing:border-box">
+      <input type="hidden" id="bulk-label-val" value="">
+    </div>
     <div class="bg">
       <button class="btn btn-primary" onclick="_leadsMassAddLabel()">Add Label</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
@@ -5600,8 +5639,8 @@ async function _leadsMassLabel() {
 }
 
 async function _leadsMassAddLabel() {
-  const label = val('mass-label')?.trim();
-  if (!label) { toast('Enter a label','err'); return; }
+  const label = val('bulk-label-custom')?.trim() || val('bulk-label-val');
+  if (!label) { toast('Select or enter a label','err'); return; }
   const ids = [...window._leadsSelected];
   try {
     await Promise.all(ids.map(async id => {
@@ -5907,7 +5946,7 @@ async function _donLabelSave(donId) {
 // ── Lead labels — same as donors ─────────────────────────────────────────────
 async function _leadLabels(leadId, currentLabelsJson) {
   const labels = await API.get(`/api/orgs/${API.orgId}/label-lists`).catch(()=>({}));
-  const donorLabels = labels?.donor_labels || [];
+  const leadLabels = labels?.lead_labels || [];
   let current = [];
   try { current = JSON.parse(currentLabelsJson||'[]'); } catch {}
 
@@ -5922,7 +5961,7 @@ async function _leadLabels(leadId, currentLabelsJson) {
     </div>
     <div style="font-size:11px;font-weight:700;color:var(--gray-5);margin-bottom:6px">Add Label</div>
     <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px">
-      ${donorLabels.map(l=>`<button type="button" class="btn btn-ghost btn-sm" style="font-size:11px"
+      ${leadLabels.map(l=>`<button type="button" class="btn btn-ghost btn-sm" style="font-size:11px"
         onclick="_leadLabelAdd('${l.replace(/'/g,"\\\\'")}',this)">${l}</button>`).join('')}
     </div>
     <div style="display:flex;gap:6px">
@@ -5960,38 +5999,50 @@ async function _leadLabelSave(leadId) {
 }
 
 // ── Duplicate flags ───────────────────────────────────────────────────────────
-async function _loadDuplicateFlags() {
+async function _loadDuplicateFlags(statusFilter) {
+  statusFilter = statusFilter || window._dupFilter || 'pending';
+  window._dupFilter = statusFilter;
   try {
-    const dups = await API.get(`/api/orgs/${API.orgId}/donors/duplicates`);
-    if (!dups.length) return;
-    // Show on verification page
+    const dups = await API.get(`/api/orgs/${API.orgId}/donors/duplicates?status=${statusFilter}`);
     const pg = $('page-verification');
     if (!pg) return;
     const existing = $('dup-flags-section');
     if (existing) existing.remove();
+    // Always show the section (with filter controls) even when the current filter is empty,
+    // so the user can switch to another status and actually find things
     const wrap = document.createElement('div');
     wrap.id = 'dup-flags-section';
     wrap.innerHTML = `
       <div class="ph" style="margin-top:24px">
-        <div><div class="ph-title" style="color:var(--red)">⚠ Duplicate Donors (${dups.length})</div>
-          <div class="ph-sub">These donors were flagged as possible duplicates on import. Resolve each pair.</div>
+        <div><div class="ph-title" style="color:var(--red)">⚠ Duplicate Donors</div>
+          <div class="ph-sub">Donors flagged as possible duplicates. Resolve each pair.</div>
         </div>
+        <select id="dup-status-filter" style="width:auto" onchange="_loadDuplicateFlags(this.value)">
+          <option value="pending" ${statusFilter==='pending'?'selected':''}>Pending</option>
+          <option value="resolved_separate" ${statusFilter==='resolved_separate'?'selected':''}>Resolved — Kept Both</option>
+          <option value="merged" ${statusFilter==='merged'?'selected':''}>Merged</option>
+          <option value="all" ${statusFilter==='all'?'selected':''}>All</option>
+        </select>
       </div>
+      ${!dups.length ? `<div class="card"><div class="empty"><h3>No ${statusFilter==='all'?'':statusFilter.replace('_',' ')} duplicates</h3></div></div>` : `
       <div class="card" style="padding:0;overflow:hidden"><div class="tw"><table>
-        <thead><tr><th>Donor A</th><th>Donor B</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Donor A</th><th>Donor B</th><th>Reason</th><th>Status</th><th></th></tr></thead>
         <tbody>${dups.map(d=>`<tr>
           <td><div style="font-weight:600;font-size:13px">#${d.number_a||'?'} ${d.name_a}</div><div style="font-size:11px;color:var(--gray-5)">${d.email_a||d.cell_a||''}</div></td>
           <td><div style="font-weight:600;font-size:13px">#${d.number_b||'?'} ${d.name_b}</div><div style="font-size:11px;color:var(--gray-5)">${d.email_b||d.cell_b||''}</div></td>
+          <td style="font-size:11px;color:var(--gray-6)">${d.reason||'—'}</td>
           <td><span class="pill" style="font-size:10px;background:#fef3c7;color:#b45309">${d.status}</span></td>
           <td><div class="actions">
             <button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${d.donor_id_a}')">View A</button>
             <button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${d.donor_id_b}')">View B</button>
-            <button class="btn btn-green btn-sm" onclick="_resolveDup('${d.id}','keep_both')">Keep Both</button>
-            <button class="btn btn-ghost btn-sm" onclick="_resolveDup('${d.id}','merge_into_a')">Merge→A</button>
-            <button class="btn btn-ghost btn-sm" onclick="_resolveDup('${d.id}','merge_into_b')">Merge→B</button>
+            ${d.status==='pending' ? `
+              <button class="btn btn-green btn-sm" onclick="_resolveDup('${d.id}','keep_both')">Keep Both</button>
+              <button class="btn btn-ghost btn-sm" onclick="_resolveDup('${d.id}','merge_into_a')">Merge→A</button>
+              <button class="btn btn-ghost btn-sm" onclick="_resolveDup('${d.id}','merge_into_b')">Merge→B</button>
+            ` : ''}
           </div></td>
         </tr>`).join('')}</tbody>
-      </table></div></div>`;
+      </table></div></div>`}`;
     pg.insertBefore(wrap, pg.firstChild);
   } catch {}
 }
@@ -6076,4 +6127,37 @@ async function _leadsDoImport() {
 
 function _leadsExport() {
   API.dl(`/api/orgs/${API.orgId}/leads/export`, 'leads-export.xlsx').catch(e=>toast(e.message||'Unknown error','err'));
+}
+
+// ── Recently removed users (30-day restore window) ────────────────────────────
+async function _loadRemovedUsers() {
+  const wrap = $('removed-users-section'); if (!wrap) return;
+  try {
+    const removed = await API.get(`/api/orgs/${API.orgId}/users/removed`);
+    if (!removed.length) { wrap.innerHTML = ''; return; }
+    wrap.innerHTML = `
+      <div style="border-top:1px solid var(--gray-1);padding-top:12px">
+        <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">
+          Recently Removed <span style="font-weight:400;text-transform:none">(restorable for 30 days)</span>
+        </div>
+        ${removed.map(u => {
+          const daysLeft = 30 - Math.floor((Date.now() - new Date(u.removed_at).getTime()) / 86400000);
+          return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--gray-05);border-radius:6px;margin-bottom:6px">
+            <div>
+              <span style="font-size:13px;font-weight:600">${u.full_name||u.email}</span>
+              <span style="font-size:11px;color:var(--gray-5);margin-left:6px">Removed ${_timeAgo(u.removed_at)} · ${daysLeft} day${daysLeft!==1?'s':''} left to restore</span>
+            </div>
+            <button class="btn btn-ghost btn-sm" onclick="_restoreUser('${u.id}','${(u.full_name||u.email).replace(/'/g,"\\\\'")}')">↩ Restore</button>
+          </div>`;
+        }).join('')}
+      </div>`;
+  } catch { wrap.innerHTML = ''; }
+}
+
+async function _restoreUser(userId, name) {
+  try {
+    await API.post(`/api/orgs/${API.orgId}/users/${userId}/restore`, {});
+    toast(`${name} restored ✓`);
+    renderSettings($('page-settings'));
+  } catch(e) { toast(e.message||'Error','err'); }
 }

@@ -238,7 +238,7 @@ router.get('/receipt/:donationId', async (req, res) => {
   try {
     const don = get(`
       SELECT d.*, COALESCE(dn.first_name||' '||dn.last_name, d.notes) as donor_display,
-             dn.email, dn.title, dn.street, dn.city, dn.state, dn.zip,
+             dn.email, dn.title, dn.street, dn.city, dn.state, dn.zip, dn.donor_number,
              o.name as org_name
       FROM donations d
       LEFT JOIN donors dn ON d.donor_id = dn.id
@@ -279,17 +279,18 @@ router.get('/receipt/:donationId', async (req, res) => {
 
     const row=(label,value,y)=>{page.drawText(label+':',{x:24,y,size:9,font,color:gray});page.drawText(String(value||'—'),{x:170,y,size:9,font:bold,color:blk});};
 
-    row('Donor', don.donor_display||'—', 308);
-    row('Date', new Date(don.donation_date).toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'}), 292);
-    row('Amount', `$${parseFloat(don.amount).toFixed(2)}`, 276);
-    row('Method', (don.method||'').replace('_',' ').replace(/\b\w/g,c=>c.toUpperCase()), 260);
-    row('Transaction ID', don.transaction_id||'N/A', 244);
-    row('Status', (don.status||'').charAt(0).toUpperCase()+(don.status||'').slice(1), 228);
+    row('Donor ID', don.donor_number ? `#${don.donor_number}` : '—', 308);
+    row('Donor', don.donor_display||'—', 292);
+    row('Date', new Date(don.donation_date).toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'}), 276);
+    row('Amount', `$${parseFloat(don.amount).toFixed(2)}`, 260);
+    row('Method', (don.method||'').replace('_',' ').replace(/\b\w/g,c=>c.toUpperCase()), 244);
+    row('Transaction ID', don.transaction_id||'N/A', 228);
+    row('Status', (don.status||'').charAt(0).toUpperCase()+(don.status||'').slice(1), 212);
 
-    page.drawLine({start:{x:24,y:212},end:{x:588,y:212},thickness:0.5,color:rgb(0.85,0.85,0.85)});
-    page.drawText('Tax ID: 11-6076986',{x:24,y:196,size:9,font:bold,color:navy});
-    page.drawText('No goods or services were provided in exchange for this contribution.',{x:24,y:182,size:8,font,color:gray});
-    page.drawText('This letter serves as your official tax receipt. Please retain for your records.',{x:24,y:170,size:8,font,color:gray});
+    page.drawLine({start:{x:24,y:196},end:{x:588,y:196},thickness:0.5,color:rgb(0.85,0.85,0.85)});
+    page.drawText('Tax ID: 11-6076986',{x:24,y:180,size:9,font:bold,color:navy});
+    page.drawText('No goods or services were provided in exchange for this contribution.',{x:24,y:166,size:8,font,color:gray});
+    page.drawText('This letter serves as your official tax receipt. Please retain for your records.',{x:24,y:154,size:8,font,color:gray});
 
     page.drawRectangle({x:0,y:0,width:612,height:40,color:rgb(0.96,0.97,0.99)});
     page.drawText(don.org_name+' · Tax ID 11-6076986 · drm.everythingshul.com',{x:24,y:16,size:8,font,color:gray});

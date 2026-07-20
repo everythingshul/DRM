@@ -247,6 +247,7 @@ function createTables() {
       id TEXT PRIMARY KEY, org_id TEXT UNIQUE NOT NULL,
       donor_labels TEXT DEFAULT '[]',
       donation_labels TEXT DEFAULT '[]',
+      lead_labels TEXT DEFAULT '[]',
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS whatsapp_settings (
@@ -302,7 +303,7 @@ function createTables() {
     CREATE TABLE IF NOT EXISTS donor_duplicates (
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
       donor_id_a TEXT NOT NULL, donor_id_b TEXT NOT NULL,
-      status TEXT DEFAULT 'pending',
+      status TEXT DEFAULT 'pending', reason TEXT,
       resolved_by TEXT, resolved_at DATETIME,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(donor_id_a, donor_id_b)
@@ -413,11 +414,13 @@ function runMigrations() {
   safe("ALTER TABLE donors ADD COLUMN donor_number INTEGER");
   safe("ALTER TABLE leads ADD COLUMN donor_number INTEGER");
   safe("ALTER TABLE donations ADD COLUMN labels TEXT DEFAULT '[]'");
+  safe("ALTER TABLE org_label_lists ADD COLUMN lead_labels TEXT DEFAULT '[]'");
   safe("ALTER TABLE leads ADD COLUMN next_followup_date DATE");
   safe("ALTER TABLE email_settings ADD COLUMN brevo_api_key TEXT DEFAULT ''");
   // Invite permissions column
   safe("ALTER TABLE org_users ADD COLUMN permissions TEXT DEFAULT '{}'");
   safe("ALTER TABLE org_users ADD COLUMN invited_by TEXT");
+  safe("ALTER TABLE org_users ADD COLUMN removed_at DATETIME");
   // New tables — add as migrations since DB already exists
   try { db.run(`CREATE TABLE IF NOT EXISTS import_history (
     id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
@@ -435,11 +438,12 @@ function runMigrations() {
   try { db.run(`CREATE TABLE IF NOT EXISTS donor_duplicates (
     id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
     donor_id_a TEXT NOT NULL, donor_id_b TEXT NOT NULL,
-    status TEXT DEFAULT 'pending',
+    status TEXT DEFAULT 'pending', reason TEXT,
     resolved_by TEXT, resolved_at DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(donor_id_a, donor_id_b)
   )`); saveDb(); } catch(e) {}
+  safe("ALTER TABLE donor_duplicates ADD COLUMN reason TEXT");
   try { db.run(`CREATE TABLE IF NOT EXISTS leads (
     id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
     title TEXT, first_name TEXT, last_name TEXT,

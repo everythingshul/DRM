@@ -243,7 +243,7 @@ router.get('/reports/donations', (req, res) => {
   const { from, to, method, donor_id, status, format = 'json' } = req.query;
   let sql = `
     SELECT don.id, don.donation_date, don.amount, don.method, don.status,
-           don.transaction_id, don.notes, don.label, don.donation_notes,
+           don.transaction_id, don.notes, don.label, don.labels, don.donation_notes,
            don.is_manual, don.is_autopay, don.donor_id,
            d.first_name, d.last_name, d.email, d.cell,
            n.name_he as neighborhood,
@@ -926,19 +926,20 @@ router.get('/label-lists', (req, res) => {
   const r = get('SELECT * FROM org_label_lists WHERE org_id=?', [req.orgId]);
   res.json({
     donor_labels:    (() => { try { return JSON.parse(r?.donor_labels||'[]'); } catch { return []; } })(),
-    donation_labels: (() => { try { return JSON.parse(r?.donation_labels||'[]'); } catch { return []; } })()
+    donation_labels: (() => { try { return JSON.parse(r?.donation_labels||'[]'); } catch { return []; } })(),
+    lead_labels:     (() => { try { return JSON.parse(r?.lead_labels||'[]'); } catch { return []; } })()
   });
 });
 
 router.put('/label-lists', requireOrgAdmin, (req, res) => {
-  const { donor_labels, donation_labels } = req.body;
-  const ex = get('SELECT id FROM org_label_lists WHERE org_id=?', [req.orgId]);
+  const { donor_labels, donation_labels, lead_labels } = req.body;
+  const ex = get('SELECT * FROM org_label_lists WHERE org_id=?', [req.orgId]);
   if (ex) {
-    run('UPDATE org_label_lists SET donor_labels=?,donation_labels=?,updated_at=CURRENT_TIMESTAMP WHERE org_id=?',
-      [JSON.stringify(donor_labels||[]), JSON.stringify(donation_labels||[]), req.orgId]);
+    run('UPDATE org_label_lists SET donor_labels=?,donation_labels=?,lead_labels=?,updated_at=CURRENT_TIMESTAMP WHERE org_id=?',
+      [JSON.stringify(donor_labels||[]), JSON.stringify(donation_labels||[]), JSON.stringify(lead_labels!==undefined?lead_labels:JSON.parse(ex.lead_labels||'[]')), req.orgId]);
   } else {
-    run('INSERT INTO org_label_lists (id,org_id,donor_labels,donation_labels) VALUES (?,?,?,?)',
-      [require('uuid').v4(), req.orgId, JSON.stringify(donor_labels||[]), JSON.stringify(donation_labels||[])]);
+    run('INSERT INTO org_label_lists (id,org_id,donor_labels,donation_labels,lead_labels) VALUES (?,?,?,?,?)',
+      [require('uuid').v4(), req.orgId, JSON.stringify(donor_labels||[]), JSON.stringify(donation_labels||[]), JSON.stringify(lead_labels||[])]);
   }
   res.json({ success: true });
 });

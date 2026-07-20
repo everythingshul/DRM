@@ -34,7 +34,7 @@ function requireOrg(req, res, next) {
 
   // Check membership unless super admin
   if (!req.user.is_super_admin) {
-    const membership = get('SELECT * FROM org_users WHERE org_id = ? AND user_id = ?', [orgId, req.user.id]);
+    const membership = get('SELECT * FROM org_users WHERE org_id = ? AND user_id = ? AND removed_at IS NULL', [orgId, req.user.id]);
     if (!membership) return res.status(403).json({ error: 'Access denied' });
     req.orgRole = membership.role;
   } else {

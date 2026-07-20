@@ -100,20 +100,21 @@ app.post('/api/orgs/:orgId/import/donors',
       const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
       if (!rows.length) return res.status(400).json({ error: 'File is empty' });
 
-      // Load existing donors for duplicate detection
-      const existing = all('SELECT first_name, last_name, email, cell FROM donors WHERE org_id=?', [req.params.orgId]);
-      const nameSet  = new Set(existing.map(d => `${d.first_name?.toLowerCase()}|${d.last_name?.toLowerCase()}`));
-      const emailSet = new Set(existing.filter(d=>d.email).map(d => d.email.toLowerCase()));
-      const cellSet  = new Set(existing.filter(d=>d.cell).map(d => d.cell.replace(/\D/g,'')));
+      // Load existing donors for duplicate detection (select every field actually used below)
+      const existing = all('SELECT id, first_name, last_name, email, cell, home_phone, hebrew_full_name, street, apt, zip FROM donors WHERE org_id=?', [req.params.orgId]);
+      const norm10 = p => (p||'').replace(/\D/g,'').slice(-10); // compare by last 10 digits regardless of +1/formatting
+
+      // Map each normalized key -> existing donor id, so we can link the duplicate record for ANY trigger reason
+      const nameMap   = new Map(existing.filter(d=>d.first_name&&d.last_name).map(d=>[`${d.first_name.toLowerCase().trim()}|${d.last_name.toLowerCase().trim()}`, d.id]));
+      const hebrewMap = new Map(existing.filter(d=>d.hebrew_full_name).map(d=>[d.hebrew_full_name.trim().toLowerCase(), d.id]));
+      const emailMap  = new Map(existing.filter(d=>d.email).map(d=>[d.email.toLowerCase().trim(), d.id]));
+      const cellMap   = new Map(existing.filter(d=>d.cell).map(d=>[norm10(d.cell), d.id]));
+      const homeMap   = new Map(existing.filter(d=>d.home_phone).map(d=>[norm10(d.home_phone), d.id]));
+      const addrMap   = new Map(existing.filter(d=>d.street&&d.zip).map(d=>[`${d.street.toLowerCase().trim()}|${(d.apt||'').toLowerCase().trim()}|${d.zip.trim()}`, d.id]));
+      const lastNameByCell = new Map(existing.filter(d=>d.cell&&d.last_name).map(d=>[norm10(d.cell), d.last_name.toLowerCase().trim()]));
+      const lastNameByHome = new Map(existing.filter(d=>d.home_phone&&d.last_name).map(d=>[norm10(d.home_phone), d.last_name.toLowerCase().trim()]));
 
       let imported = 0, flagged = [], errors = [], donorIds = [];
-
-      // Build lookup sets from existing donors for duplicate detection
-      const hebrewSet  = new Set(existing.filter(d=>d.hebrew_full_name).map(d=>d.hebrew_full_name.trim().toLowerCase()));
-      const emailSet2  = new Set(existing.filter(d=>d.email).map(d=>d.email.toLowerCase()));
-      const cellSet2   = new Set(existing.filter(d=>d.cell).map(d=>d.cell.replace(/\D/g,'')));
-      const homeSet    = new Set(existing.filter(d=>d.home_phone).map(d=>d.home_phone.replace(/\D/g,'')));
-      const addrSet    = new Set(existing.filter(d=>d.street&&d.zip).map(d=>`${d.street.toLowerCase().trim()}|${d.zip.trim()}`));
 
       for (const row of rows) {
         const fn      = (row['First Name']  || row['first_name']  || '').toString().trim();
@@ -125,6 +126,7 @@ app.post('/api/orgs/:orgId/import/donors',
         const homeRaw = (row['Home Phone']  || row['home_phone']  || '').toString().replace(/\D/g,'');
         const home    = homeRaw || null;
         const street  = (row['Street']      || row['street']      || '').toString().trim();
+        const apt     = (row['Apt']         || row['apt']         || '').toString().trim();
         const zip     = (row['Zip']         || row['zip']         || '').toString().trim();
 
         // Skip only completely empty rows
@@ -160,13 +162,34 @@ app.post('/api/orgs/:orgId/import/donors',
           continue;
         }
 
-        // Duplicate detection — flag on any field match, still import
+        // ── Duplicate detection ────────────────────────────────────────────────
+        // Strong signals (flag on their own): exact full name, Hebrew name, email, address (incl. apt)
+        // Weak signals (phone alone): only flag if the last name ALSO matches that same
+        // existing donor — shared household phones (e.g. spouses) are common and legitimate,
+        // so a phone match with a clearly different last name is not auto-flagged.
+        const nameKey = fn && ln ? `${fn.toLowerCase()}|${ln.toLowerCase()}` : null;
+        const addrKey = street && zip ? `${street.toLowerCase()}|${apt.toLowerCase()}|${zip}` : null;
         const dupReasons = [];
-        if (hebrew && hebrewSet.has(hebrew.toLowerCase()))        dupReasons.push('Hebrew name');
-        if (email  && emailSet2.has(email))                       dupReasons.push('Email');
-        if (cell   && cellSet2.has(cell))                         dupReasons.push('Cell phone');
-        if (home   && homeSet.has(home))                          dupReasons.push('Home phone');
-        if (street && zip && addrSet.has(`${street.toLowerCase()}|${zip}`)) dupReasons.push('Address');
+        let matchId = null;
+
+        if (nameKey && nameMap.has(nameKey))                   { dupReasons.push('Full name match'); matchId = matchId || nameMap.get(nameKey); }
+        if (hebrew && hebrewMap.has(hebrew.toLowerCase()))      { dupReasons.push('Hebrew name match'); matchId = matchId || hebrewMap.get(hebrew.toLowerCase()); }
+        if (email && emailMap.has(email))                       { dupReasons.push('Same email'); matchId = matchId || emailMap.get(email); }
+        if (addrKey && addrMap.has(addrKey))                    { dupReasons.push('Same address'); matchId = matchId || addrMap.get(addrKey); }
+        if (cell) {
+          const key10 = norm10(cell);
+          if (cellMap.has(key10)) {
+            const otherLast = lastNameByCell.get(key10);
+            if (!ln || !otherLast || otherLast === ln.toLowerCase()) { dupReasons.push('Same cell phone'); matchId = matchId || cellMap.get(key10); }
+          }
+        }
+        if (home) {
+          const key10 = norm10(home);
+          if (homeMap.has(key10)) {
+            const otherLast = lastNameByHome.get(key10);
+            if (!ln || !otherLast || otherLast === ln.toLowerCase()) { dupReasons.push('Same home phone'); matchId = matchId || homeMap.get(key10); }
+          }
+        }
 
         try {
           const newId = uuidv4();
@@ -197,33 +220,23 @@ app.post('/api/orgs/:orgId/import/donors',
              (row['Kvitel Names']||row['kvitel']||'').toString().trim()||null
             ]);
 
-          // If flagged as duplicate, create duplicate record
-          if (dupReasons.length) {
-            // Find the matching existing donor
-            let matchId = null;
-            if (dupReasons.includes('Email') && email) {
-              const m = get('SELECT id FROM donors WHERE email=? AND org_id=? AND id!=?', [email, req.params.orgId, newId]);
-              matchId = m?.id;
-            } else if (dupReasons.includes('Cell phone') && cell) {
-              const m = get('SELECT id FROM donors WHERE cell=? AND org_id=? AND id!=?', [cell, req.params.orgId, newId]);
-              matchId = m?.id;
-            }
-            if (matchId) {
-              try {
-                run(`INSERT OR IGNORE INTO donor_duplicates (id,org_id,donor_id_a,donor_id_b) VALUES (?,?,?,?)`,
-                  [uuidv4(), req.params.orgId, matchId, newId]);
-              } catch {}
-            }
+          // If flagged as duplicate, create the persistent duplicate-link record
+          if (dupReasons.length && matchId && matchId !== newId) {
+            try {
+              run(`INSERT OR IGNORE INTO donor_duplicates (id,org_id,donor_id_a,donor_id_b,reason) VALUES (?,?,?,?,?)`,
+                [uuidv4(), req.params.orgId, matchId, newId, dupReasons.join(', ')]);
+            } catch {}
           }
 
           donorIds.push({ id: newId, flagged: dupReasons.length > 0, reasons: dupReasons.join(', ') });
 
-          // Add to sets so within-batch duplicates are also caught
-          if (hebrew) hebrewSet.add(hebrew.toLowerCase());
-          if (email)  emailSet2.add(email);
-          if (cell)   cellSet2.add(cell);
-          if (home)   homeSet.add(home);
-          if (street && zip) addrSet.add(`${street.toLowerCase()}|${zip}`);
+          // Add this row into the lookup maps so later rows in the SAME batch also catch duplicates
+          if (nameKey)              nameMap.set(nameKey, newId);
+          if (hebrew)                hebrewMap.set(hebrew.toLowerCase(), newId);
+          if (email)                 emailMap.set(email, newId);
+          if (cell)                { cellMap.set(norm10(cell), newId); if (ln) lastNameByCell.set(norm10(cell), ln.toLowerCase()); }
+          if (home)                { homeMap.set(norm10(home), newId); if (ln) lastNameByHome.set(norm10(home), ln.toLowerCase()); }
+          if (addrKey)               addrMap.set(addrKey, newId);
 
           imported++;
           if (dupReasons.length) {

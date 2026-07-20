@@ -605,42 +605,54 @@ async function runDailyBackup() {
 
 }
 
-async function processFollowupNotifications() {
-  const today = new Date().toISOString().slice(0, 10);
-  // Find follow-ups due today that haven't been notified yet —
-  // only the lead's CURRENTLY ACTIVE scheduled date counts (l.next_followup_date),
-  // so a superseded/historical follow-up row never fires a stale notification
-  const due = all(`
-    SELECT lf.*, l.first_name, l.last_name, l.org_id, l.assigned_to
-    FROM lead_followups lf
-    JOIN leads l ON l.id = lf.lead_id
-    WHERE lf.next_followup_date = ? AND lf.notified = 0 AND l.assigned_to IS NOT NULL
-      AND l.next_followup_date = lf.next_followup_date
-  `, [today]);
+function _todayInTz(tz) {
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: tz || 'UTC', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date());
+  } catch { return new Date().toISOString().slice(0,10); }
+}
 
-  for (const fu of due) {
-    try {
-      // Notify assigned fundraiser
-      run(`INSERT INTO notifications (id, org_id, user_id, type, title, body, link)
-           VALUES (?, ?, ?, 'followup_due', ?, ?, ?)`,
-        [require('uuid').v4(), fu.org_id, fu.assigned_to,
-         `Follow-up due: ${fu.first_name||''} ${fu.last_name||''}`,
-         `Scheduled follow-up today. Notes: ${fu.notes?.slice(0,80)||'—'}`,
-         `#leads/${fu.lead_id}`]);
-      // Also notify org admins
-      const admins = all(`SELECT u.id FROM users u JOIN org_users ou ON ou.user_id=u.id
-        WHERE ou.org_id=? AND ou.role='admin' AND u.id!=?`, [fu.org_id, fu.assigned_to]);
-      for (const admin of admins) {
-        run(`INSERT INTO notifications (id, org_id, user_id, type, title, body, link) VALUES (?, ?, ?, 'followup_due', ?, ?, ?)`,
-          [require('uuid').v4(), fu.org_id, admin.id,
+async function processFollowupNotifications() {
+  // Compute "today" separately per org, in that org's own configured timezone —
+  // a follow-up scheduled for a given calendar date should only fire on that date
+  // as experienced by the org, not by the server's UTC clock.
+  const orgs = all('SELECT id, settings FROM organizations', []);
+  for (const org of orgs) {
+    let tz = 'UTC';
+    try { tz = JSON.parse(org.settings||'{}').timezone || 'UTC'; } catch {}
+    const today = _todayInTz(tz);
+
+    const due = all(`
+      SELECT lf.*, l.first_name, l.last_name, l.org_id, l.assigned_to
+      FROM lead_followups lf
+      JOIN leads l ON l.id = lf.lead_id
+      WHERE l.org_id = ? AND lf.next_followup_date = ? AND lf.notified = 0 AND l.assigned_to IS NOT NULL
+        AND l.next_followup_date = lf.next_followup_date
+    `, [org.id, today]);
+
+    for (const fu of due) {
+      try {
+        // Notify assigned fundraiser
+        run(`INSERT INTO notifications (id, org_id, user_id, type, title, body, link)
+             VALUES (?, ?, ?, 'followup_due', ?, ?, ?)`,
+          [require('uuid').v4(), fu.org_id, fu.assigned_to,
            `Follow-up due: ${fu.first_name||''} ${fu.last_name||''}`,
-           `Assigned to ${fu.done_by_name||'staff'}. Follow-up scheduled today.`,
+           `Scheduled follow-up today. Notes: ${fu.notes?.slice(0,80)||'—'}`,
            `#leads/${fu.lead_id}`]);
+        // Also notify org admins
+        const admins = all(`SELECT u.id FROM users u JOIN org_users ou ON ou.user_id=u.id
+          WHERE ou.org_id=? AND ou.role='admin' AND u.id!=?`, [fu.org_id, fu.assigned_to]);
+        for (const admin of admins) {
+          run(`INSERT INTO notifications (id, org_id, user_id, type, title, body, link) VALUES (?, ?, ?, 'followup_due', ?, ?, ?)`,
+            [require('uuid').v4(), fu.org_id, admin.id,
+             `Follow-up due: ${fu.first_name||''} ${fu.last_name||''}`,
+             `Assigned to ${fu.done_by_name||'staff'}. Follow-up scheduled today.`,
+             `#leads/${fu.lead_id}`]);
+        }
+        run('UPDATE lead_followups SET notified=1 WHERE id=?', [fu.id]);
+        console.log(`[followup] Notified for lead ${fu.lead_id} (org tz: ${tz}, org-local date: ${today})`);
+      } catch(e) {
+        console.error(`[followup] Notification error: ${e.message}`);
       }
-      run('UPDATE lead_followups SET notified=1 WHERE id=?', [fu.id]);
-      console.log(`[followup] Notified for lead ${fu.lead_id}`);
-    } catch(e) {
-      console.error(`[followup] Notification error: ${e.message}`);
     }
   }
 }

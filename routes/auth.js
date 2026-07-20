@@ -24,7 +24,7 @@ router.post('/login', async (req, res) => {
       : all(`
           SELECT o.*, ou.role as user_role FROM organizations o
           JOIN org_users ou ON o.id = ou.org_id
-          WHERE ou.user_id = ?
+          WHERE ou.user_id = ? AND ou.removed_at IS NULL
           ORDER BY o.name
         `, [user.id]);
 
@@ -97,7 +97,7 @@ router.get('/me', requireAuth, (req, res) => {
     orgs = all(`
       SELECT o.*, ou.role as user_role FROM organizations o
       JOIN org_users ou ON o.id = ou.org_id
-      WHERE ou.user_id = ?
+      WHERE ou.user_id = ? AND ou.removed_at IS NULL
       ORDER BY o.name
     `, [req.user.id]);
   }
@@ -151,10 +151,34 @@ router.get('/orgs/:orgId/users', requireAuth, requireOrg, requireOrgAdmin, (req,
     SELECT u.id, u.email, u.full_name, u.last_login, u.created_at, ou.role
     FROM users u
     JOIN org_users ou ON u.id = ou.user_id
-    WHERE ou.org_id = ?
+    WHERE ou.org_id = ? AND ou.removed_at IS NULL
     ORDER BY u.full_name
   `, [req.orgId]);
   res.json(users);
+});
+
+// ── Recently removed users (restorable within 30 days) ─────────────────────────
+router.get('/orgs/:orgId/users/removed', requireAuth, requireOrg, requireOrgAdmin, (req, res) => {
+  const users = all(`
+    SELECT u.id, u.email, u.full_name, ou.role, ou.removed_at
+    FROM users u
+    JOIN org_users ou ON u.id = ou.user_id
+    WHERE ou.org_id = ? AND ou.removed_at IS NOT NULL
+      AND julianday('now') - julianday(ou.removed_at) <= 30
+    ORDER BY ou.removed_at DESC
+  `, [req.orgId]);
+  res.json(users);
+});
+
+// ── Restore a removed user ──────────────────────────────────────────────────────
+router.post('/orgs/:orgId/users/:userId/restore', requireAuth, requireOrg, requireOrgAdmin, (req, res) => {
+  const row = get('SELECT * FROM org_users WHERE org_id=? AND user_id=? AND removed_at IS NOT NULL', [req.orgId, req.params.userId]);
+  if (!row) return res.status(404).json({ error: 'No removed membership found for this user' });
+  if ((Date.now() - new Date(row.removed_at).getTime()) > 30*24*60*60*1000) {
+    return res.status(400).json({ error: 'This removal is more than 30 days old and can no longer be restored' });
+  }
+  run('UPDATE org_users SET removed_at=NULL WHERE id=?', [row.id]);
+  res.json({ success: true });
 });
 
 // Add user to org (admin)
@@ -173,10 +197,14 @@ router.post('/orgs/:orgId/users', requireAuth, requireOrg, requireOrgAdmin, asyn
     }
 
     const existing = get('SELECT * FROM org_users WHERE org_id = ? AND user_id = ?', [req.orgId, user.id]);
-    if (existing) return res.status(400).json({ error: 'User already in org' });
-
-    run('INSERT INTO org_users (id, org_id, user_id, role, invited_by) VALUES (?, ?, ?, ?, ?)',
-      [uuidv4(), req.orgId, user.id, role, req.user.id]);
+    if (existing && !existing.removed_at) return res.status(400).json({ error: 'User already in org' });
+    if (existing && existing.removed_at) {
+      // Previously removed — restore their membership instead of erroring
+      run('UPDATE org_users SET role=?, removed_at=NULL, invited_by=? WHERE id=?', [role, req.user.id, existing.id]);
+    } else {
+      run('INSERT INTO org_users (id, org_id, user_id, role, invited_by) VALUES (?, ?, ?, ?, ?)',
+        [uuidv4(), req.orgId, user.id, role, req.user.id]);
+    }
     // Save page permissions
     if (Array.isArray(permissions) && permissions.length) {
       for (const p of permissions) {
@@ -196,7 +224,7 @@ router.post('/orgs/:orgId/users', requireAuth, requireOrg, requireOrgAdmin, asyn
 // Remove user from org
 router.delete('/orgs/:orgId/users/:userId', requireAuth, requireOrg, requireOrgAdmin, (req, res) => {
   if (req.params.userId === req.user.id) return res.status(400).json({ error: 'Cannot remove yourself' });
-  run('DELETE FROM org_users WHERE org_id = ? AND user_id = ?', [req.orgId, req.params.userId]);
+  run('UPDATE org_users SET removed_at=CURRENT_TIMESTAMP WHERE org_id = ? AND user_id = ?', [req.orgId, req.params.userId]);
   res.json({ success: true });
 });
 
@@ -237,10 +265,13 @@ router.post('/orgs/:orgId/users/invite', requireAuth, requireOrg, requireOrgAdmi
     }
 
     const existing = get('SELECT * FROM org_users WHERE org_id = ? AND user_id = ?', [req.orgId, user.id]);
-    if (existing) return res.status(400).json({ error: 'User already in this organization' });
-
-    run('INSERT INTO org_users (id, org_id, user_id, role, invited_by) VALUES (?, ?, ?, ?, ?)',
-      [uuidv4(), req.orgId, user.id, role, req.user.id]);
+    if (existing && !existing.removed_at) return res.status(400).json({ error: 'User already in this organization' });
+    if (existing && existing.removed_at) {
+      run('UPDATE org_users SET role=?, removed_at=NULL, invited_by=? WHERE id=?', [role, req.user.id, existing.id]);
+    } else {
+      run('INSERT INTO org_users (id, org_id, user_id, role, invited_by) VALUES (?, ?, ?, ?, ?)',
+        [uuidv4(), req.orgId, user.id, role, req.user.id]);
+    }
     // Save page permissions
     if (Array.isArray(permissions) && permissions.length) {
       for (const p of permissions) {

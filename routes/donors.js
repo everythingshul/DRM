@@ -270,8 +270,36 @@ router.delete('/:id', (req, res) => {
   res.json({ success: true });
 });
 
+// ── Move a donor back to Leads ─────────────────────────────────────────────────
+router.post('/:id/move-to-lead', requireOrgAdmin, (req, res) => {
+  const donor = get('SELECT * FROM donors WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
+  if (!donor) return res.status(404).json({ error: 'Donor not found' });
+  const hasDonations = get('SELECT id FROM donations WHERE donor_id=? LIMIT 1', [req.params.id]);
+  if (hasDonations) return res.status(400).json({ error: 'This donor has donation history and cannot be moved back to Leads. Delete the donations first if this was a mistake.' });
+
+  const leadId = uuidv4();
+  run(`INSERT INTO leads (id,org_id,donor_number,title,first_name,last_name,hebrew_title,hebrew_full_name,
+       email,cell,home_phone,street,apt,city,state,zip,neighborhood_id,labels,notes,status,created_by)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [leadId, req.orgId, donor.donor_number||null, donor.title, donor.first_name||'', donor.last_name||'',
+     donor.hebrew_title, donor.hebrew_full_name, donor.email, donor.cell, donor.home_phone,
+     donor.street, donor.apt, donor.city, donor.state, donor.zip, donor.neighborhood_id,
+     donor.labels||'[]', donor.notes, 'in_progress', req.user.id]);
+
+  run('DELETE FROM scheduled_charges WHERE donor_id=?', [req.params.id]);
+  run('DELETE FROM recurring_schedules WHERE donor_id=?', [req.params.id]);
+  run('DELETE FROM payment_methods WHERE donor_id=?', [req.params.id]);
+  run('DELETE FROM donors WHERE id=?', [req.params.id]);
+
+  res.json({ success: true, lead_id: leadId });
+});
+
 // ── Duplicate flags ───────────────────────────────────────────────────────────
 router.get('/duplicates', (req, res) => {
+  const { status } = req.query;
+  let where = 'dd.org_id=?', params = [req.orgId];
+  if (!status || status === 'pending') { where += " AND dd.status='pending'"; }
+  else if (status !== 'all')            { where += ' AND dd.status=?'; params.push(status); }
   const dups = all(`
     SELECT dd.*,
       da.first_name||' '||COALESCE(da.last_name,'') as name_a, da.email as email_a, da.cell as cell_a, da.donor_number as number_a,
@@ -279,9 +307,9 @@ router.get('/duplicates', (req, res) => {
     FROM donor_duplicates dd
     JOIN donors da ON da.id=dd.donor_id_a
     JOIN donors db ON db.id=dd.donor_id_b
-    WHERE dd.org_id=? AND dd.status='pending'
+    WHERE ${where}
     ORDER BY dd.created_at DESC
-  `, [req.orgId]);
+  `, params);
   res.json(dups);
 });
 
