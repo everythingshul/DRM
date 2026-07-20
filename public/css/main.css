@@ -172,6 +172,7 @@ textarea{resize:vertical;min-height:70px}
 .btn-blue{background:var(--blue);color:#fff}.btn-blue:hover{background:var(--blue-l)}
 .btn-green{background:var(--green);color:#fff}.btn-green:hover{filter:brightness(.9)}
 .btn-red{background:var(--red);color:#fff}.btn-red:hover{filter:brightness(.9)}
+.btn-amber{background:#f59e0b;color:#fff}.btn-amber:hover{background:#d97706}
 .btn-outline{background:transparent;color:var(--navy);border:1.5px solid var(--navy)}
 .btn-outline:hover{background:var(--navy);color:#fff}
 .btn-ghost{background:transparent;color:var(--gray-7);border:1.5px solid var(--gray-3)}

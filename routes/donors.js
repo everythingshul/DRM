@@ -155,6 +155,38 @@ router.post('/', (req, res) => {
 
     const donor = get('SELECT * FROM donors WHERE id = ?', [id]);
 
+    // ── Duplicate detection — same rules as bulk import ─────────────────────────
+    // Strong signals (flag alone): exact full name, Hebrew name, email, address (incl. apt)
+    // Weak signal (phone alone): only flag if the last name also matches, since shared
+    // household phones (e.g. spouses) are common and legitimate on their own.
+    try {
+      const norm10 = p => (p||'').replace(/\D/g,'').slice(-10);
+      const others = all('SELECT id,first_name,last_name,email,cell,home_phone,hebrew_full_name,street,apt,zip FROM donors WHERE org_id=? AND id!=?', [req.orgId, id]);
+      let matchId = null, reasons = [];
+      const fn2 = (first_name||'').toLowerCase().trim(), ln2 = (last_name||'').toLowerCase().trim();
+      const hebrew2 = (hebrew_full_name||'').toLowerCase().trim();
+      const email2 = (email||'').toLowerCase().trim();
+      const addrKey2 = street && zip ? `${street.toLowerCase().trim()}|${(apt||'').toLowerCase().trim()}|${zip.trim()}` : null;
+      const cell10 = norm10(cell), home10 = norm10(home_phone);
+
+      for (const o of others) {
+        const oFn = (o.first_name||'').toLowerCase().trim(), oLn = (o.last_name||'').toLowerCase().trim();
+        if (fn2 && ln2 && oFn===fn2 && oLn===ln2)                             { reasons.push('Full name match'); matchId = matchId||o.id; }
+        if (hebrew2 && o.hebrew_full_name && o.hebrew_full_name.toLowerCase().trim()===hebrew2) { reasons.push('Hebrew name match'); matchId = matchId||o.id; }
+        if (email2 && o.email && o.email.toLowerCase().trim()===email2)      { reasons.push('Same email'); matchId = matchId||o.id; }
+        if (addrKey2 && o.street && o.zip) {
+          const oAddrKey = `${o.street.toLowerCase().trim()}|${(o.apt||'').toLowerCase().trim()}|${o.zip.trim()}`;
+          if (oAddrKey === addrKey2) { reasons.push('Same address'); matchId = matchId||o.id; }
+        }
+        if (cell10 && o.cell && norm10(o.cell)===cell10 && (!ln2 || !oLn || oLn===ln2)) { reasons.push('Same cell phone'); matchId = matchId||o.id; }
+        if (home10 && o.home_phone && norm10(o.home_phone)===home10 && (!ln2 || !oLn || oLn===ln2)) { reasons.push('Same home phone'); matchId = matchId||o.id; }
+      }
+      if (matchId && reasons.length) {
+        run(`INSERT OR IGNORE INTO donor_duplicates (id,org_id,donor_id_a,donor_id_b,reason) VALUES (?,?,?,?,?)`,
+          [uuidv4(), req.orgId, matchId, id, [...new Set(reasons)].join(', ')]);
+      }
+    } catch(e) { console.error('[donor create] duplicate check error:', e.message); }
+
     // Sync to Sola customer portal (async, don't block response)
     setImmediate(async () => {
       try {

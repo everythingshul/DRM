@@ -6,6 +6,7 @@ const { all, get, run } = require('../db/schema');
 const nodemailer = require('nodemailer');
 const mailer    = require('./mailer');
 const { ccSale: chargeToken } = require('./sola');
+const tzUtil = require('./tz');
 
 function getTransporter(settings) {
   if (!settings?.smtp_email) {
@@ -78,7 +79,7 @@ async function sendReceiptEmail(donor, donation, org) {
       last_name:      donor.last_name,
       hebrew_name:    donor.hebrew_full_name || '',
       amount:         `$${parseFloat(donation.amount).toFixed(2)}`,
-      date:           new Date(donation.donation_date).toLocaleDateString(),
+      date:           tzUtil.fmtDateInTz(donation.donation_date, tzUtil.getOrgTimezone(org.id)),
       transaction_id: donation.transaction_id || 'N/A',
       method:         (donation.method||'').replace('_',' ').replace(/\b\w/g,c=>c.toUpperCase()),
       last_four:      pm?.last_four || '',
@@ -163,11 +164,11 @@ async function sendChargeNotificationToOwner(org, donor, donation, success, fail
 
     const html = success
       ? `<p>A scheduled charge of <strong>${amount}</strong> was successfully processed for <strong>${donorName}</strong>.</p>
-         <p>Date: ${new Date().toLocaleString()}</p>
+         <p>Date: ${tzUtil.fmtDateTimeInTz(new Date(), tzUtil.getOrgTimezone(org.id))}</p>
          <p>Transaction ID: ${donation.transaction_id || 'N/A'}</p>
          ${donor.email ? `<p>Donor email: ${donor.email}</p>` : ''}${poweredBy}`
       : `<p>A scheduled charge of <strong>${amount}</strong> <span style="color:red;font-weight:bold;">FAILED</span> for <strong>${donorName}</strong>.</p>
-         <p>Date: ${new Date().toLocaleString()}</p>
+         <p>Date: ${tzUtil.fmtDateTimeInTz(new Date(), tzUtil.getOrgTimezone(org.id))}</p>
          <p>Reason: <strong>${failReason || 'Unknown'}</strong></p>
          <p>Please log in to DRM to review and retry this charge.</p>
          ${donor.email ? `<p>Donor email: ${donor.email}</p>` : ''}${poweredBy}`;
@@ -246,19 +247,31 @@ async function processScheduledCharge(charge) {
 }
 
 async function processAutopay() {
+  // The server clock runs in UTC — "day 1 at 9am" configured by an org admin means
+  // 9am in THEIR org's timezone, not 9am UTC. Pull every enabled-autopay donor along
+  // with their org's timezone, then compare against that org-local day/hour/minute.
   const now = new Date();
-  const day = now.getDate();
-  const hour = now.getHours();
-  const minute = now.getMinutes();
-
   const donors = all(`
-    SELECT d.* FROM donors d
+    SELECT d.*, o.settings as org_settings FROM donors d
+    JOIN organizations o ON o.id = d.org_id
     WHERE d.autopay_enabled = 1 AND d.autopay_paused = 0
-      AND d.autopay_day = ? AND d.autopay_hour = ?
-      AND (d.autopay_minute = ? OR d.autopay_minute = 0)
-  `, [day, hour, minute]);
+  `, []);
 
-  for (const donor of donors) {
+  const matching = donors.filter(donor => {
+    let tz = 'America/New_York';
+    try { tz = JSON.parse(donor.org_settings || '{}').timezone || tz; } catch {}
+    let parts;
+    try {
+      parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: tz, day: 'numeric', hour: 'numeric', minute: 'numeric', hour12: false
+      }).formatToParts(now).reduce((acc, p) => { acc[p.type] = parseInt(p.value); return acc; }, {});
+    } catch { return false; }
+    const localDay = parts.day, localHour = parts.hour === 24 ? 0 : parts.hour, localMinute = parts.minute;
+    return donor.autopay_day === localDay && donor.autopay_hour === localHour
+      && (donor.autopay_minute === localMinute || donor.autopay_minute === 0);
+  });
+
+  for (const donor of matching) {
     const alreadyCharged = get(`
       SELECT id FROM donations
       WHERE donor_id = ? AND is_autopay = 1
@@ -394,7 +407,7 @@ async function processExpiryWarnings() {
           WHERE ou.org_id = ? AND ou.role IN ('admin','org_admin')
         `, [org.id]);
 
-        const expiryStr = expiry.toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
+        const expiryStr = tzUtil.fmtDateInTz(expiry, tzUtil.getOrgTimezone(org.id), { month:'long', day:'numeric', year:'numeric' });
         const html = `
           <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto">
             <h2 style="color:#d63031">Account Expiring in ${daysLeft} Day${daysLeft>1?'s':''}</h2>

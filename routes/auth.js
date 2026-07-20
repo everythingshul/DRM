@@ -148,7 +148,8 @@ router.get('/orgs', requireAuth, (req, res) => {
 // Get org users (admin)
 router.get('/orgs/:orgId/users', requireAuth, requireOrg, requireOrgAdmin, (req, res) => {
   const users = all(`
-    SELECT u.id, u.email, u.full_name, u.last_login, u.created_at, ou.role
+    SELECT u.id, u.email, u.full_name, u.last_login, u.created_at, ou.role,
+           u.hebrew_name, u.hebrew_title, u.english_title, u.cell, u.home_phone, u.address, u.notes
     FROM users u
     JOIN org_users ou ON u.id = ou.user_id
     WHERE ou.org_id = ? AND ou.removed_at IS NULL
@@ -540,13 +541,20 @@ router.post('/new-account', async (req, res) => {
 // ── Update user profile ───────────────────────────────────────────────────────
 router.put('/orgs/:orgId/users/:userId/profile', requireAuth, requireOrg, async (req, res) => {
   try {
-    const { full_name, email, role } = req.body;
+    const { full_name, email, role, hebrew_name, hebrew_title, english_title, cell, home_phone, address, notes } = req.body;
     const isOwnProfile = req.params.userId === req.user.id;
     const isAdmin = req.orgRole === 'admin' || req.user.is_super_admin;
     if (!isOwnProfile && !isAdmin) return res.status(403).json({ error: 'Not authorized' });
     if (full_name) run('UPDATE users SET full_name=? WHERE id=?', [full_name, req.params.userId]);
     if (email) run('UPDATE users SET email=? WHERE id=?', [email.toLowerCase().trim(), req.params.userId]);
     if (role && isAdmin && !isOwnProfile) run('UPDATE org_users SET role=? WHERE user_id=? AND org_id=?', [role, req.params.userId, req.params.orgId]);
+    if (hebrew_name    !== undefined) run('UPDATE users SET hebrew_name=? WHERE id=?', [hebrew_name||null, req.params.userId]);
+    if (hebrew_title   !== undefined) run('UPDATE users SET hebrew_title=? WHERE id=?', [hebrew_title||null, req.params.userId]);
+    if (english_title  !== undefined) run('UPDATE users SET english_title=? WHERE id=?', [english_title||null, req.params.userId]);
+    if (cell           !== undefined) run('UPDATE users SET cell=? WHERE id=?', [cell||null, req.params.userId]);
+    if (home_phone     !== undefined) run('UPDATE users SET home_phone=? WHERE id=?', [home_phone||null, req.params.userId]);
+    if (address        !== undefined) run('UPDATE users SET address=? WHERE id=?', [address||null, req.params.userId]);
+    if (notes          !== undefined) run('UPDATE users SET notes=? WHERE id=?', [notes||null, req.params.userId]);
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -579,12 +587,13 @@ router.post('/super-admin/request-access', requireAuth, async (req, res) => {
     const org = get('SELECT * FROM organizations WHERE id=?', [org_id]);
     if (!org) return res.status(404).json({ error: 'Org not found' });
 
-    // Create pending access request
+    // Create pending access request — no time-based expiry; access lasts only
+    // as long as the super admin keeps the access overlay open, and is revoked
+    // the moment they close it.
     const requestId = uuidv4();
-    const expires = new Date(Date.now() + 24*60*60*1000).toISOString();
-    run(`INSERT INTO access_requests (id,super_admin_id,super_admin_name,org_id,purpose,status,expires_at)
-         VALUES (?,?,?,?,?,?,?)`,
-      [requestId, req.user.id, req.user.full_name||req.user.email, org_id, purpose, 'pending', expires]);
+    run(`INSERT INTO access_requests (id,super_admin_id,super_admin_name,org_id,purpose,status)
+         VALUES (?,?,?,?,?,?)`,
+      [requestId, req.user.id, req.user.full_name||req.user.email, org_id, purpose, 'pending']);
 
     // Notify org admins
     const admins = all(`SELECT u.id FROM users u JOIN org_users ou ON ou.user_id=u.id WHERE ou.org_id=? AND ou.role='admin'`, [org_id]);
@@ -643,9 +652,17 @@ router.get('/access-requests/:id/token', requireAuth, (req, res) => {
   if (!req.user.is_super_admin) return res.status(403).json({ error: 'Super admin only' });
   const request = get('SELECT * FROM access_requests WHERE id=? AND super_admin_id=? AND status=?', [req.params.id, req.user.id, 'approved']);
   if (!request) return res.status(404).json({ error: 'No approved request found' });
-  if (new Date(request.expires_at) < new Date()) return res.status(400).json({ error: 'Access expired' });
   const org = get('SELECT * FROM organizations WHERE id=?', [request.org_id]);
   res.json({ token: request.token, org });
+});
+
+// ── Revoke access — called when the super admin closes the access overlay ─────
+router.post('/access-requests/:id/revoke', requireAuth, (req, res) => {
+  if (!req.user.is_super_admin) return res.status(403).json({ error: 'Super admin only' });
+  const request = get('SELECT * FROM access_requests WHERE id=? AND super_admin_id=?', [req.params.id, req.user.id]);
+  if (!request) return res.status(404).json({ error: 'Request not found' });
+  run(`UPDATE access_requests SET status='revoked' WHERE id=?`, [req.params.id]);
+  res.json({ success: true });
 });
 
 // ── User permissions (page-level) ─────────────────────────────────────────────

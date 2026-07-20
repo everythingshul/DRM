@@ -7,6 +7,7 @@ const { requireAuth, requireOrg, requireOrgAdmin } = require('../middleware/auth
 const nodemailer = require('nodemailer');
 const mailer    = require('../utils/mailer');
 const XLSX = require('xlsx');
+const tzUtil = require('../utils/tz');
 
 router.use(requireAuth, requireOrg);
 
@@ -23,8 +24,15 @@ router.put('/info', requireOrgAdmin, (req, res) => {
 // ── Update org name/settings ──────────────────────────────────────────────────
 router.put('/settings', requireOrgAdmin, (req, res) => {
   try {
-    const { name } = req.body;
+    const { name, company_name, hebrew_name, cell, phone, address, contact_email, notes } = req.body;
     if (name) run('UPDATE organizations SET name=? WHERE id=?', [name.trim(), req.orgId]);
+    if (company_name  !== undefined) run('UPDATE organizations SET company_name=? WHERE id=?', [company_name||null, req.orgId]);
+    if (hebrew_name   !== undefined) run('UPDATE organizations SET hebrew_name=? WHERE id=?', [hebrew_name||null, req.orgId]);
+    if (cell          !== undefined) run('UPDATE organizations SET cell=? WHERE id=?', [cell||null, req.orgId]);
+    if (phone         !== undefined) run('UPDATE organizations SET phone=? WHERE id=?', [phone||null, req.orgId]);
+    if (address       !== undefined) run('UPDATE organizations SET address=? WHERE id=?', [address||null, req.orgId]);
+    if (contact_email !== undefined) run('UPDATE organizations SET contact_email=? WHERE id=?', [contact_email||null, req.orgId]);
+    if (notes         !== undefined) run('UPDATE organizations SET notes=? WHERE id=?', [notes||null, req.orgId]);
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -528,7 +536,8 @@ router.get('/reports/full-export', (req, res) => {
     const org = get('SELECT * FROM organizations WHERE id=?', [req.orgId]);
     const orgName = (org?.name || 'DRM').replace(/[^a-zA-Z0-9 ]/g, '').trim();
     const now = new Date();
-    const dateStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+    const orgTz = tzUtil.getOrgTimezone(req.orgId);
+    const dateStr = new Intl.DateTimeFormat('en-CA', { timeZone: orgTz, year:'numeric', month:'2-digit', day:'2-digit' }).format(now);
 
     const wb = XLSX.utils.book_new();
 
@@ -911,12 +920,26 @@ router.put('/donations/:donationId/link', (req, res) => {
 
 // ── Label a donation transaction ──────────────────────────────────────────────
 router.put('/donations/:donationId/label', (req, res) => {
-  const { label } = req.body;
-  const don = get('SELECT id FROM donations WHERE id=? AND org_id=?', [req.params.donationId, req.orgId]);
-  if (!don) return res.status(404).json({ error: 'Donation not found' });
-  run('UPDATE donations SET label=? WHERE id=? AND org_id=?',
-    [label || null, req.params.donationId, req.orgId]);
-  res.json({ success: true });
+  try {
+    const { label, labels, action } = req.body;
+    const don = get('SELECT labels FROM donations WHERE id=? AND org_id=?', [req.params.donationId, req.orgId]);
+    if (!don) return res.status(404).json({ error: 'Donation not found' });
+
+    if (labels !== undefined) {
+      // Replace the full label set at once (used by the label editor modal)
+      run('UPDATE donations SET labels=?,label=? WHERE id=? AND org_id=?',
+        [JSON.stringify(labels), labels[0]||null, req.params.donationId, req.orgId]);
+    } else if (label) {
+      // Add or remove a single label (used by quick-add/remove actions)
+      const current = (() => { try { return JSON.parse(don.labels||'[]'); } catch { return []; } })();
+      let updated;
+      if (action === 'remove') updated = current.filter(l => l !== label);
+      else updated = current.includes(label) ? current : [...current, label];
+      run('UPDATE donations SET labels=?,label=? WHERE id=? AND org_id=?',
+        [JSON.stringify(updated), updated[0]||null, req.params.donationId, req.orgId]);
+    }
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // donor search moved to donors.js

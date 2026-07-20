@@ -6,6 +6,7 @@ const { get, run, all } = require('../db/schema');
 const { requireAuth, requireOrg, requireOrgAdmin } = require('../middleware/auth');
 const { ccSave, ccSale, ccRefund, ccVoid, dafGrant } = require('../utils/sola');
 const { sendReceiptEmail } = require('../utils/scheduler');
+const tzUtil = require('../utils/tz');
 
 router.use(requireAuth, requireOrg);
 
@@ -281,7 +282,7 @@ router.get('/receipt/:donationId', async (req, res) => {
 
     row('Donor ID', don.donor_number ? `#${don.donor_number}` : '—', 308);
     row('Donor', don.donor_display||'—', 292);
-    row('Date', new Date(don.donation_date).toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'}), 276);
+    row('Date', tzUtil.fmtDateInTz(don.donation_date, tzUtil.getOrgTimezone(req.orgId), {year:'numeric',month:'long',day:'numeric'}), 276);
     row('Amount', `$${parseFloat(don.amount).toFixed(2)}`, 260);
     row('Method', (don.method||'').replace('_',' ').replace(/\b\w/g,c=>c.toUpperCase()), 244);
     row('Transaction ID', don.transaction_id||'N/A', 228);
@@ -294,7 +295,7 @@ router.get('/receipt/:donationId', async (req, res) => {
 
     page.drawRectangle({x:0,y:0,width:612,height:40,color:rgb(0.96,0.97,0.99)});
     page.drawText(don.org_name+' · Tax ID 11-6076986 · drm.everythingshul.com',{x:24,y:16,size:8,font,color:gray});
-    page.drawText(`Generated ${new Date().toLocaleDateString()}`,{x:460,y:16,size:8,font,color:gray});
+    page.drawText(`Generated ${tzUtil.fmtDateInTz(new Date(), tzUtil.getOrgTimezone(req.orgId))}`,{x:460,y:16,size:8,font,color:gray});
 
     const bytes=await doc.save();
     res.setHeader('Content-Type','application/pdf');

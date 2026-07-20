@@ -5,6 +5,7 @@ const router     = express.Router({ mergeParams: true });
 const { v4: uuidv4 } = require('uuid');
 const { all, get, run } = require('../db/schema');
 const { requireAuth, requireOrg, requireOrgAdmin } = require('../middleware/auth');
+const tzUtil = require('../utils/tz');
 const nodemailer = require('nodemailer');
 const mailer    = require('../utils/mailer');
 
@@ -256,7 +257,7 @@ router.post('/:id/preview', (req, res) => {
   const blocks = (() => { try { return JSON.parse(t.blocks||'[]'); } catch { return []; } })();
   const sampleVars = req.body.vars || {
     first_name: 'Moshe', last_name: 'Goldberg', title: 'R\'', hebrew_name: 'משה גולדברג',
-    amount: '$360.00', date: new Date().toLocaleDateString(),
+    amount: '$360.00', date: tzUtil.fmtDateInTz(new Date(), tzUtil.getOrgTimezone(req.orgId)),
     transaction_id: 'ES123456789', method: 'Credit Card',
     last_four: '4242', org_name: org?.name || 'Your Organization'
   };
@@ -278,7 +279,7 @@ router.post('/render-for-donor', (req, res) => {
     first_name: donor.first_name, last_name: donor.last_name,
     title: donor.title||'', hebrew_name: donor.hebrew_full_name||'',
     amount: `$${parseFloat(donation.amount).toFixed(2)}`,
-    date: new Date(donation.donation_date).toLocaleDateString(),
+    date: tzUtil.fmtDateInTz(donation.donation_date, tzUtil.getOrgTimezone(req.orgId)),
     transaction_id: donation.transaction_id||'N/A',
     method: (donation.method||'').replace('_',' ').replace(/\b\w/g,c=>c.toUpperCase()),
     last_four: pm?.last_four||'', org_name: org?.name||''
@@ -303,7 +304,7 @@ router.post('/:id/test-send', requireOrgAdmin, async (req, res) => {
     const html   = renderBlocks(blocks, {
       first_name: 'Test', last_name: 'Recipient', title: '',
       hebrew_name: 'שם בעברית', amount: '$360.00',
-      date: new Date().toLocaleDateString(), transaction_id: 'ES000000001',
+      date: tzUtil.fmtDateInTz(new Date(), tzUtil.getOrgTimezone(req.orgId)), transaction_id: 'ES000000001',
       method: 'Credit Card', last_four: '4242', org_name: org?.name||''
     });
 

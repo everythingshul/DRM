@@ -101,11 +101,15 @@ function createTables() {
     CREATE TABLE IF NOT EXISTS organizations (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL,
       settings TEXT DEFAULT '{}', created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      expires_at DATETIME DEFAULT NULL, expiry_warned INTEGER DEFAULT 0
+      expires_at DATETIME DEFAULT NULL, expiry_warned INTEGER DEFAULT 0,
+      company_name TEXT, hebrew_name TEXT, cell TEXT, phone TEXT,
+      address TEXT, contact_email TEXT, notes TEXT
     );
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
       full_name TEXT, role TEXT DEFAULT 'admin', is_super_admin INTEGER DEFAULT 0,
+      hebrew_name TEXT, hebrew_title TEXT, english_title TEXT,
+      cell TEXT, home_phone TEXT, address TEXT, notes TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP, last_login DATETIME
     );
     CREATE TABLE IF NOT EXISTS org_users (
@@ -421,6 +425,21 @@ function runMigrations() {
   safe("ALTER TABLE org_users ADD COLUMN permissions TEXT DEFAULT '{}'");
   safe("ALTER TABLE org_users ADD COLUMN invited_by TEXT");
   safe("ALTER TABLE org_users ADD COLUMN removed_at DATETIME");
+  // Extra contact info fields
+  safe("ALTER TABLE users ADD COLUMN hebrew_name TEXT");
+  safe("ALTER TABLE users ADD COLUMN hebrew_title TEXT");
+  safe("ALTER TABLE users ADD COLUMN english_title TEXT");
+  safe("ALTER TABLE users ADD COLUMN cell TEXT");
+  safe("ALTER TABLE users ADD COLUMN home_phone TEXT");
+  safe("ALTER TABLE users ADD COLUMN address TEXT");
+  safe("ALTER TABLE users ADD COLUMN notes TEXT");
+  safe("ALTER TABLE organizations ADD COLUMN company_name TEXT");
+  safe("ALTER TABLE organizations ADD COLUMN hebrew_name TEXT");
+  safe("ALTER TABLE organizations ADD COLUMN cell TEXT");
+  safe("ALTER TABLE organizations ADD COLUMN phone TEXT");
+  safe("ALTER TABLE organizations ADD COLUMN address TEXT");
+  safe("ALTER TABLE organizations ADD COLUMN contact_email TEXT");
+  safe("ALTER TABLE organizations ADD COLUMN notes TEXT");
   // New tables — add as migrations since DB already exists
   try { db.run(`CREATE TABLE IF NOT EXISTS import_history (
     id TEXT PRIMARY KEY, org_id TEXT NOT NULL,

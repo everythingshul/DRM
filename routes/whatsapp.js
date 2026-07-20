@@ -5,6 +5,7 @@ const router  = express.Router({ mergeParams: true });
 const { v4: uuidv4 } = require('uuid');
 const { all, get, run } = require('../db/schema');
 const { requireAuth, requireOrg, requireOrgAdmin } = require('../middleware/auth');
+const tzUtil = require('../utils/tz');
 
 router.use(requireAuth, requireOrg);
 
@@ -182,7 +183,7 @@ router.post('/broadcasts', requireOrgAdmin, (req, res) => {
   }
   run(`INSERT INTO whatsapp_broadcasts (id,org_id,name,message,group_id,status,total,scheduled_at,created_by)
        VALUES (?,?,?,?,?,?,?,?,?)`,
-    [id, req.orgId, name||'Broadcast '+new Date().toLocaleDateString(), message, group_id||null,
+    [id, req.orgId, name||'Broadcast '+tzUtil.fmtDateInTz(new Date(), tzUtil.getOrgTimezone(req.orgId)), message, group_id||null,
      scheduled_at ? 'scheduled' : 'draft', total, scheduled_at||null, req.user.id]);
   res.json({ success: true, broadcast: get('SELECT * FROM whatsapp_broadcasts WHERE id=?', [id]) });
 });

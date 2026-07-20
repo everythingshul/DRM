@@ -332,8 +332,17 @@ async function init() {
     const me = await API.get('/auth/me');
     DRM.user = me.user;
     _allOrgs = me.orgs;
-    if (me.orgs.length) await setOrg(me.orgs[0]);
+    // If this window was opened as a super-admin access overlay (?embedded_org=ID),
+    // switch straight into that org instead of the user's own default org.
+    const embeddedOrgId = new URLSearchParams(location.search).get('embedded_org');
+    let startOrg = me.orgs[0];
+    if (embeddedOrgId) {
+      const target = me.orgs.find(o => o.id === embeddedOrgId);
+      if (target) startOrg = target;
+    }
+    if (me.orgs.length) await setOrg(startOrg);
     showApp();
+    if (embeddedOrgId) _applyEmbeddedOverlayChrome();
   } catch {
     localStorage.removeItem('drm_token');
     _redirecting = false;
@@ -916,7 +925,7 @@ const DonorDetail = {
           <div class="bg" style="justify-content:flex-end;margin-top:6px">
             <button class="btn btn-blue btn-sm" onclick="Donors.openEdit('${donor.id}')">Edit</button>
             ${donor.needs_verification?`<button class="btn btn-green btn-sm" onclick="DonorDetail.verify('${donor.id}')">Verify</button>`:''}
-            ${!donor.total_donations?`<button class="btn btn-ghost btn-sm" onclick="DonorDetail.moveToLead('${donor.id}','${(donor.first_name+' '+donor.last_name).replace(/'/g,"\\\\'")}')">↩ Move to Lead</button>`:''}
+            ${!donor.total_donations?`<button class="btn btn-amber btn-sm" onclick="DonorDetail.moveToLead('${donor.id}','${(donor.first_name+' '+donor.last_name).replace(/'/g,"\\\\'")}')">↩ Move to Lead</button>`:''}
           </div>
         </div>
       </div>
@@ -3043,6 +3052,7 @@ async function renderSettings(el) {
   el.innerHTML = '<div class="spinner"></div>';
   try {
     const [users, log, hoods, tzData] = await Promise.all([API.get(API.o.users()), API.get(API.o.log()), API.get(API.o.hoods()), API.get('/api/orgs/'+API.orgId+'/timezone').catch(()=>({timezone:'America/New_York'}))]);
+    window._settingsUsersCache = users;
     window._orgTz = tzData.timezone || 'America/New_York';
     
     el.innerHTML = `
@@ -3060,6 +3070,7 @@ async function renderSettings(el) {
             <div><span style="color:var(--gray-5);font-size:11px">Email</span><div>${DRM.user?.email||'—'}</div></div>
             <div><span style="color:var(--gray-5);font-size:11px">Role</span><span class="pill ${DRM.user?.role==='admin'?'pill-blue':'pill-gray'}">${DRM.user?.role||'staff'}</span>${DRM.user?.is_super_admin?' <span class="pill pill-blue">Super Admin</span>':''}</div>
           </div>
+          <button class="btn btn-ghost btn-sm" style="margin-top:10px" onclick="_editUser('${DRM.user.id}')">✏ Edit My Profile</button>
           <button class="btn btn-ghost btn-sm" style="margin-top:10px" onclick="_changeMyPassword()">🔒 Change My Password</button>
         </div>
         <div class="card">
@@ -3078,7 +3089,7 @@ async function renderSettings(el) {
               <td><span class="pill ${u.role==='admin'?'pill-blue':'pill-gray'}">${u.role}</span></td>
               <td style="font-size:12px">${fmtDT(u.last_login)}</td>
               <td><div class="actions">
-                <button class="btn btn-ghost btn-sm" onclick="_editUser('${u.id}','${(u.full_name||'').replace(/'/g,"\\'")}','${u.email}','${u.role}')">Edit</button>
+                <button class="btn btn-ghost btn-sm" onclick="_editUser('${u.id}')">Edit</button>
                 <button class="btn btn-ghost btn-sm" onclick="_resetPw('${u.id}','${(u.full_name||'').replace(/'/g,"\\'")}')">Reset PW</button>
                 <button class="btn btn-icon" style="color:var(--red)" onclick="_removeUser('${u.id}','${(u.full_name||'').replace(/'/g,"\\'")}')">&#10005;</button>
               </div></td>
@@ -4734,10 +4745,13 @@ let _leadsData = [], _leadStaff = [], _leadCategories = [];
 async function renderLeads(el) {
   el.innerHTML = '<div class="spinner"></div>';
   try {
-    [_leadStaff, _leadCategories] = await Promise.all([
+    let leadLabelOptions = [];
+    [_leadStaff, _leadCategories, leadLabelOptions] = await Promise.all([
       API.get(`/api/orgs/${API.orgId}/leads/staff/list`).catch(()=>[]),
-      API.get(`/api/orgs/${API.orgId}/leads/categories/list`).catch(()=>[])
+      API.get(`/api/orgs/${API.orgId}/leads/categories/list`).catch(()=>[]),
+      API.get(`/api/orgs/${API.orgId}/label-lists`).then(r=>r.lead_labels||[]).catch(()=>[])
     ]);
+    window._leadLabelOptions = leadLabelOptions;
     el.innerHTML = `
       <div class="ph">
         <div><div class="ph-title">Leads</div><div class="ph-sub" id="leads-count"></div></div>
@@ -4768,6 +4782,10 @@ async function renderLeads(el) {
             <option value="">All Categories</option>
             ${_leadCategories.map(c=>`<option value="${c.name}">${c.name}</option>`).join('')}
           </select>
+          <select id="leads-label" onchange="_leadsFilter()">
+            <option value="">All Labels</option>
+            ${leadLabelOptions.map(l=>`<option value="${l}">${l}</option>`).join('')}
+          </select>
         </div>
       </div>
       <div id="leads-list"></div>`;
@@ -4788,6 +4806,12 @@ async function _loadLeads() {
 
   try {
     _leadsData = await API.get(`/api/orgs/${API.orgId}/leads?${p}`);
+    const labelFilter = val('leads-label')||'';
+    if (labelFilter) {
+      _leadsData = _leadsData.filter(l => {
+        try { return JSON.parse(l.labels||'[]').includes(labelFilter); } catch { return false; }
+      });
+    }
     const cnt = $('leads-count'); if(cnt) cnt.textContent = `${_leadsData.length} lead${_leadsData.length!==1?'s':''}`;
     _renderLeadsList();
   } catch(e) { const l=$('leads-list'); if(l) l.innerHTML=`<div class="alert alert-err">${e.message}</div>`; }
@@ -4804,12 +4828,13 @@ function _renderLeadsList() {
   list.innerHTML = `<div class="card" style="padding:0;overflow:hidden"><div class="tw"><table>
     <thead><tr>
       <th style="width:28px"><input type="checkbox" id="leads-sel-all" onchange="_leadsToggleAll(this.checked)"></th>
-      <th>Name</th><th>Contact</th><th>Category</th><th>Assigned To</th>
+      <th>Name</th><th>Contact</th><th>Category</th><th>Labels</th><th>Assigned To</th>
       <th>Status</th><th>Follow-ups</th><th>Next Follow-up</th><th></th>
     </tr></thead>
     <tbody>${_leadsData.map(l => {
       const name = [l.title,l.first_name,l.last_name].filter(Boolean).join(' ') || '—';
       const cat = _leadCategories.find(c=>c.name===l.category);
+      const leadLbls = (() => { try { return JSON.parse(l.labels||'[]'); } catch { return []; } })();
       const nextFu = l.next_followup ? fmtD(l.next_followup) : '—';
       const isOverdue = l.next_followup && new Date(l.next_followup) < new Date();
       return `<tr>
@@ -4820,13 +4845,19 @@ function _renderLeadsList() {
         </td>
         <td style="font-size:12px">${l.cell||l.email||'—'}</td>
         <td>${cat?`<span class="pill" style="background:${cat.color}20;color:${cat.color};font-size:10px">${cat.name}</span>`:(l.category||'—')}</td>
+        <td>
+          <div style="display:flex;flex-wrap:wrap;gap:3px;align-items:center;max-width:160px">
+            ${leadLbls.map(lb=>`<span class="pill pill-blue" style="font-size:10px">${lb}</span>`).join('')}
+            <button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px"
+              onclick="_leadLabels('${l.id}','${(l.labels||'[]').replace(/'/g,"\\'")}')">${leadLbls.length?'Edit':'+ Label'}</button>
+          </div>
+        </td>
         <td style="font-size:12px">${l.assigned_name||'<span style="color:var(--gray-4)">Unassigned</span>'}</td>
         <td><span class="pill" style="background:${statusColors[l.status]||'var(--gray-2)'}20;color:${statusColors[l.status]||'var(--gray-5)'};font-size:11px">${statusLabels[l.status]||l.status}</span></td>
         <td style="font-size:12px;text-align:center">${l.followup_count||0}</td>
         <td style="font-size:12px;${isOverdue?'color:var(--red);font-weight:700':'color:var(--gray-5)'}">${nextFu}${isOverdue?' ⚠':''}</td>
         <td><div class="actions">
           <button class="btn btn-blue btn-sm" onclick="_leadView('${l.id}')">View</button>
-              <button class="btn btn-ghost btn-sm" onclick="_leadLabels('${l.id}','${(l.labels||'[]').replace(/'/g,"\\'")}')" title="Labels">🏷</button>
           <button class="btn btn-ghost btn-sm" onclick="_leadAddFollowup('${l.id}')">Follow Up</button>
           ${l.status!=='converted'?`<button class="btn btn-green btn-sm" onclick="_leadConvert('${l.id}')">Convert</button>`:'<span class="pill pill-green" style="font-size:10px">Converted</span>'}
         </div></td>
@@ -4858,6 +4889,11 @@ async function _leadView(id) {
           <div style="font-size:13px;margin-bottom:4px">Assigned: <strong>${lead.assigned_name||'Unassigned'}</strong></div>
           <div style="font-size:13px;margin-bottom:4px">Status: <span class="pill" style="background:${statusColors[lead.status]}20;color:${statusColors[lead.status]};font-size:11px">${statusLabels[lead.status]||lead.status}</span></div>
           ${cat?`<div style="font-size:13px;margin-bottom:4px">Category: <span class="pill" style="background:${cat.color}20;color:${cat.color};font-size:11px">${cat.name}</span></div>`:''}
+          <div style="font-size:13px;margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+            Labels:
+            ${(() => { try { return JSON.parse(lead.labels||'[]'); } catch { return []; } })().map(l=>`<span class="pill pill-blue" style="font-size:11px">${l}</span>`).join('') || '<span style="color:var(--gray-4)">None</span>'}
+            <button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px" onclick="_leadLabels('${id}','${(lead.labels||'[]').replace(/'/g,"\\\\'")}')">+ Label</button>
+          </div>
           ${lead.notes?`<div style="font-size:12px;color:var(--gray-6);margin-top:8px">${lead.notes}</div>`:''}
         </div>
       </div>
@@ -5260,19 +5296,60 @@ async function _superAdminRequestAccess(orgId, orgName) {
 
 async function _superAdminUseApprovedAccess(requestId, orgName) {
   try {
-    // Super admins already have every org in _allOrgs (see /me) — just switch directly
-    let target = _allOrgs.find(o => o.name === orgName);
+    let target = (window._allOrgsCache||_allOrgs).find(o => o.name === orgName);
     if (!target) {
-      // Fallback: refetch org list
       const fresh = await API.get('/api/auth/orgs');
       target = fresh.find(o => o.name === orgName);
     }
     if (!target) { toast('Could not find that organisation','err'); return; }
     Modal.close();
-    await setOrg(target);
-    navigateTo('dashboard');
-    toast(`Switched to ${orgName}`);
+    _openAccessOverlay(target.id, orgName, requestId);
   } catch(e) { toast(e.message||'Error','err'); }
+}
+
+// ── Full-screen overlay for viewing another org's data ─────────────────────────
+// Access lasts only as long as this overlay stays open — closing it revokes access
+// immediately and the org admin must approve a fresh request next time.
+function _openAccessOverlay(orgId, orgName, requestId) {
+  const existing = $('access-overlay'); if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'access-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:#fff;display:flex;flex-direction:column';
+  overlay.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;background:var(--navy);color:#fff;flex-shrink:0">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-size:13px;font-weight:700">🔑 Viewing as Super Admin: ${orgName}</span>
+        <span style="font-size:11px;opacity:.75">Access ends when you close this window</span>
+      </div>
+      <button id="access-overlay-close" class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff;border:none">✕ Close &amp; End Access</button>
+    </div>
+    <iframe id="access-overlay-frame" src="/?embedded_org=${orgId}" style="flex:1;border:none;width:100%"></iframe>
+  `;
+  document.body.appendChild(overlay);
+
+  // Best-effort: if the whole tab/browser closes instead of using the button,
+  // try to revoke via sendBeacon (fire-and-forget, survives page teardown)
+  const beaconRevoke = () => {
+    try {
+      const token = localStorage.getItem('drm_token');
+      navigator.sendBeacon(
+        `/api/auth/access-requests/${requestId}/revoke`,
+        new Blob([JSON.stringify({})], { type: 'application/json' })
+      );
+    } catch {}
+  };
+  window.addEventListener('beforeunload', beaconRevoke, { once: true });
+
+  $('access-overlay-close').addEventListener('click', async () => {
+    confirmDlg('End your access to this organisation now? You will need a new approval to view it again.', async () => {
+      window.removeEventListener('beforeunload', beaconRevoke);
+      try { await API.post(`/api/auth/access-requests/${requestId}/revoke`, {}); } catch {}
+      overlay.remove();
+      toast('Access ended');
+      _loadAllOrgs();
+    });
+  });
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -5396,6 +5473,7 @@ async function _loadAllOrgs() {
       API.get('/api/auth/orgs'),
       API.get('/api/auth/access-requests/mine').catch(()=>[])
     ]);
+    window._allOrgsCache = orgs;
     const approvedMap = {};
     const pendingSet = new Set();
     for (const r of myRequests) {
@@ -5417,7 +5495,7 @@ async function _loadAllOrgs() {
               </div>
             </div>
             <div class="bg">
-              <button class="btn btn-ghost btn-sm" onclick="_superAdminEditOrg('${o.id}','${o.name.replace(/'/g,"\\\\'")}','${o.expires_at||''}')">✏ Edit Info</button>
+              <button class="btn btn-ghost btn-sm" onclick="_superAdminEditOrg('${o.id}')">✏ Edit Info</button>
               <button class="btn btn-ghost btn-sm" onclick="_superAdminEditUsers('${o.id}')">👥 Users</button>
               ${approvedMap[o.id]
                 ? `<button class="btn btn-green btn-sm" onclick="_superAdminUseApprovedAccess('${approvedMap[o.id]}','${o.name.replace(/'/g,"\\\\'")}')">✓ Switch In</button>`
@@ -5431,16 +5509,27 @@ async function _loadAllOrgs() {
   } catch(e) { wrap.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
 
-async function _superAdminEditOrg(orgId, orgName, expiresAt) {
-  Modal.open(`Edit: ${orgName}`, `
-    <label>Organisation Name</label>
-    <input id="sae-name" value="${orgName}" autocomplete="new-password">
-    <label style="margin-top:10px">Expiry Date <span style="font-size:11px;color:var(--gray-5)">(leave blank = no expiry)</span></label>
-    <input type="date" id="sae-expires" value="${expiresAt?expiresAt.slice(0,10):''}">
+async function _superAdminEditOrg(orgId) {
+  const o = (window._allOrgsCache||[]).find(x=>x.id===orgId);
+  if (!o) { toast('Org not found','err'); return; }
+  Modal.open(`Edit: ${o.name}`, `
+    <div class="r2">
+      <div><label>Organisation Name</label><input id="sae-name" value="${o.name||''}" autocomplete="new-password"></div>
+      <div><label>Company Name <span style="font-size:11px;color:var(--gray-5)">(legal entity)</span></label><input id="sae-company" value="${o.company_name||''}" autocomplete="new-password"></div>
+      <div><label>Hebrew Name</label><input id="sae-hname" value="${o.hebrew_name||''}" style="direction:rtl;font-family:var(--font-he)" autocomplete="new-password"></div>
+      <div><label>Contact Email</label><input id="sae-email" type="email" value="${o.contact_email||''}" autocomplete="new-password"></div>
+      <div><label>Cell</label><input id="sae-cell" value="${o.cell||''}" autocomplete="new-password"></div>
+      <div><label>Phone</label><input id="sae-phone" value="${o.phone||''}" autocomplete="new-password"></div>
+      <div><label>Expiry Date <span style="font-size:11px;color:var(--gray-5)">(blank = no expiry)</span></label><input type="date" id="sae-expires" value="${o.expires_at?o.expires_at.slice(0,10):''}"></div>
+    </div>
+    <label style="margin-top:10px">Address</label>
+    <input id="sae-address" value="${o.address||''}" autocomplete="new-password">
+    <label style="margin-top:10px">Notes</label>
+    <textarea id="sae-notes" style="min-height:60px">${o.notes||''}</textarea>
     <div class="bg mt">
       <button class="btn btn-primary" onclick="_superAdminSaveOrg('${orgId}')">Save</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-    </div>`, {sm:true});
+    </div>`, {lg:true});
 }
 
 async function _superAdminSaveOrg(orgId) {
@@ -5449,6 +5538,11 @@ async function _superAdminSaveOrg(orgId) {
   if (!name) { toast('Name required','err'); return; }
   try {
     await API.put(`/api/auth/orgs/${orgId}/expiry`, { expiry_date: expires, name });
+    await API.put(`/api/orgs/${orgId}/settings`, {
+      name, company_name: val('sae-company'), hebrew_name: val('sae-hname'),
+      contact_email: val('sae-email'), cell: val('sae-cell'), phone: val('sae-phone'),
+      address: val('sae-address'), notes: val('sae-notes')
+    });
     toast('Saved ✓'); Modal.close(); _loadAllOrgs();
   } catch(e) { toast(e.message,'err'); }
 }
@@ -5456,6 +5550,7 @@ async function _superAdminSaveOrg(orgId) {
 async function _superAdminEditUsers(orgId) {
   try {
     const users = await API.get(`/api/auth/orgs/${orgId}/users`);
+    window._settingsUsersCache = users;
     Modal.open('Manage Users', `
       <div class="tw" style="margin-bottom:12px"><table>
         <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Last Login</th><th></th></tr></thead>
@@ -5465,7 +5560,7 @@ async function _superAdminEditUsers(orgId) {
           <td><span class="pill ${u.role==='admin'?'pill-blue':'pill-gray'}" style="font-size:10px">${u.role}</span></td>
           <td style="font-size:11px;color:var(--gray-5)">${u.last_login?fmtDT(u.last_login):'Never'}</td>
           <td><div class="actions">
-            <button class="btn btn-ghost btn-sm" onclick="_editUser('${u.id}','${(u.full_name||'').replace(/'/g,"\\\\'")}','${u.email}','${u.role}')">Edit</button>
+            <button class="btn btn-ghost btn-sm" onclick="_editUser('${u.id}','${orgId}')">Edit</button>
             <button class="btn btn-icon" style="color:var(--red)"
               onclick="confirmDlg('Remove ${(u.full_name||u.email).replace(/'/g,"\\\\'")}?',async()=>{await API.del('/api/auth/orgs/${orgId}/users/${u.id}');toast('Removed');_superAdminEditUsers('${orgId}');})">✕</button>
           </div></td>
@@ -5844,27 +5939,43 @@ async function _doChangePassword() {
   } catch(e) { toast(e.message||'Error','err'); }
 }
 
-function _editUser(id, name, email, role) {
-  Modal.open(`Edit User: ${name}`, `
-    <label>Full Name</label>
-    <input id="eu-name" value="${name}" autocomplete="new-password">
-    <label>Email</label>
-    <input id="eu-email" type="email" value="${email}" autocomplete="new-password">
-    <label>Role</label>
-    <select id="eu-role">
-      <option value="staff" ${role==='staff'?'selected':''}>Staff</option>
-      <option value="admin" ${role==='admin'?'selected':''}>Admin</option>
-    </select>
+function _editUser(id, orgId) {
+  orgId = orgId || API.orgId;
+  const u = (window._settingsUsersCache||[]).find(x=>x.id===id);
+  if (!u) { toast('User not found','err'); return; }
+  Modal.open(`Edit User: ${u.full_name||u.email}`, `
+    <div class="r2">
+      <div><label>Full Name</label><input id="eu-name" value="${u.full_name||''}" autocomplete="new-password"></div>
+      <div><label>Email</label><input id="eu-email" type="email" value="${u.email||''}" autocomplete="new-password"></div>
+      <div><label>Role</label>
+        <select id="eu-role">
+          <option value="staff" ${u.role==='staff'?'selected':''}>Staff</option>
+          <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
+        </select>
+      </div>
+      <div><label>English Title</label><input id="eu-etitle" value="${u.english_title||''}" placeholder="Mr. Mrs. Dr." autocomplete="new-password"></div>
+      <div><label>Hebrew Title</label><input id="eu-htitle" value="${u.hebrew_title||''}" autocomplete="new-password"></div>
+      <div><label>Hebrew Name</label><input id="eu-hname" value="${u.hebrew_name||''}" style="direction:rtl;font-family:var(--font-he)" autocomplete="new-password"></div>
+      <div><label>Cell</label><input id="eu-cell" value="${u.cell||''}" autocomplete="new-password"></div>
+      <div><label>Home Phone</label><input id="eu-home" value="${u.home_phone||''}" autocomplete="new-password"></div>
+    </div>
+    <label style="margin-top:10px">Address</label>
+    <input id="eu-address" value="${u.address||''}" autocomplete="new-password">
+    <label style="margin-top:10px">Notes</label>
+    <textarea id="eu-notes" style="min-height:60px">${u.notes||''}</textarea>
     <div class="bg mt">
-      <button class="btn btn-primary" onclick="_saveUserEdit('${id}')">Save</button>
+      <button class="btn btn-primary" onclick="_saveUserEdit('${id}','${orgId}')">Save</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-    </div>`, {sm:true});
+    </div>`, {lg:true});
 }
 
-async function _saveUserEdit(userId) {
+async function _saveUserEdit(userId, orgId) {
+  orgId = orgId || API.orgId;
   try {
-    await API.put(`/api/orgs/${API.orgId}/users/${userId}/profile`, {
-      full_name: val('eu-name'), email: val('eu-email'), role: val('eu-role')
+    await API.put(`/api/orgs/${orgId}/users/${userId}/profile`, {
+      full_name: val('eu-name'), email: val('eu-email'), role: val('eu-role'),
+      english_title: val('eu-etitle'), hebrew_title: val('eu-htitle'), hebrew_name: val('eu-hname'),
+      cell: val('eu-cell'), home_phone: val('eu-home'), address: val('eu-address'), notes: val('eu-notes')
     });
     toast('User updated ✓');
     Modal.close();
@@ -5892,7 +6003,7 @@ async function _donationLabels(donationId, currentLabelsJson) {
       <div style="font-size:11px;font-weight:700;color:var(--gray-5);margin-bottom:6px">Current Labels</div>
       <div id="don-label-current" style="display:flex;flex-wrap:wrap;gap:4px;min-height:24px">
         ${current.map(l=>`<span class="pill pill-blue" style="font-size:11px">${l}
-          <span onclick="this.parentElement.remove();_donLabelSync('${donationId}')" style="cursor:pointer;margin-left:3px">×</span>
+          <span onclick="this.parentElement.remove()" style="cursor:pointer;margin-left:3px">×</span>
         </span>`).join('')}
       </div>
     </div>
@@ -6160,4 +6271,20 @@ async function _restoreUser(userId, name) {
     toast(`${name} restored ✓`);
     renderSettings($('page-settings'));
   } catch(e) { toast(e.message||'Error','err'); }
+}
+
+// ── Adjust chrome when this page is loaded inside a super-admin access overlay ─
+function _applyEmbeddedOverlayChrome() {
+  try {
+    // Hide the org switcher — this window is scoped to viewing one specific org
+    const orgSelect = $('org-select');
+    if (orgSelect) orgSelect.closest('.sb-org')?.style && (orgSelect.closest('.sb-org').style.display = 'none');
+    // Add a small persistent banner so it's unmistakable this is super-admin view,
+    // even if someone scrolls past the parent overlay's own header bar.
+    const banner = document.createElement('div');
+    banner.style.cssText = 'background:#fef3c7;color:#92400e;font-size:12px;font-weight:600;text-align:center;padding:6px;border-bottom:1px solid #f59e0b';
+    banner.textContent = '🔑 Viewing as Super Admin — read carefully, this is another organisation\'s live data';
+    const app = $('app');
+    if (app) app.insertBefore(banner, app.firstChild);
+  } catch {}
 }
