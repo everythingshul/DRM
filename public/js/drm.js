@@ -188,6 +188,29 @@ function toLocalDT(d) {
     return `${g('year')}-${g('month')}-${g('day')}T${hh}:${g('minute')}`;
   } catch { return ''; }
 }
+// Inverse of toLocalDT: a "YYYY-MM-DDTHH:mm" string typed into a <input type="datetime-local">
+// represents a wall-clock time in the org's timezone, NOT the browser's — convert it to the
+// correct UTC instant before sending to the server. (Without this, editing a donation's or
+// scheduled email's date/time silently shifts it by the gap between the browser's local zone
+// and the org's configured zone.)
+function fromLocalDT(str, tz) {
+  if (!str) return null;
+  tz = tz || _tz();
+  try {
+    const [datePart, timePart] = str.split('T');
+    const [y, mo, d] = datePart.split('-').map(Number);
+    const [hh, mm] = (timePart || '00:00').split(':').map(Number);
+    const guessUtc = Date.UTC(y, mo - 1, d, hh, mm);
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit',
+      hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false
+    }).formatToParts(new Date(guessUtc));
+    const g = t => parseInt(parts.find(p=>p.type===t)?.value, 10);
+    let ghh = g('hour'); if (ghh === 24) ghh = 0;
+    const asIfUtc = Date.UTC(g('year'), g('month') - 1, g('day'), ghh, g('minute'), g('second'));
+    return new Date(guessUtc + (guessUtc - asIfUtc)).toISOString();
+  } catch { return str; }
+}
 function inits(f, l) { return ((f || '')[0] || '').toUpperCase() + ((l || '')[0] || '').toUpperCase(); }
 function avatar(d, sz=30) { return `<div class="av" style="width:${sz}px;height:${sz}px;font-size:${Math.round(sz/2.8)}px">${inits(d.first_name, d.last_name)}</div>`; }
 function sbadge(s) { const m = { completed:'Completed', pending:'Pending', failed:'Failed', scheduled:'Scheduled', cancelled:'Cancelled', active:'Active', paused:'Paused', refunded:'Refunded', partial_refund:'Partial Refund' }; return `<span class="sbadge s-${s}">${m[s] || s}</span>`; }
@@ -329,12 +352,13 @@ async function init() {
 
   // Try to restore existing session
   try {
-    const me = await API.get('/auth/me');
+    // If this window was opened as a super-admin access overlay (?embedded_org=ID),
+    // pass it along so /auth/me can include that one approved org.
+    const embeddedOrgId = new URLSearchParams(location.search).get('embedded_org');
+    const me = await API.get('/auth/me' + (embeddedOrgId ? `?embedded_org=${embeddedOrgId}` : ''));
     DRM.user = me.user;
     _allOrgs = me.orgs;
-    // If this window was opened as a super-admin access overlay (?embedded_org=ID),
-    // switch straight into that org instead of the user's own default org.
-    const embeddedOrgId = new URLSearchParams(location.search).get('embedded_org');
+    // Switch straight into that org instead of the user's own default org.
     let startOrg = me.orgs[0];
     if (embeddedOrgId) {
       const target = me.orgs.find(o => o.id === embeddedOrgId);
@@ -587,6 +611,7 @@ const Donors = {
       <div class="bg">
         <button class="btn btn-ghost btn-sm" onclick="Donors.importXlsx()">&#8679; Import</button>
         <button class="btn btn-ghost btn-sm" onclick="Donors.exportXlsx()">&#8681; Export</button>
+        <button class="btn btn-ghost btn-sm" onclick="Donors.showRemoved()">🗑 Recently Removed</button>
         <button class="btn btn-primary btn-sm" onclick="Donors.openAdd()">+ Add Donor</button>
       </div>
     </div>
@@ -739,12 +764,36 @@ const Donors = {
         <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
       </div>`, {sm:true});
   },
-  bulkDelete() { if(!this.selected.size)return; confirmDlg(`Delete ${this.selected.size} donor(s)?`,async()=>{for(const id of this.selected)await API.del(API.o.donor(id)).catch(()=>{}); this.selected.clear(); toast('Deleted'); Donors.load(); }); },
+  bulkDelete() { if(!this.selected.size)return; confirmDlg(`Remove ${this.selected.size} donor(s)? They'll be restorable for 30 days from Recently Removed.`,async()=>{for(const id of this.selected)await API.del(API.o.donor(id)).catch(()=>{}); this.selected.clear(); toast('Removed'); Donors.load(); }); },
   async pauseAll() { confirmDlg('Pause AutoPay for all donors?',async()=>{await API.post(`/api/orgs/${API.orgId}/donors/autopay/pause-all`,{}); toast('Paused'); Donors.load();}); },
   async resumeAll() { await API.post(`/api/orgs/${API.orgId}/donors/autopay/resume-all`,{}); toast('Resumed'); this.load(); },
   openAdd() { this.form(null); },
   async openEdit(id) { try { const d = await API.get(API.o.donor(id)); this.form(d.donor); } catch(e) { toast(e.message||'Unknown error','err'); } },
-  del(id, name) { confirmDlg(`Delete "${name}"?`, async () => { await API.del(API.o.donor(id)); toast('Deleted'); Donors.load(); }); },
+  del(id, name) { confirmDlg(`Remove "${name}"? They'll be restorable for 30 days from Recently Removed.`, async () => { await API.del(API.o.donor(id)); toast('Removed'); Donors.load(); }); },
+  async showRemoved() {
+    try {
+      const removed = await API.get(`/api/orgs/${API.orgId}/donors/removed`);
+      Modal.open('Recently Removed', `
+        <div style="font-size:12px;color:var(--gray-5);margin-bottom:10px">Restorable for 30 days after removal.</div>
+        ${!removed.length ? '<div class="empty"><p>No recently removed donors</p></div>' : removed.map(d => {
+          const daysLeft = 30 - Math.floor((Date.now() - new Date(d.removed_at).getTime()) / 86400000);
+          return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--gray-05);border-radius:6px;margin-bottom:6px">
+            <div>
+              <span style="font-size:13px;font-weight:600">${d.first_name} ${d.last_name}</span>
+              <span style="font-size:11px;color:var(--gray-5);margin-left:6px">Removed ${_timeAgo(d.removed_at)} · ${daysLeft} day${daysLeft!==1?'s':''} left to restore</span>
+            </div>
+            <button class="btn btn-ghost btn-sm" onclick="Donors.restore('${d.id}','${(d.first_name+' '+d.last_name).replace(/'/g,"\\\\'")}')">↩ Restore</button>
+          </div>`;
+        }).join('')}
+        <div class="bg mt"><button class="btn btn-ghost" onclick="Modal.close()">Close</button></div>`, {sm:true});
+    } catch(e) { toast(e.message,'err'); }
+  },
+  async restore(id, name) {
+    try {
+      await API.post(`/api/orgs/${API.orgId}/donors/${id}/restore`, {});
+      toast(`${name} restored ✓`); Modal.close(); Donors.load();
+    } catch(e) { toast(e.message,'err'); }
+  },
   exportXlsx() { API.dl(`/api/orgs/${API.orgId}/reports/donors?format=xlsx`, 'donors.xlsx').catch(e=>toast(e.message||'Unknown error','err')); },
   importXlsx() {
     Modal.open('Import Donors', `
@@ -1068,7 +1117,7 @@ const DonorDetail = {
       </div>`,{sm:true});
   },
   async _saveEditDon(did, donId){
-    try{await API.put(`/api/orgs/${API.orgId}/donations/${donId}/edit`,{method:val('edd-meth'),donation_date:val('edd-date'),transaction_id:val('edd-tx')||null,notes:val('edd-notes')||null});toast('Updated ✓');Modal.close();DonorDetail.open(did);}catch(e){toast(e.message,'err');}
+    try{await API.put(`/api/orgs/${API.orgId}/donations/${donId}/edit`,{method:val('edd-meth'),donation_date:fromLocalDT(val('edd-date')),transaction_id:val('edd-tx')||null,notes:val('edd-notes')||null});toast('Updated ✓');Modal.close();DonorDetail.open(did);}catch(e){toast(e.message,'err');}
   },
   _delDon(did, donId){
     confirmDlg('Delete this donation? Cannot be undone.',async()=>{
@@ -1378,7 +1427,7 @@ const DonorDetail = {
       const r = await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations`, {
         amount: amt, method,
         check_number: method==='check' ? val('md-chknum') : undefined,
-        donation_date: val('md-date') || new Date().toISOString(),
+        donation_date: fromLocalDT(val('md-date')) || new Date().toISOString(),
         transaction_id: val('md-tx') || null,
         notes: val('md-notes') || null,
         send_receipt: $('md-send-receipt')?.checked !== false
@@ -1638,7 +1687,7 @@ async function _editDonList(donId){
     </div>`,{sm:true});
 }
 async function _saveEditDonList(id){
-  try{await API.put(`/api/orgs/${API.orgId}/donations/${id}/edit`,{method:val('edl-meth'),donation_date:val('edl-date'),transaction_id:val('edl-tx')||null,notes:val('edl-notes')||null});toast('Updated ✓');Modal.close();renderDonations($('page-donations'));}catch(e){toast(e.message,'err');}
+  try{await API.put(`/api/orgs/${API.orgId}/donations/${id}/edit`,{method:val('edl-meth'),donation_date:fromLocalDT(val('edl-date')),transaction_id:val('edl-tx')||null,notes:val('edl-notes')||null});toast('Updated ✓');Modal.close();renderDonations($('page-donations'));}catch(e){toast(e.message,'err');}
 }
 async function _delDonList(id){
   confirmDlg('Delete this donation? Cannot be undone.',async()=>{
@@ -2814,7 +2863,7 @@ function _editSchedEmail(id, subject, scheduledFor) {
     <label>Body (HTML)</label><textarea id="ese-body" style="min-height:140px;font-size:12px"></textarea>
     <label>Send At</label><input type="datetime-local" id="ese-at" value="${toLocalDT(scheduledFor)}">
     <div class="bg mt">
-      <button class="btn btn-primary" onclick="API.put(API.o.schedEmails()+'/'+id,{subject:val('ese-subj'),html_body:val('ese-body'),scheduled_for:val('ese-at')}).then(()=>{toast('Updated');Modal.close();renderEmails($('page-emails'))}).catch(e=>toast(e.message||'Unknown error','err'))">Save</button>
+      <button class="btn btn-primary" onclick="API.put(API.o.schedEmails()+'/'+id,{subject:val('ese-subj'),html_body:val('ese-body'),scheduled_for:fromLocalDT(val('ese-at'))}).then(()=>{toast('Updated');Modal.close();renderEmails($('page-emails'))}).catch(e=>toast(e.message||'Unknown error','err'))">Save</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
     </div>`, {sm:true});
 }
@@ -2851,7 +2900,7 @@ function _schedEmail(){
         const label=val('se-label-sel');
         API.post(API.o.schedEmails(),{
           subject:val('se-subj'),html_body:val('se-body'),
-          scheduled_for:val('se-at'),
+          scheduled_for:fromLocalDT(val('se-at')),
           recipient_group:recip==='label'&&label?'label:'+label:'all_donors'
         }).then(()=>{toast('Scheduled');Modal.close();renderEmails(\$('page-emails'))}).catch(e=>toast(e.message||'Unknown error','err'))
       ">Schedule</button>
@@ -3096,7 +3145,6 @@ async function renderSettings(el) {
               </div></td>
             </tr>`).join('')}</tbody>
           </table></div>
-          <div id="removed-users-section" style="margin-top:14px"></div>
         </div>
       </div>
       <div id="st-nh" class="tc"><div class="card">
@@ -3140,7 +3188,6 @@ async function renderSettings(el) {
     document.querySelector('#page-settings .tab[data-tc="st-all-orgs"]')?.addEventListener('click', _loadAllOrgs);
     // Check for pending access requests for org admins
     _checkAccessRequests();
-    _loadRemovedUsers();
     // Load label lists when Labels tab is clicked
     document.querySelector('#page-settings .tab[data-tc="st-labels"]').addEventListener('click', _loadLabelSettings);
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
@@ -3765,7 +3812,7 @@ async function _saveUnlinkedDonation() {
       r = await API.post(`/api/orgs/${API.orgId}/donors/${_ulSelectedDonorId}/donations`, {
         amount: amt, method,
         check_number: method === 'check' ? val('ul-chknum') : undefined,
-        donation_date: val('ul-date') || new Date().toISOString(),
+        donation_date: fromLocalDT(val('ul-date')) || new Date().toISOString(),
         transaction_id: val('ul-tx') || null,
         notes: val('ul-extra-notes') || null,
         send_receipt: $('ul-send-receipt')?.checked !== false
@@ -3775,7 +3822,7 @@ async function _saveUnlinkedDonation() {
         amount: amt, method,
         check_number: method === 'check' ? val('ul-chknum') : undefined,
         donor_name: val('ul-name') || 'Anonymous',
-        donation_date: val('ul-date') || new Date().toISOString(),
+        donation_date: fromLocalDT(val('ul-date')) || new Date().toISOString(),
         transaction_id: val('ul-tx') || null,
         notes: val('ul-extra-notes') || null
       });
@@ -4164,7 +4211,7 @@ async function _waCreateBroadcast(sendNow) {
   const gid = val('wab-group');
   if (!gid) { toast('Select a group','err'); return; }
   const schedOn = document.getElementById('wab-sched-on')?.checked;
-  const schedDt = schedOn ? val('wab-sched-dt') : null;
+  const schedDt = schedOn ? fromLocalDT(val('wab-sched-dt')) : null;
   try {
     const r = await API.post(`/api/orgs/${API.orgId}/whatsapp/broadcasts`, {
       name: val('wab-name')||null,
@@ -4609,7 +4656,7 @@ async function _edDoSchedule() {
     if (!savedId) { toast('Save failed','err'); if(btn){btn.textContent='Save & Schedule';btn.disabled=false;} return; }
     // Then schedule it
     const subject = val('ed-subject')?.trim();
-    const scheduledAt = val('sched-at');
+    const scheduledAt = fromLocalDT(val('sched-at'));
     // Generate HTML from blocks
     const html = _edBlocksToHtml(window._edBlocks);
     await API.post(API.o.schedEmails(), {
@@ -5997,10 +6044,6 @@ async function _donationLabels(donationId, currentLabelsJson) {
       ${donLabels.map(l=>`<button type="button" class="btn btn-ghost btn-sm" style="font-size:11px"
         onclick="_donLabelAdd('${donationId}','${l.replace(/'/g,"\\\\'")}',this)">${l}</button>`).join('')}
     </div>
-    <div style="display:flex;gap:6px">
-      <input id="don-label-custom" placeholder="Custom label…" autocomplete="new-password" style="flex:1;font-size:12px">
-      <button class="btn btn-ghost btn-sm" onclick="_donLabelAddCustom('${donationId}')">Add</button>
-    </div>
     <input type="hidden" id="don-label-donid" value="${donationId}">
     <div class="bg mt">
       <button class="btn btn-primary" onclick="_donLabelSave('${donationId}')">Save</button>
@@ -6022,11 +6065,6 @@ function _donLabelAdd(donId, label, btn) {
     cur.appendChild(chip);
   }
   if (btn) { btn.className = 'btn btn-primary btn-sm'; btn.style.fontSize = '11px'; }
-}
-
-function _donLabelAddCustom(donId) {
-  const v = val('don-label-custom')?.trim();
-  if (v) { _donLabelAdd(donId, v, null); $('don-label-custom').value = ''; }
 }
 
 async function _donLabelSave(donId) {
@@ -6168,38 +6206,6 @@ async function _leadsDoImport() {
 
 function _leadsExport() {
   API.dl(`/api/orgs/${API.orgId}/leads/export`, 'leads-export.xlsx').catch(e=>toast(e.message||'Unknown error','err'));
-}
-
-// ── Recently removed users (30-day restore window) ────────────────────────────
-async function _loadRemovedUsers() {
-  const wrap = $('removed-users-section'); if (!wrap) return;
-  try {
-    const removed = await API.get(`/api/orgs/${API.orgId}/users/removed`);
-    wrap.innerHTML = `
-      <div style="border-top:1px solid var(--gray-1);padding-top:12px">
-        <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">
-          Recently Removed <span style="font-weight:400;text-transform:none">(restorable for 30 days)</span>
-        </div>
-        ${!removed.length ? `<div style="font-size:12px;color:var(--gray-4)">No recently removed users</div>` : removed.map(u => {
-          const daysLeft = 30 - Math.floor((Date.now() - new Date(u.removed_at).getTime()) / 86400000);
-          return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--gray-05);border-radius:6px;margin-bottom:6px">
-            <div>
-              <span style="font-size:13px;font-weight:600">${u.full_name||u.email}</span>
-              <span style="font-size:11px;color:var(--gray-5);margin-left:6px">Removed ${_timeAgo(u.removed_at)} · ${daysLeft} day${daysLeft!==1?'s':''} left to restore</span>
-            </div>
-            <button class="btn btn-ghost btn-sm" onclick="_restoreUser('${u.id}','${(u.full_name||u.email).replace(/'/g,"\\\\'")}')">↩ Restore</button>
-          </div>`;
-        }).join('')}
-      </div>`;
-  } catch { wrap.innerHTML = ''; }
-}
-
-async function _restoreUser(userId, name) {
-  try {
-    await API.post(`/api/orgs/${API.orgId}/users/${userId}/restore`, {});
-    toast(`${name} restored ✓`);
-    renderSettings($('page-settings'));
-  } catch(e) { toast(e.message||'Error','err'); }
 }
 
 // ── Adjust chrome when this page is loaded inside a super-admin access overlay ─

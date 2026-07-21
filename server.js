@@ -101,18 +101,16 @@ app.post('/api/orgs/:orgId/import/donors',
       if (!rows.length) return res.status(400).json({ error: 'File is empty' });
 
       // Load existing donors for duplicate detection (select every field actually used below)
-      const existing = all('SELECT id, first_name, last_name, email, cell, home_phone, hebrew_full_name, street, apt, zip FROM donors WHERE org_id=?', [req.params.orgId]);
-      const norm10 = p => (p||'').replace(/\D/g,'').slice(-10); // compare by last 10 digits regardless of +1/formatting
+      const existing = all('SELECT id, first_name, last_name, email, hebrew_full_name, street, apt, zip FROM donors WHERE org_id=? AND removed_at IS NULL', [req.params.orgId]);
 
-      // Map each normalized key -> existing donor id, so we can link the duplicate record for ANY trigger reason
+      // Map each normalized key -> existing donor id, so we can link the duplicate record for ANY trigger reason.
+      // Phone number is deliberately NOT used as a signal — shared household phones (spouses,
+      // siblings, parent/child living together) are extremely common and legitimate, and flagging
+      // on phone produced false positives between real, distinct donors sharing a family landline.
       const nameMap   = new Map(existing.filter(d=>d.first_name&&d.last_name).map(d=>[`${d.first_name.toLowerCase().trim()}|${d.last_name.toLowerCase().trim()}`, d.id]));
       const hebrewMap = new Map(existing.filter(d=>d.hebrew_full_name).map(d=>[d.hebrew_full_name.trim().toLowerCase(), d.id]));
       const emailMap  = new Map(existing.filter(d=>d.email).map(d=>[d.email.toLowerCase().trim(), d.id]));
-      const cellMap   = new Map(existing.filter(d=>d.cell).map(d=>[norm10(d.cell), d.id]));
-      const homeMap   = new Map(existing.filter(d=>d.home_phone).map(d=>[norm10(d.home_phone), d.id]));
       const addrMap   = new Map(existing.filter(d=>d.street&&d.zip).map(d=>[`${d.street.toLowerCase().trim()}|${(d.apt||'').toLowerCase().trim()}|${d.zip.trim()}`, d.id]));
-      const lastNameByCell = new Map(existing.filter(d=>d.cell&&d.last_name).map(d=>[norm10(d.cell), d.last_name.toLowerCase().trim()]));
-      const lastNameByHome = new Map(existing.filter(d=>d.home_phone&&d.last_name).map(d=>[norm10(d.home_phone), d.last_name.toLowerCase().trim()]));
 
       let imported = 0, flagged = [], errors = [], donorIds = [];
 
@@ -163,10 +161,10 @@ app.post('/api/orgs/:orgId/import/donors',
         }
 
         // ── Duplicate detection ────────────────────────────────────────────────
-        // Strong signals (flag on their own): exact full name, Hebrew name, email, address (incl. apt)
-        // Weak signals (phone alone): only flag if the last name ALSO matches that same
-        // existing donor — shared household phones (e.g. spouses) are common and legitimate,
-        // so a phone match with a clearly different last name is not auto-flagged.
+        // Strong signals only: exact full name, Hebrew name, email, or full address match.
+        // Phone number is deliberately NOT used — shared household phones (spouses, siblings,
+        // parent/child living together) are extremely common and legitimate, and flagging on
+        // phone produced false positives between real, distinct donors sharing a family landline.
         const nameKey = fn && ln ? `${fn.toLowerCase()}|${ln.toLowerCase()}` : null;
         const addrKey = street && zip ? `${street.toLowerCase()}|${apt.toLowerCase()}|${zip}` : null;
         const dupReasons = [];
@@ -176,20 +174,6 @@ app.post('/api/orgs/:orgId/import/donors',
         if (hebrew && hebrewMap.has(hebrew.toLowerCase()))      { dupReasons.push('Hebrew name match'); matchId = matchId || hebrewMap.get(hebrew.toLowerCase()); }
         if (email && emailMap.has(email))                       { dupReasons.push('Same email'); matchId = matchId || emailMap.get(email); }
         if (addrKey && addrMap.has(addrKey))                    { dupReasons.push('Same address'); matchId = matchId || addrMap.get(addrKey); }
-        if (cell) {
-          const key10 = norm10(cell);
-          if (cellMap.has(key10)) {
-            const otherLast = lastNameByCell.get(key10);
-            if (!ln || !otherLast || otherLast === ln.toLowerCase()) { dupReasons.push('Same cell phone'); matchId = matchId || cellMap.get(key10); }
-          }
-        }
-        if (home) {
-          const key10 = norm10(home);
-          if (homeMap.has(key10)) {
-            const otherLast = lastNameByHome.get(key10);
-            if (!ln || !otherLast || otherLast === ln.toLowerCase()) { dupReasons.push('Same home phone'); matchId = matchId || homeMap.get(key10); }
-          }
-        }
 
         try {
           const newId = uuidv4();
@@ -234,8 +218,6 @@ app.post('/api/orgs/:orgId/import/donors',
           if (nameKey)              nameMap.set(nameKey, newId);
           if (hebrew)                hebrewMap.set(hebrew.toLowerCase(), newId);
           if (email)                 emailMap.set(email, newId);
-          if (cell)                { cellMap.set(norm10(cell), newId); if (ln) lastNameByCell.set(norm10(cell), ln.toLowerCase()); }
-          if (home)                { homeMap.set(norm10(home), newId); if (ln) lastNameByHome.set(norm10(home), ln.toLowerCase()); }
           if (addrKey)               addrMap.set(addrKey, newId);
 
           imported++;

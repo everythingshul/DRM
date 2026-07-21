@@ -24,7 +24,7 @@ router.get('/', (req, res) => {
       (SELECT CASE WHEN dd.donor_id_a=d.id THEN dd.donor_id_b ELSE dd.donor_id_a END FROM donor_duplicates dd WHERE dd.status='pending' AND (dd.donor_id_a=d.id OR dd.donor_id_b=d.id) LIMIT 1) as dup_other_id
     FROM donors d
     LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
-    WHERE d.org_id = ?
+    WHERE d.org_id = ? AND d.removed_at IS NULL
   `;
   const params = [req.orgId];
 
@@ -66,7 +66,7 @@ router.get('/needs-verification', (req, res) => {
       CAST((julianday('now') - julianday(d.created_at)) / 30.44 AS INTEGER) as months_old
     FROM donors d
     LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
-    WHERE d.org_id = ?
+    WHERE d.org_id = ? AND d.removed_at IS NULL
     AND (d.info_verified_at IS NULL OR julianday('now') - julianday(d.info_verified_at) > 180)
     ORDER BY d.info_verified_at ASC, d.created_at ASC
   `, [req.orgId]);
@@ -79,11 +79,41 @@ router.get('/search', (req, res) => {
   const q = '%' + (req.query.q || '') + '%';
   const donors = all(`
     SELECT id, first_name, last_name, hebrew_full_name, email, cell
-    FROM donors WHERE org_id=?
+    FROM donors WHERE org_id=? AND removed_at IS NULL
       AND (first_name LIKE ? OR last_name LIKE ? OR email LIKE ? OR cell LIKE ? OR hebrew_full_name LIKE ?)
     ORDER BY last_name, first_name LIMIT 20`,
     [req.orgId, q, q, q, q, q]);
   res.json(donors);
+});
+
+// ── Recently removed donors (30-day restore window) — must be before /:id ──────
+router.get('/removed', (req, res) => {
+  const donors = all(`
+    SELECT id, first_name, last_name, donor_number, email, cell, removed_at
+    FROM donors WHERE org_id=? AND removed_at IS NOT NULL
+      AND julianday('now') - julianday(removed_at) <= 30
+    ORDER BY removed_at DESC
+  `, [req.orgId]);
+  res.json(donors);
+});
+
+// ── Duplicate flags — must be before /:id (was previously shadowed by it) ──────
+router.get('/duplicates', (req, res) => {
+  const { status } = req.query;
+  let where = 'dd.org_id=?', params = [req.orgId];
+  if (!status || status === 'pending') { where += " AND dd.status='pending'"; }
+  else if (status !== 'all')            { where += ' AND dd.status=?'; params.push(status); }
+  const dups = all(`
+    SELECT dd.*,
+      da.first_name||' '||COALESCE(da.last_name,'') as name_a, da.email as email_a, da.cell as cell_a, da.donor_number as number_a,
+      db.first_name||' '||COALESCE(db.last_name,'') as name_b, db.email as email_b, db.cell as cell_b, db.donor_number as number_b
+    FROM donor_duplicates dd
+    JOIN donors da ON da.id=dd.donor_id_a
+    JOIN donors db ON db.id=dd.donor_id_b
+    WHERE ${where}
+    ORDER BY dd.created_at DESC
+  `, params);
+  res.json(dups);
 });
 
 router.get('/:id', (req, res) => {
@@ -156,18 +186,18 @@ router.post('/', (req, res) => {
     const donor = get('SELECT * FROM donors WHERE id = ?', [id]);
 
     // ── Duplicate detection — same rules as bulk import ─────────────────────────
-    // Strong signals (flag alone): exact full name, Hebrew name, email, address (incl. apt)
-    // Weak signal (phone alone): only flag if the last name also matches, since shared
-    // household phones (e.g. spouses) are common and legitimate on their own.
+    // Strong signals only: exact full name, Hebrew name, email, or full address match.
+    // Phone number is deliberately NOT used as a signal — shared household phones
+    // (spouses, siblings, parent/child living together) are extremely common and
+    // legitimate, and flagging on phone produced false positives between real,
+    // distinct donors who simply share a family landline.
     try {
-      const norm10 = p => (p||'').replace(/\D/g,'').slice(-10);
-      const others = all('SELECT id,first_name,last_name,email,cell,home_phone,hebrew_full_name,street,apt,zip FROM donors WHERE org_id=? AND id!=?', [req.orgId, id]);
+      const others = all('SELECT id,first_name,last_name,email,hebrew_full_name,street,apt,zip FROM donors WHERE org_id=? AND id!=? AND removed_at IS NULL', [req.orgId, id]);
       let matchId = null, reasons = [];
       const fn2 = (first_name||'').toLowerCase().trim(), ln2 = (last_name||'').toLowerCase().trim();
       const hebrew2 = (hebrew_full_name||'').toLowerCase().trim();
       const email2 = (email||'').toLowerCase().trim();
       const addrKey2 = street && zip ? `${street.toLowerCase().trim()}|${(apt||'').toLowerCase().trim()}|${zip.trim()}` : null;
-      const cell10 = norm10(cell), home10 = norm10(home_phone);
 
       for (const o of others) {
         const oFn = (o.first_name||'').toLowerCase().trim(), oLn = (o.last_name||'').toLowerCase().trim();
@@ -178,8 +208,6 @@ router.post('/', (req, res) => {
           const oAddrKey = `${o.street.toLowerCase().trim()}|${(o.apt||'').toLowerCase().trim()}|${o.zip.trim()}`;
           if (oAddrKey === addrKey2) { reasons.push('Same address'); matchId = matchId||o.id; }
         }
-        if (cell10 && o.cell && norm10(o.cell)===cell10 && (!ln2 || !oLn || oLn===ln2)) { reasons.push('Same cell phone'); matchId = matchId||o.id; }
-        if (home10 && o.home_phone && norm10(o.home_phone)===home10 && (!ln2 || !oLn || oLn===ln2)) { reasons.push('Same home phone'); matchId = matchId||o.id; }
       }
       if (matchId && reasons.length) {
         run(`INSERT OR IGNORE INTO donor_duplicates (id,org_id,donor_id_a,donor_id_b,reason) VALUES (?,?,?,?,?)`,
@@ -289,16 +317,25 @@ router.post('/:id/verify', (req, res) => {
   res.json({ success: true });
 });
 
-// Delete donor — preserve donations for financial tracking
+// Remove donor — soft delete, restorable for 30 days (Settings > Users mirrors this for staff)
 router.delete('/:id', (req, res) => {
   const existing = get('SELECT id FROM donors WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
   if (!existing) return res.status(404).json({ error: 'Donor not found' });
-  run('DELETE FROM scheduled_charges WHERE donor_id = ?', [req.params.id]);
-  run('DELETE FROM recurring_schedules WHERE donor_id = ?', [req.params.id]);
-  run('DELETE FROM payment_methods WHERE donor_id = ?', [req.params.id]);
-  // Keep donations — set donor_id to null so financial records are preserved
-  run('UPDATE donations SET donor_id = NULL WHERE donor_id = ?', [req.params.id]);
-  run('DELETE FROM donors WHERE id = ?', [req.params.id]);
+  // Stop any billing while removed. Left cancelled/paused on restore — an admin must
+  // manually re-enable autopay/recurring rather than have it silently resume.
+  run(`UPDATE scheduled_charges SET status='cancelled' WHERE donor_id=? AND status='pending'`, [req.params.id]);
+  run(`UPDATE recurring_schedules SET status='cancelled' WHERE donor_id=? AND status='active'`, [req.params.id]);
+  run('UPDATE donors SET removed_at = CURRENT_TIMESTAMP, autopay_paused = 1 WHERE id = ?', [req.params.id]);
+  res.json({ success: true });
+});
+
+router.post('/:id/restore', requireOrgAdmin, (req, res) => {
+  const donor = get('SELECT * FROM donors WHERE id=? AND org_id=? AND removed_at IS NOT NULL', [req.params.id, req.orgId]);
+  if (!donor) return res.status(404).json({ error: 'Not found' });
+  if ((Date.now() - new Date(donor.removed_at).getTime()) > 30*24*60*60*1000) {
+    return res.status(400).json({ error: 'The 30-day restore window has passed' });
+  }
+  run('UPDATE donors SET removed_at = NULL WHERE id = ?', [req.params.id]);
   res.json({ success: true });
 });
 
@@ -324,25 +361,6 @@ router.post('/:id/move-to-lead', requireOrgAdmin, (req, res) => {
   run('DELETE FROM donors WHERE id=?', [req.params.id]);
 
   res.json({ success: true, lead_id: leadId });
-});
-
-// ── Duplicate flags ───────────────────────────────────────────────────────────
-router.get('/duplicates', (req, res) => {
-  const { status } = req.query;
-  let where = 'dd.org_id=?', params = [req.orgId];
-  if (!status || status === 'pending') { where += " AND dd.status='pending'"; }
-  else if (status !== 'all')            { where += ' AND dd.status=?'; params.push(status); }
-  const dups = all(`
-    SELECT dd.*,
-      da.first_name||' '||COALESCE(da.last_name,'') as name_a, da.email as email_a, da.cell as cell_a, da.donor_number as number_a,
-      db.first_name||' '||COALESCE(db.last_name,'') as name_b, db.email as email_b, db.cell as cell_b, db.donor_number as number_b
-    FROM donor_duplicates dd
-    JOIN donors da ON da.id=dd.donor_id_a
-    JOIN donors db ON db.id=dd.donor_id_b
-    WHERE ${where}
-    ORDER BY dd.created_at DESC
-  `, params);
-  res.json(dups);
 });
 
 router.post('/duplicates/:id/resolve', requireOrgAdmin, (req, res) => {

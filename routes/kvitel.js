@@ -61,7 +61,7 @@ function getDonors(orgId) {
            n.name_he AS neighborhood_name, COALESCE(n.sort_order,9999) AS nh_order
     FROM donors d
     LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
-    WHERE d.org_id=? AND d.kvitel_enabled=1
+    WHERE d.org_id=? AND d.kvitel_enabled=1 AND d.removed_at IS NULL
       AND d.kvitel IS NOT NULL AND TRIM(d.kvitel) != ''
     ORDER BY COALESCE(n.sort_order,9999), n.name_he, d.last_name, d.first_name
   `, [orgId]);

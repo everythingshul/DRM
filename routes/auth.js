@@ -18,15 +18,15 @@ router.post('/login', async (req, res) => {
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
 
-    // Get user's orgs (super admins see every org)
-    const orgs = user.is_super_admin
-      ? all(`SELECT o.*, 'admin' as user_role FROM organizations o ORDER BY o.name`, [])
-      : all(`
-          SELECT o.*, ou.role as user_role FROM organizations o
-          JOIN org_users ou ON o.id = ou.org_id
-          WHERE ou.user_id = ? AND ou.removed_at IS NULL
-          ORDER BY o.name
-        `, [user.id]);
+    // Get user's own orgs — including super admins, who must go through the
+    // request/approve access flow (Accounts page) to view any other org rather
+    // than having every organisation available in their own sidebar switcher.
+    const orgs = all(`
+      SELECT o.*, ou.role as user_role FROM organizations o
+      JOIN org_users ou ON o.id = ou.org_id
+      WHERE ou.user_id = ? AND ou.removed_at IS NULL
+      ORDER BY o.name
+    `, [user.id]);
 
     let activeOrg = null;
     if (orgSlug) {
@@ -89,17 +89,26 @@ router.post('/logout', requireAuth, (req, res) => {
 
 // Get current user
 router.get('/me', requireAuth, (req, res) => {
-  let orgs;
-  if (req.user.is_super_admin) {
-    // Super admins can access every org directly (API layer already permits this via requireOrg)
-    orgs = all(`SELECT o.*, 'admin' as user_role FROM organizations o ORDER BY o.name`, []);
-  } else {
-    orgs = all(`
-      SELECT o.*, ou.role as user_role FROM organizations o
-      JOIN org_users ou ON o.id = ou.org_id
-      WHERE ou.user_id = ? AND ou.removed_at IS NULL
-      ORDER BY o.name
-    `, [req.user.id]);
+  // Own orgs only — including super admins, who must request/be-approved access
+  // (see /super-admin/request-access below) to view any other organisation, rather
+  // than having every account available directly in their sidebar switcher.
+  const orgs = all(`
+    SELECT o.*, ou.role as user_role FROM organizations o
+    JOIN org_users ou ON o.id = ou.org_id
+    WHERE ou.user_id = ? AND ou.removed_at IS NULL
+    ORDER BY o.name
+  `, [req.user.id]);
+
+  // If this request is for a specific approved cross-org access session (the
+  // super-admin "view another org" new tab), include that one extra org so the
+  // frontend can resolve it — without exposing every org in the normal list.
+  const embeddedOrgId = req.query.embedded_org;
+  if (embeddedOrgId && req.user.is_super_admin && !orgs.find(o => o.id === embeddedOrgId)) {
+    const approved = get(`SELECT * FROM access_requests WHERE super_admin_id=? AND org_id=? AND status='approved'`, [req.user.id, embeddedOrgId]);
+    if (approved) {
+      const org = get('SELECT * FROM organizations WHERE id=?', [embeddedOrgId]);
+      if (org) orgs.push({ ...org, user_role: 'admin' });
+    }
   }
 
   res.json({
@@ -156,30 +165,6 @@ router.get('/orgs/:orgId/users', requireAuth, requireOrg, requireOrgAdmin, (req,
     ORDER BY u.full_name
   `, [req.orgId]);
   res.json(users);
-});
-
-// ── Recently removed users (restorable within 30 days) ─────────────────────────
-router.get('/orgs/:orgId/users/removed', requireAuth, requireOrg, requireOrgAdmin, (req, res) => {
-  const users = all(`
-    SELECT u.id, u.email, u.full_name, ou.role, ou.removed_at
-    FROM users u
-    JOIN org_users ou ON u.id = ou.user_id
-    WHERE ou.org_id = ? AND ou.removed_at IS NOT NULL
-      AND julianday('now') - julianday(ou.removed_at) <= 30
-    ORDER BY ou.removed_at DESC
-  `, [req.orgId]);
-  res.json(users);
-});
-
-// ── Restore a removed user ──────────────────────────────────────────────────────
-router.post('/orgs/:orgId/users/:userId/restore', requireAuth, requireOrg, requireOrgAdmin, (req, res) => {
-  const row = get('SELECT * FROM org_users WHERE org_id=? AND user_id=? AND removed_at IS NOT NULL', [req.orgId, req.params.userId]);
-  if (!row) return res.status(404).json({ error: 'No removed membership found for this user' });
-  if ((Date.now() - new Date(row.removed_at).getTime()) > 30*24*60*60*1000) {
-    return res.status(400).json({ error: 'This removal is more than 30 days old and can no longer be restored' });
-  }
-  run('UPDATE org_users SET removed_at=NULL WHERE id=?', [row.id]);
-  res.json({ success: true });
 });
 
 // Add user to org (admin)

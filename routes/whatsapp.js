@@ -122,11 +122,11 @@ router.post('/groups/:gid/import-donors', requireOrgAdmin, (req, res) => {
   const { neighborhood_id, label, all_donors } = req.body;
   let donors;
   if (all_donors) {
-    donors = all(`SELECT id, first_name, last_name, cell, home_phone FROM donors WHERE org_id=? AND (cell IS NOT NULL OR home_phone IS NOT NULL)`, [req.orgId]);
+    donors = all(`SELECT id, first_name, last_name, cell, home_phone FROM donors WHERE org_id=? AND removed_at IS NULL AND (cell IS NOT NULL OR home_phone IS NOT NULL)`, [req.orgId]);
   } else if (neighborhood_id) {
-    donors = all(`SELECT id, first_name, last_name, cell, home_phone FROM donors WHERE org_id=? AND neighborhood_id=? AND (cell IS NOT NULL OR home_phone IS NOT NULL)`, [req.orgId, neighborhood_id]);
+    donors = all(`SELECT id, first_name, last_name, cell, home_phone FROM donors WHERE org_id=? AND neighborhood_id=? AND removed_at IS NULL AND (cell IS NOT NULL OR home_phone IS NOT NULL)`, [req.orgId, neighborhood_id]);
   } else if (label) {
-    donors = all(`SELECT id, first_name, last_name, cell, home_phone FROM donors WHERE org_id=? AND labels LIKE ? AND (cell IS NOT NULL OR home_phone IS NOT NULL)`, [req.orgId, `%${label}%`]);
+    donors = all(`SELECT id, first_name, last_name, cell, home_phone FROM donors WHERE org_id=? AND labels LIKE ? AND removed_at IS NULL AND (cell IS NOT NULL OR home_phone IS NOT NULL)`, [req.orgId, `%${label}%`]);
   } else {
     return res.status(400).json({ error: 'Specify all_donors, neighborhood_id, or label' });
   }

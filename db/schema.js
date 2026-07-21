@@ -425,6 +425,7 @@ function runMigrations() {
   safe("ALTER TABLE org_users ADD COLUMN permissions TEXT DEFAULT '{}'");
   safe("ALTER TABLE org_users ADD COLUMN invited_by TEXT");
   safe("ALTER TABLE org_users ADD COLUMN removed_at DATETIME");
+  safe("ALTER TABLE donors ADD COLUMN removed_at DATETIME");
   // Extra contact info fields
   safe("ALTER TABLE users ADD COLUMN hebrew_name TEXT");
   safe("ALTER TABLE users ADD COLUMN hebrew_title TEXT");

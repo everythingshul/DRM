@@ -156,7 +156,7 @@ router.get('/stats', (req, res) => {
     params.push(from, to);
   }
 
-  const totalDonors = get('SELECT COUNT(*) as n FROM donors WHERE org_id = ?', [req.orgId])?.n || 0;
+  const totalDonors = get('SELECT COUNT(*) as n FROM donors WHERE org_id = ? AND removed_at IS NULL', [req.orgId])?.n || 0;
   const activeDonors = get(`SELECT COUNT(DISTINCT donor_id) as n FROM donations WHERE org_id = ?${dateFilter} AND status = 'completed'`, params)?.n || 0;
   const totalAmount = get(`SELECT COALESCE(SUM(amount),0) as n FROM donations WHERE org_id = ?${dateFilter} AND status = 'completed'`, params)?.n || 0;
   const totalDonations = get(`SELECT COUNT(*) as n FROM donations WHERE org_id = ?${dateFilter} AND status = 'completed'`, params)?.n || 0;
@@ -197,12 +197,12 @@ router.get('/stats', (req, res) => {
     SELECT COUNT(*) as total,
            SUM(CASE WHEN autopay_enabled = 1 AND autopay_paused = 0 THEN 1 ELSE 0 END) as active,
            SUM(CASE WHEN autopay_enabled = 1 AND autopay_paused = 1 THEN 1 ELSE 0 END) as paused
-    FROM donors WHERE org_id = ?
+    FROM donors WHERE org_id = ? AND removed_at IS NULL
   `, [req.orgId]);
 
   const failedCharges = get(`SELECT COUNT(*) as n FROM charge_failures WHERE org_id = ? AND acknowledged = 0`, [req.orgId])?.n || 0;
   const needsVerification = get(`
-    SELECT COUNT(*) as n FROM donors WHERE org_id = ?
+    SELECT COUNT(*) as n FROM donors WHERE org_id = ? AND removed_at IS NULL
     AND (info_verified_at IS NULL OR julianday('now') - julianday(info_verified_at) > 180)
   `, [req.orgId])?.n || 0;
   const totalExpenses = get(`SELECT COALESCE(SUM(amount),0) as n FROM expenses WHERE org_id=?`, [req.orgId])?.n || 0;

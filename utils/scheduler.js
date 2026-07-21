@@ -191,6 +191,10 @@ async function processScheduledCharge(charge) {
   const pm = get('SELECT * FROM payment_methods WHERE id = ?', [charge.payment_method_id]);
   const org = get('SELECT * FROM organizations WHERE id = ?', [charge.org_id]);
   if (!donor || !pm || !org) return;
+  if (donor.removed_at) {
+    run(`UPDATE scheduled_charges SET status='cancelled' WHERE id=?`, [charge.id]);
+    return;
+  }
 
   try {
     let txResult;
@@ -254,7 +258,7 @@ async function processAutopay() {
   const donors = all(`
     SELECT d.*, o.settings as org_settings FROM donors d
     JOIN organizations o ON o.id = d.org_id
-    WHERE d.autopay_enabled = 1 AND d.autopay_paused = 0
+    WHERE d.autopay_enabled = 1 AND d.autopay_paused = 0 AND d.removed_at IS NULL
   `, []);
 
   const matching = donors.filter(donor => {
@@ -323,16 +327,16 @@ async function processScheduledEmails() {
       const group = email.recipient_group || 'all_donors';
 
       if (group === 'all_donors') {
-        const donors = all('SELECT email FROM donors WHERE org_id=? AND email IS NOT NULL AND email != "" AND donation_emails_paused=0', [email.org_id]);
+        const donors = all('SELECT email FROM donors WHERE org_id=? AND email IS NOT NULL AND email != "" AND donation_emails_paused=0 AND removed_at IS NULL', [email.org_id]);
         recipients = donors.map(d => d.email);
       } else if (group.startsWith('label:')) {
         const label = group.replace('label:', '');
-        const donors = all('SELECT email, labels FROM donors WHERE org_id=? AND email IS NOT NULL AND email != "" AND donation_emails_paused=0', [email.org_id]);
+        const donors = all('SELECT email, labels FROM donors WHERE org_id=? AND email IS NOT NULL AND email != "" AND donation_emails_paused=0 AND removed_at IS NULL', [email.org_id]);
         recipients = donors.filter(d => {
           try { return JSON.parse(d.labels||'[]').includes(label); } catch { return false; }
         }).map(d => d.email);
       } else if (email.donor_id) {
-        const donor = get('SELECT email FROM donors WHERE id=?', [email.donor_id]);
+        const donor = get('SELECT email FROM donors WHERE id=? AND removed_at IS NULL', [email.donor_id]);
         if (donor?.email) recipients = [donor.email];
       } else {
         // Fallback to org admin email
@@ -456,6 +460,7 @@ async function processRecurringSchedules() {
     FROM recurring_schedules rs
     JOIN donors d ON rs.donor_id = d.id
     WHERE rs.status = 'active'
+      AND d.removed_at IS NULL
       AND rs.next_run <= datetime('now')
       AND (rs.end_date IS NULL OR rs.next_run <= rs.end_date)
       AND (rs.occurrences_limit IS NULL OR rs.occurrences_count < rs.occurrences_limit)
