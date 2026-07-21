@@ -5,8 +5,25 @@ const router  = express.Router({ mergeParams: true });
 const { v4: uuidv4 } = require('uuid');
 const { get, run, all } = require('../db/schema');
 const { requireAuth, requireOrg, requireOrgAdmin } = require('../middleware/auth');
+const { findDuplicateClusters } = require('../utils/duplicates');
 
 router.use(requireAuth, requireOrg);
+
+// Build a lead.id -> { other, reason } map from the live duplicate clusters (see
+// utils/duplicates.js), for annotating list/detail rows with the "⚠ DUPLICATE" badge.
+function _leadDupMap(orgId) {
+  const clusters = findDuplicateClusters(orgId);
+  const dismissals = all('SELECT * FROM duplicate_dismissals WHERE org_id=?', [orgId]);
+  const dismissedKeys = new Set(dismissals.map(d => `${d.entity_a_type}:${d.entity_a_id}|${d.entity_b_type}:${d.entity_b_id}`));
+  const map = new Map();
+  for (const c of clusters) {
+    const key = `${c.a.type}:${c.a.id}|${c.b.type}:${c.b.id}`;
+    if (dismissedKeys.has(key)) continue;
+    if (c.a.type === 'lead' && !map.has(c.a.id)) map.set(c.a.id, { other_id: c.b.id, other_type: c.b.type, reason: c.reasons.join(', ') });
+    if (c.b.type === 'lead' && !map.has(c.b.id)) map.set(c.b.id, { other_id: c.a.id, other_type: c.a.type, reason: c.reasons.join(', ') });
+  }
+  return map;
+}
 
 // ══ IMPORT / EXPORT (mirrors the Donors import/export feature) ═══════════════
 const multer = require('multer');
@@ -167,7 +184,7 @@ router.get('/export', (req, res) => {
 
 // ── List leads ────────────────────────────────────────────────────────────────
 router.get('/', (req, res) => {
-  const { status, assigned_to, category, q } = req.query;
+  const { status, assigned_to, category, q, duplicates_only } = req.query;
   let where = 'l.org_id=? AND l.removed_at IS NULL', params = [req.orgId];
   if (status)      { where += ' AND l.status=?';      params.push(status); }
   if (assigned_to) { where += ' AND l.assigned_to=?'; params.push(assigned_to); }
@@ -177,7 +194,7 @@ router.get('/', (req, res) => {
     const s = `%${q.replace(/^#/, '')}%`;
     params.push(s,s,s,s,s,s);
   }
-  const leads = all(`
+  let leads = all(`
     SELECT l.*,
       u.full_name as assigned_name,
       (SELECT COUNT(*) FROM lead_followups WHERE lead_id=l.id) as followup_count,
@@ -187,6 +204,17 @@ router.get('/', (req, res) => {
     WHERE ${where}
     ORDER BY l.created_at DESC
   `, params);
+
+  const dupMap = _leadDupMap(req.orgId);
+  for (const l of leads) {
+    const dup = dupMap.get(l.id);
+    l.dup_id = dup ? l.id : null;
+    l.dup_other_id = dup ? dup.other_id : null;
+    l.dup_other_type = dup ? dup.other_type : null;
+    l.dup_reason = dup ? dup.reason : null;
+  }
+  if (duplicates_only === '1' || duplicates_only === 'true') leads = leads.filter(l => l.dup_id);
+
   res.json(leads);
 });
 
@@ -205,6 +233,11 @@ router.get('/removed', (req, res) => {
 router.get('/:id', (req, res) => {
   const lead = get('SELECT l.*, u.full_name as assigned_name FROM leads l LEFT JOIN users u ON u.id=l.assigned_to WHERE l.id=? AND l.org_id=?', [req.params.id, req.orgId]);
   if (!lead) return res.status(404).json({ error: 'Lead not found' });
+  const dup = _leadDupMap(req.orgId).get(lead.id);
+  lead.dup_id = dup ? lead.id : null;
+  lead.dup_other_id = dup ? dup.other_id : null;
+  lead.dup_other_type = dup ? dup.other_type : null;
+  lead.dup_reason = dup ? dup.reason : null;
   const followups = all('SELECT lf.*, u.full_name as done_by_name FROM lead_followups lf LEFT JOIN users u ON u.id=lf.done_by WHERE lf.lead_id=? ORDER BY lf.created_at DESC', [req.params.id]);
   res.json({ ...lead, followups });
 });

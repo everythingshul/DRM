@@ -157,6 +157,14 @@ function _tz() {
   if (window._orgTz) return window._orgTz;
   try { return JSON.parse(DRM.org?.settings||'{}').timezone || 'America/New_York'; } catch { return 'America/New_York'; }
 }
+// "Today" as a YYYY-MM-DD string in the org's timezone — for comparing against date-only
+// fields like next_followup_date. Never use `new Date(dateOnlyString)` for this: a bare
+// "YYYY-MM-DD" is parsed as UTC midnight, so comparing it against `new Date()` (or against
+// UTC "today") marks anything due today as overdue for any org west of UTC.
+function _todayInTz() {
+  try { return new Intl.DateTimeFormat('en-CA', { timeZone: _tz(), year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date()); }
+  catch { return new Date().toISOString().slice(0,10); }
+}
 function fmtD(d) {
   if (!d) return '—';
   try {
@@ -438,13 +446,6 @@ async function setOrg(org) {
   try { window._orgTz = JSON.parse(org?.settings||'{}').timezone || window._orgTz; } catch {}
   DRM.org = org; API.orgId = org.id;
   DRM.orgs = _allOrgs;
-  const sel = $('org-select');
-  if (!sel) return;
-  sel.innerHTML = _allOrgs.map(o => `<option value="${o.id}" ${o.id===org.id?'selected':''}>${o.name}</option>`).join('');
-  sel.onchange = async () => {
-    const found = _allOrgs.find(x => x.id === sel.value);
-    if (found) { await setOrg(found); navigateTo(_currentPage); }
-  };
 }
 
 function showApp() {
@@ -593,7 +594,7 @@ async function renderDashboard(el) {
 // ── Donors ────────────────────────────────────────────────────────────────────
 const Donors = {
   donors:[], total:0, page:1, perPage:25,
-  search:'', hood:'', label:'', autopay:'',
+  search:'', hood:'', label:'', autopay:'', duplicatesOnly:false,
   sortBy:'last_name', sortDir:'asc', selected:new Set(),
   hoods:[], labelList:[],
 
@@ -623,6 +624,7 @@ const Donors = {
         <select id="d-hood"><option value="">All Neighborhoods</option></select>
         <select id="d-label"><option value="">All Labels</option></select>
         <select id="d-ap"><option value="">All AutoPay</option><option value="1">On</option><option value="0">Off</option></select>
+        <select id="d-dup"><option value="">All Donors</option><option value="1">⚠ Duplicates Only</option></select>
       </div>
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-top:6px">
         <div class="bg">
@@ -676,6 +678,7 @@ const Donors = {
     if (this.hood) p.set('neighborhood', this.hood);
     if (this.label) p.set('label', this.label);
     if (this.autopay !== '') p.set('autopay', this.autopay);
+    if (this.duplicatesOnly) p.set('duplicates_only', '1');
     try {
       const res = await API.get(API.o.donors() + '?' + p);
       this.donors = res.donors || []; this.total = res.total || 0;
@@ -703,7 +706,7 @@ const Donors = {
           <div>
             <div style="font-weight:600;font-size:13px">${d.first_name} ${d.last_name}</div>
             ${d.donor_number?`<div style="font-size:10px;color:var(--gray-4);font-family:monospace">#${d.donor_number}</div>`:''}
-            ${d.dup_id?`<button class="pill" style="font-size:9px;background:#fef3c7;color:#b45309;border:1px solid #f59e0b;cursor:pointer" onclick="event.stopPropagation();DonorDetail.open('${d.dup_other_id}')" title="Open linked duplicate">⚠ DUPLICATE ↗</button>`:''}
+            ${d.dup_id?`<button class="pill" style="font-size:9px;background:#fef3c7;color:#b45309;border:1px solid #f59e0b;cursor:pointer" onclick="event.stopPropagation();_openDupEntity('${d.dup_other_type}','${d.dup_other_id}')" title="Open linked duplicate">⚠ DUPLICATE ↗</button>`:''}
             ${lbls.length ? `<div class="bg" style="gap:3px;margin-top:2px;flex-wrap:wrap">${lbls.map(l=>`<span class="pill pill-blue" style="font-size:10px">${l}</span>`).join('')}</div>` : ''}
             ${d.needs_verification ? '<div style="font-size:10px;color:var(--amber);font-weight:600">⚠ Verify</div>' : ''}
           </div>
@@ -738,6 +741,7 @@ const Donors = {
     $('d-hood')?.addEventListener('change', e => { Donors.hood=e.target.value; Donors.page=1; Donors.load(); });
     $('d-label')?.addEventListener('change', e => { Donors.label=e.target.value; Donors.page=1; Donors.load(); });
     $('d-ap')?.addEventListener('change', e => { Donors.autopay=e.target.value; Donors.page=1; Donors.load(); });
+    $('d-dup')?.addEventListener('change', e => { Donors.duplicatesOnly=e.target.value==='1'; Donors.page=1; Donors.load(); });
     $('d-pp')?.addEventListener('change', e => { Donors.perPage=parseInt(e.target.value); Donors.page=1; Donors.load(); });
   },
   toggleAll(c) { document.querySelectorAll('#d-tbody input[type=checkbox]').forEach(cb => { cb.checked=c; if(c)Donors.selected.add(cb.value); else Donors.selected.delete(cb.value); }); Donors.updateBulk(); },
@@ -963,7 +967,7 @@ const DonorDetail = {
       <div class="donor-detail-hdr">
         <div class="dd-av">${inits(donor.first_name, donor.last_name)}</div>
         <div style="flex:1">
-          <div style="font-size:19px;font-weight:700">${donor.title?donor.title+' ':''}${donor.first_name} ${donor.last_name} ${donor.donor_number?`<span style=\"font-size:12px;color:var(--gray-4);font-family:monospace\">#${donor.donor_number}</span>`:''} ${donor.dup_id?`<button class=\"pill\" style=\"font-size:10px;background:#fef3c7;color:#b45309;border:1px solid #f59e0b;cursor:pointer;vertical-align:middle\" onclick=\"DonorDetail.open('${donor.dup_other_id}')\">⚠ DUPLICATE — view other ↗</button>`:''}</div>
+          <div style="font-size:19px;font-weight:700">${donor.title?donor.title+' ':''}${donor.first_name} ${donor.last_name} ${donor.donor_number?`<span style=\"font-size:12px;color:var(--gray-4);font-family:monospace\">#${donor.donor_number}</span>`:''} ${donor.dup_id?`<button class=\"pill\" style=\"font-size:10px;background:#fef3c7;color:#b45309;border:1px solid #f59e0b;cursor:pointer;vertical-align:middle\" onclick=\"_openDupEntity('${donor.dup_other_type}','${donor.dup_other_id}')\">⚠ DUPLICATE — view other ↗</button>`:''}</div>
           ${donor.hebrew_full_name?`<div style="font-family:var(--font-he);direction:rtl;text-align:left;opacity:.85;font-size:14px">${donor.hebrew_title||''} ${donor.hebrew_full_name}</div>`:''}
           <div style="font-size:12px;opacity:.7;margin-top:3px">${age(donor.months_old)} · ${donor.email||''} ${donor.cell?'· '+donor.cell:''} ${donor.neighborhood_name?'· '+donor.neighborhood_name:''}</div>
           <div class="bg" style="gap:4px;margin-top:5px;flex-wrap:wrap">${lbls.map(l=>`<span class="pill pill-blue" style="font-size:10px">${l}</span>`).join('')}${donor.needs_verification?'<span class="pill pill-amber" style="font-size:10px">⚠ Verify</span>':''}</div>
@@ -4835,6 +4839,10 @@ async function renderLeads(el) {
             <option value="">All Labels</option>
             ${leadLabelOptions.map(l=>`<option value="${l}">${l}</option>`).join('')}
           </select>
+          <select id="leads-dup" onchange="_leadsFilter()">
+            <option value="">All Leads</option>
+            <option value="1">⚠ Duplicates Only</option>
+          </select>
         </div>
       </div>
       <div id="leads-list"></div>`;
@@ -4847,11 +4855,13 @@ async function _loadLeads() {
   const status = val('leads-status')||'';
   const assigned = val('leads-assigned')||'';
   const category = val('leads-category')||'';
+  const dupOnly = val('leads-dup')||'';
   const p = new URLSearchParams();
   if (q) p.set('q',q);
   if (status) p.set('status',status);
   if (assigned) p.set('assigned_to',assigned);
   if (category) p.set('category',category);
+  if (dupOnly) p.set('duplicates_only',dupOnly);
 
   try {
     _leadsData = await API.get(`/api/orgs/${API.orgId}/leads?${p}`);
@@ -4885,12 +4895,13 @@ function _renderLeadsList() {
       const cat = _leadCategories.find(c=>c.name===l.category);
       const leadLbls = (() => { try { return JSON.parse(l.labels||'[]'); } catch { return []; } })();
       const nextFu = l.next_followup ? fmtD(l.next_followup) : '—';
-      const isOverdue = l.next_followup && new Date(l.next_followup) < new Date();
+      const isOverdue = l.next_followup && l.next_followup < _todayInTz();
       return `<tr>
         <td><input type="checkbox" value="${l.id}" onchange="_leadsToggleOne('${l.id}',this.checked)"></td>
         <td><div style="font-weight:600;font-size:13px">${name}</div>
           ${l.donor_number?`<div style="font-size:10px;color:var(--gray-4);font-family:monospace">#${l.donor_number}</div>`:''}
           ${l.hebrew_full_name?`<div style="font-family:var(--font-he);font-size:11px;color:var(--gray-5)">${l.hebrew_full_name}</div>`:''}
+          ${l.dup_id?`<button class="pill" style="font-size:9px;background:#fef3c7;color:#b45309;border:1px solid #f59e0b;cursor:pointer" onclick="event.stopPropagation();_openDupEntity('${l.dup_other_type}','${l.dup_other_id}')" title="Open linked duplicate">⚠ DUPLICATE ↗</button>`:''}
         </td>
         <td style="font-size:12px">${l.cell||l.email||'—'}</td>
         <td>${cat?`<span class="pill" style="background:${cat.color}20;color:${cat.color};font-size:10px">${cat.name}</span>`:(l.category||'—')}</td>
@@ -4923,6 +4934,7 @@ async function _leadView(id) {
     const lead = await API.get(`/api/orgs/${API.orgId}/leads/${id}`);
     const cat = _leadCategories.find(c=>c.name===lead.category);
     Modal.open(`Lead: ${[lead.title,lead.first_name,lead.last_name].filter(Boolean).join(' ')||'Unnamed'}`, `
+      ${lead.dup_id?`<div style="margin-bottom:12px"><button class="pill" style="font-size:10px;background:#fef3c7;color:#b45309;border:1px solid #f59e0b;cursor:pointer" onclick="_openDupEntity('${lead.dup_other_type}','${lead.dup_other_id}')">⚠ DUPLICATE — view other ↗</button></div>`:''}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
         <div>
           <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;margin-bottom:6px">Contact Info</div>
@@ -5906,6 +5918,7 @@ async function renderScheduledFollowups(el) {
   el.innerHTML = '<div class="spinner"></div>';
   try {
     const followups = await API.get(`/api/orgs/${API.orgId}/leads/followups/scheduled`);
+    const todayStr = _todayInTz();
     el.innerHTML = `
       <div class="ph">
         <div><div class="ph-title">Scheduled Follow-ups</div>
@@ -5918,8 +5931,8 @@ async function renderScheduledFollowups(el) {
           <th>Lead</th><th>Follow-up Date</th><th>Notes</th><th>Assigned To</th><th>Fundraiser</th><th></th>
         </tr></thead>
         <tbody>${followups.map(f => {
-          const isOverdue = new Date(f.next_followup_date) < new Date();
-          const isToday   = f.next_followup_date === new Date().toISOString().slice(0,10);
+          const isOverdue = f.next_followup_date < todayStr;
+          const isToday   = f.next_followup_date === todayStr;
           return `<tr style="${isOverdue?'background:#fef2f2':isToday?'background:#fefce8':''}">
             <td>
               <div style="font-weight:600;font-size:13px">${f.lead_name||'Unknown Lead'}</div>
@@ -6104,7 +6117,16 @@ async function _donLabelSave(donId) {
   } catch(e) { toast(e.message,'err'); }
 }
 
-// ── Duplicate flags ───────────────────────────────────────────────────────────
+// ── Duplicate flags (computed live, across donors + leads) ─────────────────────
+function _openDupEntity(type, id) {
+  if (type === 'lead') _leadView(id);
+  else DonorDetail.open(id);
+}
+function _dupPill(type) {
+  return type === 'lead'
+    ? '<span class="pill" style="font-size:9px;background:#e0e7ff;color:#4338ca;margin-left:4px">Lead</span>'
+    : '<span class="pill" style="font-size:9px;background:#dbeafe;color:#1d4ed8;margin-left:4px">Donor</span>';
+}
 async function _loadDuplicateFlags(statusFilter) {
   statusFilter = statusFilter || window._dupFilter || 'pending';
   window._dupFilter = statusFilter;
@@ -6120,46 +6142,67 @@ async function _loadDuplicateFlags(statusFilter) {
     wrap.id = 'dup-flags-section';
     wrap.innerHTML = `
       <div class="ph" style="margin-top:24px">
-        <div><div class="ph-title" style="color:var(--red)">⚠ Duplicate Donors</div>
-          <div class="ph-sub">Donors flagged as possible duplicates. Resolve each pair.</div>
+        <div><div class="ph-title" style="color:var(--red)">⚠ Duplicates (Donors + Leads)</div>
+          <div class="ph-sub">Checked in real time — resolving one side clears the flag automatically.</div>
         </div>
         <select id="dup-status-filter" style="width:auto" onchange="_loadDuplicateFlags(this.value)">
           <option value="pending" ${statusFilter==='pending'?'selected':''}>Pending</option>
-          <option value="resolved_separate" ${statusFilter==='resolved_separate'?'selected':''}>Resolved — Kept Both</option>
-          <option value="merged" ${statusFilter==='merged'?'selected':''}>Merged</option>
+          <option value="dismissed" ${statusFilter==='dismissed'?'selected':''}>Dismissed — Kept Both</option>
           <option value="all" ${statusFilter==='all'?'selected':''}>All</option>
         </select>
       </div>
-      ${!dups.length ? `<div class="card"><div class="empty"><h3>No ${statusFilter==='all'?'':statusFilter.replace('_',' ')} duplicates</h3></div></div>` : `
+      ${!dups.length ? `<div class="card"><div class="empty"><h3>No ${statusFilter==='all'?'':statusFilter} duplicates</h3></div></div>` : `
       <div class="card" style="padding:0;overflow:hidden"><div class="tw"><table>
-        <thead><tr><th>Donor A</th><th>Donor B</th><th>Reason</th><th>Status</th><th></th></tr></thead>
-        <tbody>${dups.map(d=>`<tr>
-          <td><div style="font-weight:600;font-size:13px">#${d.number_a||'?'} ${d.name_a}</div><div style="font-size:11px;color:var(--gray-5)">${d.email_a||d.cell_a||''}</div></td>
-          <td><div style="font-weight:600;font-size:13px">#${d.number_b||'?'} ${d.name_b}</div><div style="font-size:11px;color:var(--gray-5)">${d.email_b||d.cell_b||''}</div></td>
+        <thead><tr><th>Entry A</th><th>Entry B</th><th>Reason</th><th></th></tr></thead>
+        <tbody>${dups.map(d=>{
+          const argsA = `'${d.entity_a.type}','${d.entity_a.id}'`, argsB = `'${d.entity_b.type}','${d.entity_b.id}'`;
+          const both_donors = d.entity_a.type==='donor' && d.entity_b.type==='donor';
+          return `<tr>
+          <td><div style="font-weight:600;font-size:13px">${d.entity_a.number?'#'+d.entity_a.number+' ':''}${d.entity_a.name}${_dupPill(d.entity_a.type)}</div><div style="font-size:11px;color:var(--gray-5)">${d.entity_a.email||d.entity_a.cell||''}</div></td>
+          <td><div style="font-weight:600;font-size:13px">${d.entity_b.number?'#'+d.entity_b.number+' ':''}${d.entity_b.name}${_dupPill(d.entity_b.type)}</div><div style="font-size:11px;color:var(--gray-5)">${d.entity_b.email||d.entity_b.cell||''}</div></td>
           <td style="font-size:11px;color:var(--gray-6)">${d.reason||'—'}</td>
-          <td><span class="pill" style="font-size:10px;background:#fef3c7;color:#b45309">${d.status}</span></td>
           <td><div class="actions">
-            <button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${d.donor_id_a}')">View A</button>
-            <button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${d.donor_id_b}')">View B</button>
-            ${d.status==='pending' ? `
-              <button class="btn btn-green btn-sm" onclick="_resolveDup('${d.id}','keep_both')">Keep Both</button>
-              <button class="btn btn-ghost btn-sm" onclick="_resolveDup('${d.id}','merge_into_a')">Merge→A</button>
-              <button class="btn btn-ghost btn-sm" onclick="_resolveDup('${d.id}','merge_into_b')">Merge→B</button>
-            ` : ''}
+            <button class="btn btn-blue btn-sm" onclick="_openDupEntity(${argsA})">View A</button>
+            <button class="btn btn-blue btn-sm" onclick="_openDupEntity(${argsB})">View B</button>
+            ${!d.dismissed ? `
+              <button class="btn btn-green btn-sm" onclick="_dismissDup(${argsA},${argsB})">Keep Both</button>
+              ${both_donors ? `
+                <button class="btn btn-ghost btn-sm" onclick="_mergeDup('${d.entity_a.id}','${d.entity_b.id}')">Merge→A</button>
+                <button class="btn btn-ghost btn-sm" onclick="_mergeDup('${d.entity_b.id}','${d.entity_a.id}')">Merge→B</button>
+              ` : ''}
+            ` : `<button class="btn btn-ghost btn-sm" onclick="_undismissDup(${argsA},${argsB})">Un-dismiss</button>`}
           </div></td>
-        </tr>`).join('')}</tbody>
+        </tr>`;
+        }).join('')}</tbody>
       </table></div></div>`}`;
     pg.insertBefore(wrap, pg.firstChild);
   } catch {}
 }
 
-async function _resolveDup(dupId, action) {
+async function _dismissDup(aType, aId, bType, bId) {
   try {
-    await API.post(`/api/orgs/${API.orgId}/donors/duplicates/${dupId}/resolve`, { action });
-    toast('Resolved ✓');
+    await API.post(`/api/orgs/${API.orgId}/donors/duplicates/dismiss`, { entity_a_type: aType, entity_a_id: aId, entity_b_type: bType, entity_b_id: bId });
+    toast('Kept both ✓');
     _loadDuplicateFlags();
     loadBadges();
   } catch(e) { toast(e.message,'err'); }
+}
+async function _undismissDup(aType, aId, bType, bId) {
+  try {
+    await API.post(`/api/orgs/${API.orgId}/donors/duplicates/undismiss`, { entity_a_type: aType, entity_a_id: aId, entity_b_type: bType, entity_b_id: bId });
+    toast('Un-dismissed ✓');
+    _loadDuplicateFlags();
+  } catch(e) { toast(e.message,'err'); }
+}
+async function _mergeDup(keepId, dropId) {
+  confirmDlg('Merge these two donors? Donations and payment methods move to the kept donor, and the other donor is deleted. This cannot be undone.', async () => {
+    try {
+      await API.post(`/api/orgs/${API.orgId}/donors/duplicates/merge`, { keep_id: keepId, drop_id: dropId });
+      toast('Merged ✓');
+      _loadDuplicateFlags();
+      loadBadges();
+    } catch(e) { toast(e.message,'err'); }
+  });
 }
 
 
@@ -6238,9 +6281,6 @@ function _leadsExport() {
 // ── Adjust chrome when this page is loaded inside a super-admin access overlay ─
 function _applyEmbeddedOverlayChrome() {
   try {
-    // Hide the org switcher — this window is scoped to viewing one specific org
-    const orgSelect = $('org-select');
-    if (orgSelect) orgSelect.closest('.sb-org')?.style && (orgSelect.closest('.sb-org').style.display = 'none');
     // Add a small persistent banner so it's unmistakable this is super-admin view,
     // even if someone scrolls past the parent overlay's own header bar.
     const banner = document.createElement('div');

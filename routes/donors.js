@@ -4,13 +4,32 @@ const router = express.Router({ mergeParams: true });
 const { v4: uuidv4 } = require('uuid');
 const { all, get, run } = require('../db/schema');
 const { requireAuth, requireOrg, requireOrgAdmin } = require('../middleware/auth');
+const { findDuplicateClusters } = require('../utils/duplicates');
 
 // Apply auth + org middleware
 router.use(requireAuth, requireOrg);
 
+// Build a donor.id -> { other, reason } map from the live duplicate clusters, for
+// annotating list/detail rows with the "⚠ DUPLICATE" badge. Only non-dismissed pairs.
+function _donorDupMap(orgId) {
+  const clusters = findDuplicateClusters(orgId);
+  const dismissals = all('SELECT * FROM duplicate_dismissals WHERE org_id=?', [orgId]);
+  const dismissedKeys = new Set(dismissals.map(d => `${d.entity_a_type}:${d.entity_a_id}|${d.entity_b_type}:${d.entity_b_id}`));
+  const map = new Map();
+  for (const c of clusters) {
+    const key = `${c.a.type}:${c.a.id}|${c.b.type}:${c.b.id}`;
+    if (dismissedKeys.has(key)) continue;
+    if (c.a.type === 'donor' && !map.has(c.a.id)) map.set(c.a.id, { other_id: c.b.id, other_type: c.b.type, reason: c.reasons.join(', ') });
+    if (c.b.type === 'donor' && !map.has(c.b.id)) map.set(c.b.id, { other_id: c.a.id, other_type: c.a.type, reason: c.reasons.join(', ') });
+  }
+  return map;
+}
+
 // List donors
 router.get('/', (req, res) => {
-  const { search, neighborhood, label, kvitel_enabled, autopay, page = 1, limit = 50 } = req.query;
+  const { search, neighborhood, label, kvitel_enabled, autopay, duplicates_only, page = 1, limit = 50 } = req.query;
+  const dupMap = (duplicates_only === '1' || duplicates_only === 'true') ? _donorDupMap(req.orgId) : null;
+
   let sql = `
     SELECT d.*,
       n.name_he as neighborhood_name,
@@ -19,9 +38,7 @@ router.get('/', (req, res) => {
       (SELECT COALESCE(SUM(amount),0) FROM donations WHERE donor_id = d.id AND status = 'completed') as total_amount,
       (SELECT MAX(donation_date) FROM donations WHERE donor_id = d.id AND status = 'completed') as last_donation_date,
       CASE WHEN d.info_verified_at IS NULL OR julianday('now') - julianday(d.info_verified_at) > 180
-           THEN 1 ELSE 0 END as needs_verification,
-      (SELECT dd.id FROM donor_duplicates dd WHERE dd.status='pending' AND (dd.donor_id_a=d.id OR dd.donor_id_b=d.id) LIMIT 1) as dup_id,
-      (SELECT CASE WHEN dd.donor_id_a=d.id THEN dd.donor_id_b ELSE dd.donor_id_a END FROM donor_duplicates dd WHERE dd.status='pending' AND (dd.donor_id_a=d.id OR dd.donor_id_b=d.id) LIMIT 1) as dup_other_id
+           THEN 1 ELSE 0 END as needs_verification
     FROM donors d
     LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
     WHERE d.org_id = ? AND d.removed_at IS NULL
@@ -36,6 +53,11 @@ router.get('/', (req, res) => {
   if (neighborhood) { sql += ' AND d.neighborhood_id = ?'; params.push(neighborhood); }
   if (kvitel_enabled !== undefined) { sql += ' AND d.kvitel_enabled = ?'; params.push(kvitel_enabled); }
   if (autopay !== undefined) { sql += ' AND d.autopay_enabled = ?'; params.push(autopay); }
+  if (dupMap) {
+    const ids = [...dupMap.keys()];
+    sql += ids.length ? ` AND d.id IN (${ids.map(()=>'?').join(',')})` : ' AND 1=0';
+    params.push(...ids);
+  }
 
   sql += ' ORDER BY d.last_name, d.first_name';
 
@@ -54,6 +76,16 @@ router.get('/', (req, res) => {
     filtered = donors.filter(d => {
       try { const labels = JSON.parse(d.labels || '[]'); return labels.includes(label); } catch { return false; }
     });
+  }
+
+  // Annotate with live duplicate badges (compute once if not already, e.g. when duplicates_only wasn't set)
+  const badgeMap = dupMap || _donorDupMap(req.orgId);
+  for (const d of filtered) {
+    const dup = badgeMap.get(d.id);
+    d.dup_id = dup ? d.id : null;
+    d.dup_other_id = dup ? dup.other_id : null;
+    d.dup_other_type = dup ? dup.other_type : null;
+    d.dup_reason = dup ? dup.reason : null;
   }
 
   res.json({ donors: filtered, total, page: parseInt(page), limit: parseInt(limit) });
@@ -97,23 +129,70 @@ router.get('/removed', (req, res) => {
   res.json(donors);
 });
 
-// ── Duplicate flags — must be before /:id (was previously shadowed by it) ──────
+// ── Duplicate flags (computed live, across donors + leads) — must be before /:id ────
+// See utils/duplicates.js. Status here means: 'pending' (default) = not dismissed,
+// 'dismissed' = explicitly marked "not a duplicate", 'all' = both.
 router.get('/duplicates', (req, res) => {
   const { status } = req.query;
-  let where = 'dd.org_id=?', params = [req.orgId];
-  if (!status || status === 'pending') { where += " AND dd.status='pending'"; }
-  else if (status !== 'all')            { where += ' AND dd.status=?'; params.push(status); }
-  const dups = all(`
-    SELECT dd.*,
-      da.first_name||' '||COALESCE(da.last_name,'') as name_a, da.email as email_a, da.cell as cell_a, da.donor_number as number_a,
-      db.first_name||' '||COALESCE(db.last_name,'') as name_b, db.email as email_b, db.cell as cell_b, db.donor_number as number_b
-    FROM donor_duplicates dd
-    JOIN donors da ON da.id=dd.donor_id_a
-    JOIN donors db ON db.id=dd.donor_id_b
-    WHERE ${where}
-    ORDER BY dd.created_at DESC
-  `, params);
-  res.json(dups);
+  const clusters = findDuplicateClusters(req.orgId);
+  const dismissals = all('SELECT * FROM duplicate_dismissals WHERE org_id=?', [req.orgId]);
+  const dismissedKeys = new Set(dismissals.map(d => `${d.entity_a_type}:${d.entity_a_id}|${d.entity_b_type}:${d.entity_b_id}`));
+
+  const entityInfo = e => ({
+    type: e.type, id: e.id,
+    name: `${e.first_name||''} ${e.last_name||''}`.trim() || '(no name)',
+    email: e.email||null, cell: e.cell||null, number: e.donor_number||null
+  });
+
+  let result = clusters.map(c => {
+    const key = `${c.a.type}:${c.a.id}|${c.b.type}:${c.b.id}`;
+    return { key, reason: c.reasons.join(', '), dismissed: dismissedKeys.has(key), entity_a: entityInfo(c.a), entity_b: entityInfo(c.b) };
+  });
+
+  if (status === 'dismissed')      result = result.filter(c => c.dismissed);
+  else if (status !== 'all')       result = result.filter(c => !c.dismissed); // default: pending
+
+  res.json(result);
+});
+
+// "Keep both" — remembers this pair is not actually a duplicate so it stops resurfacing.
+router.post('/duplicates/dismiss', requireOrgAdmin, (req, res) => {
+  const { entity_a_type, entity_a_id, entity_b_type, entity_b_id } = req.body;
+  if (!entity_a_type || !entity_a_id || !entity_b_type || !entity_b_id) return res.status(400).json({ error: 'Missing entity info' });
+  const ka = `${entity_a_type}:${entity_a_id}`, kb = `${entity_b_type}:${entity_b_id}`;
+  const [aType, aId, bType, bId] = ka < kb
+    ? [entity_a_type, entity_a_id, entity_b_type, entity_b_id]
+    : [entity_b_type, entity_b_id, entity_a_type, entity_a_id];
+  run(`INSERT OR IGNORE INTO duplicate_dismissals (id,org_id,entity_a_type,entity_a_id,entity_b_type,entity_b_id,dismissed_by) VALUES (?,?,?,?,?,?,?)`,
+    [uuidv4(), req.orgId, aType, aId, bType, bId, req.user.id]);
+  res.json({ success: true });
+});
+
+router.post('/duplicates/undismiss', requireOrgAdmin, (req, res) => {
+  const { entity_a_type, entity_a_id, entity_b_type, entity_b_id } = req.body;
+  if (!entity_a_type || !entity_a_id || !entity_b_type || !entity_b_id) return res.status(400).json({ error: 'Missing entity info' });
+  const ka = `${entity_a_type}:${entity_a_id}`, kb = `${entity_b_type}:${entity_b_id}`;
+  const [aType, aId, bType, bId] = ka < kb
+    ? [entity_a_type, entity_a_id, entity_b_type, entity_b_id]
+    : [entity_b_type, entity_b_id, entity_a_type, entity_a_id];
+  run(`DELETE FROM duplicate_dismissals WHERE org_id=? AND entity_a_type=? AND entity_a_id=? AND entity_b_type=? AND entity_b_id=?`,
+    [req.orgId, aType, aId, bType, bId]);
+  res.json({ success: true });
+});
+
+// Merge is only meaningful between two donors — moves donations/payment methods onto the
+// kept donor and deletes the other. For a donor/lead pair, resolve manually (e.g. convert
+// or delete the lead) and dismiss the pair instead.
+router.post('/duplicates/merge', requireOrgAdmin, (req, res) => {
+  const { keep_id, drop_id } = req.body;
+  if (!keep_id || !drop_id || keep_id === drop_id) return res.status(400).json({ error: 'Invalid merge request' });
+  const keep = get('SELECT id FROM donors WHERE id=? AND org_id=?', [keep_id, req.orgId]);
+  const drop = get('SELECT id FROM donors WHERE id=? AND org_id=?', [drop_id, req.orgId]);
+  if (!keep || !drop) return res.status(404).json({ error: 'Donor not found' });
+  run('UPDATE donations SET donor_id=? WHERE donor_id=?', [keep_id, drop_id]);
+  run('UPDATE payment_methods SET donor_id=? WHERE donor_id=?', [keep_id, drop_id]);
+  run('DELETE FROM donors WHERE id=?', [drop_id]);
+  res.json({ success: true });
 });
 
 router.get('/:id', (req, res) => {
@@ -125,15 +204,19 @@ router.get('/:id', (req, res) => {
       (SELECT COALESCE(SUM(amount),0) FROM donations WHERE donor_id = d.id AND status = 'completed') as total_amount,
       (SELECT MAX(donation_date) FROM donations WHERE donor_id = d.id AND status = 'completed') as last_donation_date,
       CASE WHEN d.info_verified_at IS NULL OR julianday('now') - julianday(d.info_verified_at) > 180
-           THEN 1 ELSE 0 END as needs_verification,
-      (SELECT dd.id FROM donor_duplicates dd WHERE dd.status='pending' AND (dd.donor_id_a=d.id OR dd.donor_id_b=d.id) LIMIT 1) as dup_id,
-      (SELECT CASE WHEN dd.donor_id_a=d.id THEN dd.donor_id_b ELSE dd.donor_id_a END FROM donor_duplicates dd WHERE dd.status='pending' AND (dd.donor_id_a=d.id OR dd.donor_id_b=d.id) LIMIT 1) as dup_other_id
+           THEN 1 ELSE 0 END as needs_verification
     FROM donors d
     LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
     WHERE d.id = ? AND d.org_id = ?
   `, [req.params.id, req.orgId]);
 
   if (!donor) return res.status(404).json({ error: 'Donor not found' });
+
+  const dup = _donorDupMap(req.orgId).get(donor.id);
+  donor.dup_id = dup ? donor.id : null;
+  donor.dup_other_id = dup ? dup.other_id : null;
+  donor.dup_other_type = dup ? dup.other_type : null;
+  donor.dup_reason = dup ? dup.reason : null;
 
   const paymentMethods = all('SELECT * FROM payment_methods WHERE donor_id = ? ORDER BY is_default DESC, created_at DESC', [req.params.id]);
   const donations = all(`
@@ -185,35 +268,8 @@ router.post('/', (req, res) => {
 
     const donor = get('SELECT * FROM donors WHERE id = ?', [id]);
 
-    // ── Duplicate detection — same rules as bulk import ─────────────────────────
-    // Strong signals only: exact full name, Hebrew name, email, or full address match.
-    // Phone number is deliberately NOT used as a signal — shared household phones
-    // (spouses, siblings, parent/child living together) are extremely common and
-    // legitimate, and flagging on phone produced false positives between real,
-    // distinct donors who simply share a family landline.
-    try {
-      const others = all('SELECT id,first_name,last_name,email,hebrew_full_name,street,apt,zip FROM donors WHERE org_id=? AND id!=? AND removed_at IS NULL', [req.orgId, id]);
-      let matchId = null, reasons = [];
-      const fn2 = (first_name||'').toLowerCase().trim(), ln2 = (last_name||'').toLowerCase().trim();
-      const hebrew2 = (hebrew_full_name||'').toLowerCase().trim();
-      const email2 = (email||'').toLowerCase().trim();
-      const addrKey2 = street && zip ? `${street.toLowerCase().trim()}|${(apt||'').toLowerCase().trim()}|${zip.trim()}` : null;
-
-      for (const o of others) {
-        const oFn = (o.first_name||'').toLowerCase().trim(), oLn = (o.last_name||'').toLowerCase().trim();
-        if (fn2 && ln2 && oFn===fn2 && oLn===ln2)                             { reasons.push('Full name match'); matchId = matchId||o.id; }
-        if (hebrew2 && o.hebrew_full_name && o.hebrew_full_name.toLowerCase().trim()===hebrew2) { reasons.push('Hebrew name match'); matchId = matchId||o.id; }
-        if (email2 && o.email && o.email.toLowerCase().trim()===email2)      { reasons.push('Same email'); matchId = matchId||o.id; }
-        if (addrKey2 && o.street && o.zip) {
-          const oAddrKey = `${o.street.toLowerCase().trim()}|${(o.apt||'').toLowerCase().trim()}|${o.zip.trim()}`;
-          if (oAddrKey === addrKey2) { reasons.push('Same address'); matchId = matchId||o.id; }
-        }
-      }
-      if (matchId && reasons.length) {
-        run(`INSERT OR IGNORE INTO donor_duplicates (id,org_id,donor_id_a,donor_id_b,reason) VALUES (?,?,?,?,?)`,
-          [uuidv4(), req.orgId, matchId, id, [...new Set(reasons)].join(', ')]);
-      }
-    } catch(e) { console.error('[donor create] duplicate check error:', e.message); }
+    // Duplicate detection now runs in real time across donors + leads (see
+    // utils/duplicates.js) instead of being computed and stored here at creation time.
 
     // Sync to Sola customer portal (async, don't block response)
     setImmediate(async () => {
@@ -361,33 +417,6 @@ router.post('/:id/move-to-lead', requireOrgAdmin, (req, res) => {
   run('DELETE FROM donors WHERE id=?', [req.params.id]);
 
   res.json({ success: true, lead_id: leadId });
-});
-
-router.post('/duplicates/:id/resolve', requireOrgAdmin, (req, res) => {
-  try {
-    const { action } = req.body;
-    const dup = get('SELECT * FROM donor_duplicates WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
-    if (!dup) return res.status(404).json({ error: 'Not found' });
-
-    if (action === 'keep_both') {
-      run('UPDATE donor_duplicates SET status=?,resolved_by=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?',
-        ['resolved_separate', req.user.id, req.params.id]);
-    } else if (action === 'merge_into_a') {
-      // Move donations from B to A, delete B
-      run('UPDATE donations SET donor_id=? WHERE donor_id=?', [dup.donor_id_a, dup.donor_id_b]);
-      run('UPDATE payment_methods SET donor_id=? WHERE donor_id=?', [dup.donor_id_a, dup.donor_id_b]);
-      run('DELETE FROM donors WHERE id=?', [dup.donor_id_b]);
-      run('UPDATE donor_duplicates SET status=?,resolved_by=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?',
-        ['merged', req.user.id, req.params.id]);
-    } else if (action === 'merge_into_b') {
-      run('UPDATE donations SET donor_id=? WHERE donor_id=?', [dup.donor_id_b, dup.donor_id_a]);
-      run('UPDATE payment_methods SET donor_id=? WHERE donor_id=?', [dup.donor_id_b, dup.donor_id_a]);
-      run('DELETE FROM donors WHERE id=?', [dup.donor_id_a]);
-      run('UPDATE donor_duplicates SET status=?,resolved_by=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?',
-        ['merged', req.user.id, req.params.id]);
-    }
-    res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // --- AUTOPAY CONTROLS ---

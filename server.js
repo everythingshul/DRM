@@ -168,12 +168,11 @@ app.post('/api/orgs/:orgId/import/donors',
         const nameKey = fn && ln ? `${fn.toLowerCase()}|${ln.toLowerCase()}` : null;
         const addrKey = street && zip ? `${street.toLowerCase()}|${apt.toLowerCase()}|${zip}` : null;
         const dupReasons = [];
-        let matchId = null;
 
-        if (nameKey && nameMap.has(nameKey))                   { dupReasons.push('Full name match'); matchId = matchId || nameMap.get(nameKey); }
-        if (hebrew && hebrewMap.has(hebrew.toLowerCase()))      { dupReasons.push('Hebrew name match'); matchId = matchId || hebrewMap.get(hebrew.toLowerCase()); }
-        if (email && emailMap.has(email))                       { dupReasons.push('Same email'); matchId = matchId || emailMap.get(email); }
-        if (addrKey && addrMap.has(addrKey))                    { dupReasons.push('Same address'); matchId = matchId || addrMap.get(addrKey); }
+        if (nameKey && nameMap.has(nameKey))                   dupReasons.push('Full name match');
+        if (hebrew && hebrewMap.has(hebrew.toLowerCase()))      dupReasons.push('Hebrew name match');
+        if (email && emailMap.has(email))                       dupReasons.push('Same email');
+        if (addrKey && addrMap.has(addrKey))                    dupReasons.push('Same address');
 
         try {
           const newId = uuidv4();
@@ -204,14 +203,9 @@ app.post('/api/orgs/:orgId/import/donors',
              (row['Kvitel Names']||row['kvitel']||'').toString().trim()||null
             ]);
 
-          // If flagged as duplicate, create the persistent duplicate-link record
-          if (dupReasons.length && matchId && matchId !== newId) {
-            try {
-              run(`INSERT OR IGNORE INTO donor_duplicates (id,org_id,donor_id_a,donor_id_b,reason) VALUES (?,?,?,?,?)`,
-                [uuidv4(), req.params.orgId, matchId, newId, dupReasons.join(', ')]);
-            } catch {}
-          }
-
+          // This batch-local match is only used for the immediate import summary below —
+          // the actual "is this a duplicate" flag is computed in real time (utils/duplicates.js),
+          // so nothing needs to be persisted here.
           donorIds.push({ id: newId, flagged: dupReasons.length > 0, reasons: dupReasons.join(', ') });
 
           // Add this row into the lookup maps so later rows in the SAME batch also catch duplicates

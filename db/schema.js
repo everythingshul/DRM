@@ -173,7 +173,8 @@ function createTables() {
     CREATE TABLE IF NOT EXISTS scheduled_charges (
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL, donor_id TEXT NOT NULL,
       payment_method_id TEXT NOT NULL, amount REAL NOT NULL,
-      charge_date DATETIME NOT NULL, status TEXT DEFAULT 'pending',
+      scheduled_for DATETIME NOT NULL, status TEXT DEFAULT 'pending',
+      processed_at DATETIME, failure_reason TEXT,
       notes TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS charge_failures (
@@ -465,6 +466,20 @@ function runMigrations() {
     UNIQUE(donor_id_a, donor_id_b)
   )`); saveDb(); } catch(e) {}
   safe("ALTER TABLE donor_duplicates ADD COLUMN reason TEXT");
+  // scheduled_charges: backfill in case an existing table predates these columns
+  safe("ALTER TABLE scheduled_charges ADD COLUMN scheduled_for DATETIME");
+  safe("ALTER TABLE scheduled_charges ADD COLUMN processed_at DATETIME");
+  safe("ALTER TABLE scheduled_charges ADD COLUMN failure_reason TEXT");
+  // Duplicate detection is now computed in real time across donors + leads (see
+  // utils/duplicates.js) instead of stored at creation/import time — this table only
+  // records explicit "these are not duplicates" dismissals so they don't keep resurfacing.
+  try { db.run(`CREATE TABLE IF NOT EXISTS duplicate_dismissals (
+    id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
+    entity_a_type TEXT NOT NULL, entity_a_id TEXT NOT NULL,
+    entity_b_type TEXT NOT NULL, entity_b_id TEXT NOT NULL,
+    dismissed_by TEXT, dismissed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(entity_a_type, entity_a_id, entity_b_type, entity_b_id)
+  )`); saveDb(); } catch(e) {}
   try { db.run(`CREATE TABLE IF NOT EXISTS leads (
     id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
     title TEXT, first_name TEXT, last_name TEXT,
