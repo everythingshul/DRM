@@ -168,7 +168,7 @@ router.get('/export', (req, res) => {
 // ── List leads ────────────────────────────────────────────────────────────────
 router.get('/', (req, res) => {
   const { status, assigned_to, category, q } = req.query;
-  let where = 'l.org_id=?', params = [req.orgId];
+  let where = 'l.org_id=? AND l.removed_at IS NULL', params = [req.orgId];
   if (status)      { where += ' AND l.status=?';      params.push(status); }
   if (assigned_to) { where += ' AND l.assigned_to=?'; params.push(assigned_to); }
   if (category)    { where += ' AND l.category=?';    params.push(category); }
@@ -187,6 +187,17 @@ router.get('/', (req, res) => {
     WHERE ${where}
     ORDER BY l.created_at DESC
   `, params);
+  res.json(leads);
+});
+
+// ── Recently removed leads (30-day restore window) — must be before /:id ───────
+router.get('/removed', (req, res) => {
+  const leads = all(`
+    SELECT id, first_name, last_name, donor_number, email, cell, removed_at
+    FROM leads WHERE org_id=? AND removed_at IS NOT NULL
+      AND julianday('now') - julianday(removed_at) <= 30
+    ORDER BY removed_at DESC
+  `, [req.orgId]);
   res.json(leads);
 });
 
@@ -264,10 +275,21 @@ router.put('/:id', (req, res) => {
   res.json({ success: true, lead: get('SELECT * FROM leads WHERE id=?', [req.params.id]) });
 });
 
-// ── Delete lead ───────────────────────────────────────────────────────────────
+// ── Remove lead — soft delete, restorable for 30 days (mirrors Donors) ─────────
 router.delete('/:id', requireOrgAdmin, (req, res) => {
-  run('DELETE FROM lead_followups WHERE lead_id=?', [req.params.id]);
-  run('DELETE FROM leads WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
+  const existing = get('SELECT id FROM leads WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
+  if (!existing) return res.status(404).json({ error: 'Lead not found' });
+  run('UPDATE leads SET removed_at = CURRENT_TIMESTAMP WHERE id = ?', [req.params.id]);
+  res.json({ success: true });
+});
+
+router.post('/:id/restore', requireOrgAdmin, (req, res) => {
+  const lead = get('SELECT * FROM leads WHERE id=? AND org_id=? AND removed_at IS NOT NULL', [req.params.id, req.orgId]);
+  if (!lead) return res.status(404).json({ error: 'Not found' });
+  if ((Date.now() - new Date(lead.removed_at).getTime()) > 30*24*60*60*1000) {
+    return res.status(400).json({ error: 'The 30-day restore window has passed' });
+  }
+  run('UPDATE leads SET removed_at = NULL WHERE id = ?', [req.params.id]);
   res.json({ success: true });
 });
 
@@ -370,7 +392,7 @@ router.get('/followups/scheduled', (req, res) => {
     FROM leads l
     LEFT JOIN users la ON la.id = l.assigned_to
     WHERE l.org_id=? AND l.next_followup_date IS NOT NULL
-      AND l.status != 'converted'
+      AND l.status != 'converted' AND l.removed_at IS NULL
     ORDER BY l.next_followup_date ASC
   `, [req.orgId]);
   res.json(followups);

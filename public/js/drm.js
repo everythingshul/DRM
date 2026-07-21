@@ -4808,6 +4808,7 @@ async function renderLeads(el) {
           <button class="btn btn-ghost btn-sm" onclick="_showScheduledFollowups()">📅 Follow-up Schedule</button>
           <button class="btn btn-ghost btn-sm" onclick="_leadsImportModal()">&#8593; Import</button>
           <button class="btn btn-ghost btn-sm" onclick="_leadsExport()">&#8595; Export</button>
+          <button class="btn btn-ghost btn-sm" onclick="_leadsShowRemoved()">🗑 Recently Removed</button>
           <button class="btn btn-ghost btn-sm" id="leads-mass-btn" style="display:none" onclick="_leadsMassAction()">⚡ Mass Action</button>
           <button class="btn btn-primary btn-sm" onclick="_leadAdd()">+ Add Lead</button>
         </div>
@@ -4962,7 +4963,7 @@ async function _leadView(id) {
         <button class="btn btn-primary btn-sm" onclick="_leadEdit('${id}')">Edit</button>
         <button class="btn btn-ghost btn-sm" onclick="Modal.close();_leadAddFollowup('${id}')">+ Follow Up</button>
         ${lead.status!=='converted'?`<button class="btn btn-green btn-sm" onclick="Modal.close();_leadConvert('${id}')">Convert to Donor</button>`:''}
-        <button class="btn btn-icon" style="color:var(--red)" onclick="confirmDlg('Delete this lead?',async()=>{await API.del('/api/orgs/'+API.orgId+'/leads/${id}');toast('Deleted');Modal.close();_loadLeads();})">&#10005;</button>
+        <button class="btn btn-icon" style="color:var(--red)" onclick="confirmDlg('Remove this lead? Restorable for 30 days from Recently Removed.',async()=>{await API.del('/api/orgs/'+API.orgId+'/leads/${id}');toast('Removed');Modal.close();_loadLeads();})">&#10005;</button>
       </div>`, {lg:true});
   } catch(e) { toast(e.message,'err'); }
 }
@@ -5797,13 +5798,39 @@ async function _leadsMassUpdate(data) {
 }
 
 async function _leadsMassDelete() {
-  confirmDlg(`Delete ${window._leadsSelected.size} leads?`, async () => {
+  confirmDlg(`Remove ${window._leadsSelected.size} leads? Restorable for 30 days from Recently Removed.`, async () => {
     const ids = [...window._leadsSelected];
     await Promise.all(ids.map(id => API.del(`/api/orgs/${API.orgId}/leads/${id}`).catch(()=>{})));
-    toast(`${ids.length} leads deleted`);
+    toast(`${ids.length} leads removed`);
     window._leadsSelected.clear();
     _loadLeads();
   });
+}
+
+async function _leadsShowRemoved() {
+  try {
+    const removed = await API.get(`/api/orgs/${API.orgId}/leads/removed`);
+    Modal.open('Recently Removed', `
+      <div style="font-size:12px;color:var(--gray-5);margin-bottom:10px">Restorable for 30 days after removal.</div>
+      ${!removed.length ? '<div class="empty"><p>No recently removed leads</p></div>' : removed.map(l => {
+        const daysLeft = 30 - Math.floor((Date.now() - new Date(l.removed_at).getTime()) / 86400000);
+        return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--gray-05);border-radius:6px;margin-bottom:6px">
+          <div>
+            <span style="font-size:13px;font-weight:600">${l.first_name} ${l.last_name}</span>
+            <span style="font-size:11px;color:var(--gray-5);margin-left:6px">Removed ${_timeAgo(l.removed_at)} · ${daysLeft} day${daysLeft!==1?'s':''} left to restore</span>
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="_leadsRestore('${l.id}','${(l.first_name+' '+l.last_name).replace(/'/g,"\\\\'")}')">↩ Restore</button>
+        </div>`;
+      }).join('')}
+      <div class="bg mt"><button class="btn btn-ghost" onclick="Modal.close()">Close</button></div>`, {sm:true});
+  } catch(e) { toast(e.message,'err'); }
+}
+
+async function _leadsRestore(id, name) {
+  try {
+    await API.post(`/api/orgs/${API.orgId}/leads/${id}/restore`, {});
+    toast(`${name} restored ✓`); Modal.close(); _loadLeads();
+  } catch(e) { toast(e.message,'err'); }
 }
 
 // ── Donors mass neighborhood + autopay ───────────────────────────────────────

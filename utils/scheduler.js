@@ -644,7 +644,7 @@ async function processFollowupNotifications() {
       FROM lead_followups lf
       JOIN leads l ON l.id = lf.lead_id
       WHERE l.org_id = ? AND lf.next_followup_date = ? AND lf.notified = 0 AND l.assigned_to IS NOT NULL
-        AND l.next_followup_date = lf.next_followup_date
+        AND l.next_followup_date = lf.next_followup_date AND l.removed_at IS NULL
     `, [org.id, today]);
 
     for (const fu of due) {
