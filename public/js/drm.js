@@ -1723,8 +1723,9 @@ async function renderVerification(el) {
           </table></div>
         </div>` :
         `<div class="card"><div class="empty"><h3>All donors verified!</h3><p>No info checks needed right now.</p></div></div>`}`;
-  // Load unassigned vault cards below the verification list
+  // Load unassigned vault cards and duplicate flags below the verification list
   setTimeout(() => _loadUnassignedCards(el), 100);
+  _loadDuplicateFlags();
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
 function _verRows(donors) {
@@ -4848,8 +4849,6 @@ function _renderLeadsList() {
         <td>
           <div style="display:flex;flex-wrap:wrap;gap:3px;align-items:center;max-width:160px">
             ${leadLbls.map(lb=>`<span class="pill pill-blue" style="font-size:10px">${lb}</span>`).join('')}
-            <button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px"
-              onclick="_leadLabels('${l.id}','${(l.labels||'[]').replace(/'/g,"\\'")}')">${leadLbls.length?'Edit':'+ Label'}</button>
           </div>
         </td>
         <td style="font-size:12px">${l.assigned_name||'<span style="color:var(--gray-4)">Unassigned</span>'}</td>
@@ -4892,7 +4891,6 @@ async function _leadView(id) {
           <div style="font-size:13px;margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
             Labels:
             ${(() => { try { return JSON.parse(lead.labels||'[]'); } catch { return []; } })().map(l=>`<span class="pill pill-blue" style="font-size:11px">${l}</span>`).join('') || '<span style="color:var(--gray-4)">None</span>'}
-            <button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px" onclick="_leadLabels('${id}','${(lead.labels||'[]').replace(/'/g,"\\\\'")}')">+ Label</button>
           </div>
           ${lead.notes?`<div style="font-size:12px;color:var(--gray-6);margin-top:8px">${lead.notes}</div>`:''}
         </div>
@@ -5307,32 +5305,29 @@ async function _superAdminUseApprovedAccess(requestId, orgName) {
   } catch(e) { toast(e.message||'Error','err'); }
 }
 
-// ── Full-screen overlay for viewing another org's data ─────────────────────────
-// Access lasts only as long as this overlay stays open — closing it revokes access
+// ── New tab for viewing another org's data ──────────────────────────────────
+// Access lasts only as long as that tab stays open — closing it revokes access
 // immediately and the org admin must approve a fresh request next time.
 function _openAccessOverlay(orgId, orgName, requestId) {
-  const existing = $('access-overlay'); if (existing) existing.remove();
+  const win = window.open(`/?embedded_org=${orgId}`, `access-${requestId}`);
+  if (!win) { toast('Please allow pop-ups to switch into this organisation','err'); return; }
 
-  const overlay = document.createElement('div');
-  overlay.id = 'access-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:#fff;display:flex;flex-direction:column';
-  overlay.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;background:var(--navy);color:#fff;flex-shrink:0">
-      <div style="display:flex;align-items:center;gap:10px">
-        <span style="font-size:13px;font-weight:700">🔑 Viewing as Super Admin: ${orgName}</span>
-        <span style="font-size:11px;opacity:.75">Access ends when you close this window</span>
-      </div>
-      <button id="access-overlay-close" class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff;border:none">✕ Close &amp; End Access</button>
-    </div>
-    <iframe id="access-overlay-frame" src="/?embedded_org=${orgId}" style="flex:1;border:none;width:100%"></iframe>
-  `;
-  document.body.appendChild(overlay);
+  toast(`Viewing ${orgName} in a new tab — closing it ends your access`);
 
-  // Best-effort: if the whole tab/browser closes instead of using the button,
-  // try to revoke via sendBeacon (fire-and-forget, survives page teardown)
+  const revoke = async () => {
+    clearInterval(poll);
+    try { await API.post(`/api/auth/access-requests/${requestId}/revoke`, {}); } catch {}
+    _loadAllOrgs();
+  };
+
+  // Poll for the tab closing (either the user closes it, or it navigates away)
+  const poll = setInterval(() => {
+    if (win.closed) revoke();
+  }, 1000);
+
+  // Best-effort: if this (parent) tab closes first, revoke via sendBeacon
   const beaconRevoke = () => {
     try {
-      const token = localStorage.getItem('drm_token');
       navigator.sendBeacon(
         `/api/auth/access-requests/${requestId}/revoke`,
         new Blob([JSON.stringify({})], { type: 'application/json' })
@@ -5340,16 +5335,6 @@ function _openAccessOverlay(orgId, orgName, requestId) {
     } catch {}
   };
   window.addEventListener('beforeunload', beaconRevoke, { once: true });
-
-  $('access-overlay-close').addEventListener('click', async () => {
-    confirmDlg('End your access to this organisation now? You will need a new approval to view it again.', async () => {
-      window.removeEventListener('beforeunload', beaconRevoke);
-      try { await API.post(`/api/auth/access-requests/${requestId}/revoke`, {}); } catch {}
-      overlay.remove();
-      toast('Access ended');
-      _loadAllOrgs();
-    });
-  });
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -6054,61 +6039,6 @@ async function _donLabelSave(donId) {
   } catch(e) { toast(e.message,'err'); }
 }
 
-// ── Lead labels — same as donors ─────────────────────────────────────────────
-async function _leadLabels(leadId, currentLabelsJson) {
-  const labels = await API.get(`/api/orgs/${API.orgId}/label-lists`).catch(()=>({}));
-  const leadLabels = labels?.lead_labels || [];
-  let current = [];
-  try { current = JSON.parse(currentLabelsJson||'[]'); } catch {}
-
-  Modal.open('Lead Labels', `
-    <div style="margin-bottom:10px">
-      <div style="font-size:11px;font-weight:700;color:var(--gray-5);margin-bottom:6px">Current Labels</div>
-      <div id="lead-label-current" style="display:flex;flex-wrap:wrap;gap:4px;min-height:24px">
-        ${current.map(l=>`<span class="pill pill-blue" style="font-size:11px">${l}
-          <span onclick="this.parentElement.remove()" style="cursor:pointer;margin-left:3px">×</span>
-        </span>`).join('')}
-      </div>
-    </div>
-    <div style="font-size:11px;font-weight:700;color:var(--gray-5);margin-bottom:6px">Add Label</div>
-    <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px">
-      ${leadLabels.map(l=>`<button type="button" class="btn btn-ghost btn-sm" style="font-size:11px"
-        onclick="_leadLabelAdd('${l.replace(/'/g,"\\\\'")}',this)">${l}</button>`).join('')}
-    </div>
-    <div style="display:flex;gap:6px">
-      <input id="lead-label-custom" placeholder="Custom label…" autocomplete="new-password" style="flex:1;font-size:12px">
-      <button class="btn btn-ghost btn-sm" onclick="
-        const v=val('lead-label-custom')?.trim();
-        if(v){_leadLabelAdd(v,null);$('lead-label-custom').value='';}
-      ">Add</button>
-    </div>
-    <div class="bg mt">
-      <button class="btn btn-primary" onclick="_leadLabelSave('${leadId}')">Save</button>
-      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-    </div>`, {sm:true});
-}
-
-function _leadLabelAdd(label, btn) {
-  const cur = $('lead-label-current');
-  if (!cur) return;
-  const existing = [...cur.querySelectorAll('.pill')].map(c=>c.textContent.replace('×','').trim());
-  if (existing.includes(label)) return;
-  const chip = document.createElement('span');
-  chip.className = 'pill pill-blue';
-  chip.style.fontSize = '11px';
-  chip.innerHTML = `${label} <span onclick="this.parentElement.remove()" style="cursor:pointer;margin-left:3px">×</span>`;
-  cur.appendChild(chip);
-  if (btn) { btn.className = 'btn btn-primary btn-sm'; btn.style.fontSize='11px'; }
-}
-
-async function _leadLabelSave(leadId) {
-  const labels = [...($('lead-label-current')?.querySelectorAll('.pill')||[])].map(c=>c.textContent.replace('×','').trim()).filter(Boolean);
-  try {
-    await API.put(`/api/orgs/${API.orgId}/leads/${leadId}`, { labels });
-    toast('Labels saved ✓'); Modal.close(); _loadLeads();
-  } catch(e) { toast(e.message,'err'); }
-}
-
 // ── Duplicate flags ───────────────────────────────────────────────────────────
 async function _loadDuplicateFlags(statusFilter) {
   statusFilter = statusFilter || window._dupFilter || 'pending';
@@ -6245,13 +6175,12 @@ async function _loadRemovedUsers() {
   const wrap = $('removed-users-section'); if (!wrap) return;
   try {
     const removed = await API.get(`/api/orgs/${API.orgId}/users/removed`);
-    if (!removed.length) { wrap.innerHTML = ''; return; }
     wrap.innerHTML = `
       <div style="border-top:1px solid var(--gray-1);padding-top:12px">
         <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">
           Recently Removed <span style="font-weight:400;text-transform:none">(restorable for 30 days)</span>
         </div>
-        ${removed.map(u => {
+        ${!removed.length ? `<div style="font-size:12px;color:var(--gray-4)">No recently removed users</div>` : removed.map(u => {
           const daysLeft = 30 - Math.floor((Date.now() - new Date(u.removed_at).getTime()) / 86400000);
           return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--gray-05);border-radius:6px;margin-bottom:6px">
             <div>
