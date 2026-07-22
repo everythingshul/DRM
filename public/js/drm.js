@@ -638,6 +638,7 @@ const Donors = {
       <div id="d-bulk" class="bulk-bar">
         <span id="d-bulk-cnt">0 selected</span>
         <button class="btn btn-ghost btn-sm" onclick="Donors.bulkLabel()">+ Label</button>
+        <button class="btn btn-ghost btn-sm" onclick="Donors.bulkRemoveLabel()">− Remove Label</button>
         <button class="btn btn-ghost btn-sm" onclick="Donors.bulkAutopay()">⚡ AutoPay</button>
         <button class="btn btn-ghost btn-sm" onclick="Donors.bulkDelete()">Delete</button>
         <button class="btn btn-ghost btn-sm" onclick="Donors.clearSel()">Clear</button>
@@ -768,6 +769,24 @@ const Donors = {
         <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
       </div>`, {sm:true});
   },
+  async bulkRemoveLabel() {
+    if(!this.selected.size) return;
+    const labels = await API.get(`/api/orgs/${API.orgId}/label-lists`);
+    const donorLabels = (labels?.donor_labels || []);
+    Modal.open(`Remove Label From ${this.selected.size} Donor(s)`, `
+      <div style="margin-bottom:10px">
+        <div style="font-size:12px;color:var(--gray-5);margin-bottom:8px">Select a label to remove from all selected donors:</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px" id="bulk-label-pills">
+          ${donorLabels.map(l=>`<button type="button" class="btn btn-ghost btn-sm" id="blp-${l.replace(/[^a-z0-9]/gi,'_')}"
+            onclick="_bulkLabelSelect('${l.replace(/'/g,"\\'")}',this)">${l}</button>`).join('')}
+        </div>
+        <input type="hidden" id="bulk-label-val" value="">
+      </div>
+      <div class="bg mt">
+        <button class="btn btn-primary" onclick="_bulkLabelRemoveApplyDonors()">Remove Label</button>
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+      </div>`, {sm:true});
+  },
   bulkDelete() { if(!this.selected.size)return; confirmDlg(`Remove ${this.selected.size} donor(s)? They'll be restorable for 30 days from Recently Removed.`,async()=>{for(const id of this.selected)await API.del(API.o.donor(id)).catch(()=>{}); this.selected.clear(); toast('Removed'); Donors.load(); }); },
   async pauseAll() { confirmDlg('Pause AutoPay for all donors?',async()=>{await API.post(`/api/orgs/${API.orgId}/donors/autopay/pause-all`,{}); toast('Paused'); Donors.load();}); },
   async resumeAll() { await API.post(`/api/orgs/${API.orgId}/donors/autopay/resume-all`,{}); toast('Resumed'); this.load(); },
@@ -798,7 +817,10 @@ const Donors = {
       toast(`${name} restored ✓`); Modal.close(); Donors.load();
     } catch(e) { toast(e.message,'err'); }
   },
-  exportXlsx() { API.dl(`/api/orgs/${API.orgId}/reports/donors?format=xlsx`, 'donors.xlsx').catch(e=>toast(e.message||'Unknown error','err')); },
+  exportXlsx() {
+    _exportIncludeRemovedDlg('donor', () => API.dl(`/api/orgs/${API.orgId}/reports/donors?format=xlsx`, 'donors.xlsx').catch(e=>toast(e.message||'Unknown error','err')),
+      () => API.dl(`/api/orgs/${API.orgId}/reports/donors?format=xlsx&include_removed=1`, 'donors.xlsx').catch(e=>toast(e.message||'Unknown error','err')));
+  },
   importXlsx() {
     Modal.open('Import Donors', `
       <div class="alert alert-info" style="font-size:12px;margin-bottom:12px">
@@ -4741,7 +4763,7 @@ async function _bulkLabelApplyDonors() {
     if (!ids.length) { toast('No donors selected','err'); return; }
     // Apply label to each selected donor
     await Promise.all(ids.map(async id => {
-      const donor = await API.get(`/api/orgs/${API.orgId}/donors/${id}`);
+      const { donor } = await API.get(`/api/orgs/${API.orgId}/donors/${id}`);
       const labels = jsonParse(donor.labels||'[]');
       if (!labels.includes(label)) {
         labels.push(label);
@@ -4749,6 +4771,25 @@ async function _bulkLabelApplyDonors() {
       }
     }));
     toast(`Label "${label}" added to ${ids.length} donor(s) ✓`);
+    Modal.close();
+    Donors.load();
+  } catch(e) { toast(e.message||'Error','err'); }
+}
+
+async function _bulkLabelRemoveApplyDonors() {
+  const label = val('bulk-label-val');
+  if (!label) { toast('Select a label','err'); return; }
+  try {
+    const ids = [...(Donors.selected || new Set())];
+    if (!ids.length) { toast('No donors selected','err'); return; }
+    await Promise.all(ids.map(async id => {
+      const { donor } = await API.get(`/api/orgs/${API.orgId}/donors/${id}`);
+      const labels = jsonParse(donor.labels||'[]');
+      if (labels.includes(label)) {
+        await API.put(`/api/orgs/${API.orgId}/donors/${id}`, { labels: labels.filter(l=>l!==label) });
+      }
+    }));
+    toast(`Label "${label}" removed from ${ids.length} donor(s) ✓`);
     Modal.close();
     Donors.load();
   } catch(e) { toast(e.message||'Error','err'); }
@@ -5718,6 +5759,7 @@ function _leadsMassAction() {
       <button class="btn btn-ghost" style="text-align:left" onclick="Modal.close();_leadsMassStatus()">🔄 Set Status</button>
       <button class="btn btn-ghost" style="text-align:left" onclick="Modal.close();_leadsMassAssign()">👤 Assign To</button>
       <button class="btn btn-ghost" style="text-align:left" onclick="Modal.close();_leadsMassLabel()">+ Add Label</button>
+      <button class="btn btn-ghost" style="text-align:left" onclick="Modal.close();_leadsMassRemoveLabel()">− Remove Label</button>
       <hr class="divider">
       <button class="btn btn-ghost" style="text-align:left;color:var(--red)" onclick="Modal.close();_leadsMassDelete()">🗑 Delete Selected</button>
     </div>`, {sm:true});
@@ -5792,6 +5834,42 @@ async function _leadsMassAddLabel() {
       }
     }));
     toast(`Label "${label}" added to ${ids.length} lead(s) ✓`);
+    Modal.close();
+    _loadLeads();
+  } catch(e) { toast(e.message,'err'); }
+}
+
+async function _leadsMassRemoveLabel() {
+  const labels = await API.get(`/api/orgs/${API.orgId}/label-lists`);
+  const leadLabels = (labels?.lead_labels || []);
+  Modal.open('Remove Label From Selected Leads', `
+    <div style="margin-bottom:10px">
+      <div style="font-size:12px;color:var(--gray-5);margin-bottom:8px">Select a label to remove from all selected leads:</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px" id="bulk-label-pills">
+        ${leadLabels.map(l=>`<button type="button" class="btn btn-ghost btn-sm"
+          onclick="_bulkLabelSelect('${l.replace(/'/g,"\\\\'")}',this)">${l}</button>`).join('')}
+      </div>
+      <input type="hidden" id="bulk-label-val" value="">
+    </div>
+    <div class="bg">
+      <button class="btn btn-primary" onclick="_leadsMassRemoveLabelApply()">Remove Label</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+async function _leadsMassRemoveLabelApply() {
+  const label = val('bulk-label-val');
+  if (!label) { toast('Select a label','err'); return; }
+  const ids = [...window._leadsSelected];
+  try {
+    await Promise.all(ids.map(async id => {
+      const lead = _leadsData.find(l=>l.id===id);
+      const labels = (() => { try { return JSON.parse(lead?.labels||'[]'); } catch { return []; } })();
+      if (labels.includes(label)) {
+        await API.put(`/api/orgs/${API.orgId}/leads/${id}`, { labels: labels.filter(l=>l!==label) });
+      }
+    }));
+    toast(`Label "${label}" removed from ${ids.length} lead(s) ✓`);
     Modal.close();
     _loadLeads();
   } catch(e) { toast(e.message,'err'); }
@@ -6275,7 +6353,21 @@ async function _leadsDoImport() {
 }
 
 function _leadsExport() {
-  API.dl(`/api/orgs/${API.orgId}/leads/export`, 'leads-export.xlsx').catch(e=>toast(e.message||'Unknown error','err'));
+  _exportIncludeRemovedDlg('lead', () => API.dl(`/api/orgs/${API.orgId}/leads/export`, 'leads-export.xlsx').catch(e=>toast(e.message||'Unknown error','err')),
+    () => API.dl(`/api/orgs/${API.orgId}/leads/export?include_removed=1`, 'leads-export.xlsx').catch(e=>toast(e.message||'Unknown error','err')));
+}
+
+// Ask whether an export should include recently-removed (soft-deleted) records before downloading.
+function _exportIncludeRemovedDlg(entityLabel, onActiveOnly, onIncludeRemoved) {
+  Modal.open('Export Options', `
+    <div style="font-size:13px;margin-bottom:14px">Include recently removed ${entityLabel}s (still in their 30-day restore window)?</div>
+    <div class="bg mt">
+      <button class="btn btn-primary" id="exp-active-only">Active Only</button>
+      <button class="btn btn-ghost" id="exp-include-removed">Include Removed</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+  $('exp-active-only').onclick = () => { Modal.close(); onActiveOnly(); };
+  $('exp-include-removed').onclick = () => { Modal.close(); onIncludeRemoved(); };
 }
 
 // ── Adjust chrome when this page is loaded inside a super-admin access overlay ─

@@ -293,7 +293,7 @@ router.get('/reports/donations', (req, res) => {
 
 // Export donors
 router.get('/reports/donors', (req, res) => {
-  const { format = 'json' } = req.query;
+  const { format = 'json', include_removed } = req.query;
   const donors = all(`
     SELECT d.*, n.name_he as neighborhood_name,
            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE donor_id=d.id AND status='completed') as total_donated,
@@ -302,7 +302,7 @@ router.get('/reports/donors', (req, res) => {
            (SELECT COUNT(*) FROM recurring_schedules WHERE donor_id=d.id AND status='active') as active_recurring
     FROM donors d
     LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
-    WHERE d.org_id = ?
+    WHERE d.org_id = ? ${include_removed === '1' ? '' : 'AND d.removed_at IS NULL'}
     ORDER BY d.last_name, d.first_name
   `, [req.orgId]);
 

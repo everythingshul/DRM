@@ -140,10 +140,12 @@ router.post('/import', requireOrgAdmin, leadUpload.single('file'), (req, res) =>
 
 // ── Export leads to Excel ───────────────────────────────────────────────────────
 router.get('/export', (req, res) => {
+  const { include_removed } = req.query;
   const leads = all(`
     SELECT l.*, u.full_name as assigned_name
     FROM leads l LEFT JOIN users u ON u.id=l.assigned_to
-    WHERE l.org_id=? ORDER BY l.last_name, l.first_name
+    WHERE l.org_id=? ${include_removed === '1' ? '' : 'AND l.removed_at IS NULL'}
+    ORDER BY l.last_name, l.first_name
   `, [req.orgId]);
 
   const wb = XLSX.utils.book_new();

@@ -143,7 +143,8 @@ function createTables() {
       autopay_enabled INTEGER DEFAULT 0, autopay_paused INTEGER DEFAULT 0,
       autopay_day INTEGER DEFAULT 1, autopay_hour INTEGER DEFAULT 9, autopay_minute INTEGER DEFAULT 0,
       donation_emails_paused INTEGER DEFAULT 0, marketing_emails_paused INTEGER DEFAULT 0,
-      info_verified_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      info_verified_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME
     );
     CREATE TABLE IF NOT EXISTS payment_methods (
       id TEXT PRIMARY KEY, donor_id TEXT NOT NULL, org_id TEXT NOT NULL,
@@ -427,6 +428,10 @@ function runMigrations() {
   safe("ALTER TABLE org_users ADD COLUMN invited_by TEXT");
   safe("ALTER TABLE org_users ADD COLUMN removed_at DATETIME");
   safe("ALTER TABLE donors ADD COLUMN removed_at DATETIME");
+  // Every donor edit (and info-verify) sets updated_at — without this column present,
+  // PUT /donors/:id fails outright with "no such column: updated_at" on any DB that
+  // predates it, silently discarding the edit (this is what broke label add/remove).
+  safe("ALTER TABLE donors ADD COLUMN updated_at DATETIME");
   safe("ALTER TABLE leads ADD COLUMN removed_at DATETIME");
   // Extra contact info fields
   safe("ALTER TABLE users ADD COLUMN hebrew_name TEXT");
