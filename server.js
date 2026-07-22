@@ -10,6 +10,18 @@ const XLSX = require('xlsx');
 const fs = require('fs');
 
 const { initDb, all, get, run } = require('./db/schema');
+// Match an imported spreadsheet column by header text regardless of exact spacing,
+// punctuation, or casing (e.g. "ID #", "ID#", "Id Number" all match "ID #").
+function getCol(row, ...names) {
+  const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const keys = Object.keys(row);
+  for (const name of names) {
+    const target = norm(name);
+    const found = keys.find(k => norm(k) === target);
+    if (found && row[found] !== '' && row[found] != null) return row[found];
+  }
+  return '';
+}
 const authRouter     = require('./routes/auth');
 const donorsRouter   = require('./routes/donors');
 const orgRouter      = require('./routes/org');
@@ -133,7 +145,7 @@ app.post('/api/orgs/:orgId/import/donors',
         const displayName = [fn, ln].filter(Boolean).join(' ') || email || cell || 'Unknown';
 
         // Check for existing donor by ID number
-        const importedNum = row['ID #'] || row['ID#'] || row['Donor ID'] || row['donor_number'] || '';
+        const importedNum = getCol(row, 'ID #', 'ID#', 'ID', 'ID Number', 'Donor ID', 'Donor Number', 'donor_number');
         const existingById = importedNum ? get('SELECT * FROM donors WHERE donor_number=? AND org_id=?', [parseInt(importedNum), req.params.orgId]) : null;
         if (existingById) {
           // Update only non-empty fields

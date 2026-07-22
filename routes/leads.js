@@ -9,6 +9,19 @@ const { findDuplicateClusters } = require('../utils/duplicates');
 
 router.use(requireAuth, requireOrg);
 
+// Match an imported spreadsheet column by header text regardless of exact spacing,
+// punctuation, or casing (e.g. "ID #", "ID#", "Id Number" all match "ID #").
+function getCol(row, ...names) {
+  const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const keys = Object.keys(row);
+  for (const name of names) {
+    const target = norm(name);
+    const found = keys.find(k => norm(k) === target);
+    if (found && row[found] !== '' && row[found] != null) return row[found];
+  }
+  return '';
+}
+
 // Build a lead.id -> { other, reason } map from the live duplicate clusters (see
 // utils/duplicates.js), for annotating list/detail rows with the "⚠ DUPLICATE" badge.
 function _leadDupMap(orgId) {
@@ -85,7 +98,7 @@ router.post('/import', requireOrgAdmin, leadUpload.single('file'), (req, res) =>
       const displayName = [fn, ln].filter(Boolean).join(' ') || email || cell || 'Unknown';
 
       try {
-        const importedNum = row['ID #'] || row['ID#'] || row['Lead ID'] || '';
+        const importedNum = getCol(row, 'ID #', 'ID#', 'ID', 'ID Number', 'Lead ID', 'Donor Number', 'donor_number');
         const existingById = importedNum ? get('SELECT * FROM leads WHERE donor_number=? AND org_id=?', [parseInt(importedNum), req.orgId]) : null;
 
         if (existingById) {
