@@ -7,6 +7,7 @@ const { requireAuth, requireOrg, requireOrgAdmin } = require('../middleware/auth
 const { ccSave, ccSale, ccRefund, ccVoid, dafGrant } = require('../utils/sola');
 const { sendReceiptEmail } = require('../utils/scheduler');
 const tzUtil = require('../utils/tz');
+const { hasUnresolvedDuplicate } = require('../utils/duplicates');
 
 router.use(requireAuth, requireOrg);
 
@@ -18,8 +19,9 @@ router.post('/save-card', async (req, res) => {
 
     const donor = get('SELECT * FROM donors WHERE id=? AND org_id=?', [donor_id, req.orgId]);
     if (!donor) return res.status(404).json({ error: 'Donor not found' });
-    const _dup = get(`SELECT id FROM donor_duplicates WHERE status='pending' AND (donor_id_a=? OR donor_id_b=?)`, [donor_id, donor_id]);
-    if (_dup) return res.status(400).json({ error: 'Unresolved duplicate flag on this donor. Resolve in Info Check before processing donations.' });
+    if (hasUnresolvedDuplicate(req.orgId, donor_id)) {
+      return res.status(400).json({ error: 'Unresolved duplicate flag on this donor. Resolve in Info Check before processing donations.' });
+    }
 
     const result = await ccSave(req.orgId, {
       cardNum: card_num.replace(/\s/g, ''), exp, cvv: cvv || '',
@@ -70,8 +72,9 @@ router.post('/charge', async (req, res) => {
 
     const donor = get('SELECT * FROM donors WHERE id=? AND org_id=?', [donor_id, req.orgId]);
     if (!donor) return res.status(404).json({ error: 'Donor not found' });
-    const _dup = get(`SELECT id FROM donor_duplicates WHERE status='pending' AND (donor_id_a=? OR donor_id_b=?)`, [donor_id, donor_id]);
-    if (_dup) return res.status(400).json({ error: 'Unresolved duplicate flag on this donor. Resolve in Info Check before processing donations.' });
+    if (hasUnresolvedDuplicate(req.orgId, donor_id)) {
+      return res.status(400).json({ error: 'Unresolved duplicate flag on this donor. Resolve in Info Check before processing donations.' });
+    }
 
     const pm = get('SELECT * FROM payment_methods WHERE id=? AND donor_id=?', [payment_method_id, donor_id]);
     if (!pm) return res.status(404).json({ error: 'Payment method not found' });
@@ -114,8 +117,9 @@ router.post('/charge-daf', async (req, res) => {
 
     const donor = get('SELECT * FROM donors WHERE id=? AND org_id=?', [donor_id, req.orgId]);
     if (!donor) return res.status(404).json({ error: 'Donor not found' });
-    const _dup = get(`SELECT id FROM donor_duplicates WHERE status='pending' AND (donor_id_a=? OR donor_id_b=?)`, [donor_id, donor_id]);
-    if (_dup) return res.status(400).json({ error: 'Unresolved duplicate flag on this donor. Resolve in Info Check before processing donations.' });
+    if (hasUnresolvedDuplicate(req.orgId, donor_id)) {
+      return res.status(400).json({ error: 'Unresolved duplicate flag on this donor. Resolve in Info Check before processing donations.' });
+    }
 
     const pm = get('SELECT * FROM payment_methods WHERE id=? AND donor_id=?', [payment_method_id, donor_id]);
     if (!pm || pm.type !== 'daf') return res.status(400).json({ error: 'Not a DAF payment method' });

@@ -294,6 +294,7 @@ router.post('/', (req, res) => {
 router.put('/:id', (req, res) => {
   const existing = get('SELECT * FROM leads WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
   if (!existing) return res.status(404).json({ error: 'Lead not found' });
+  if (existing.status === 'converted') return res.status(400).json({ error: 'This lead has been converted — edit the donor record instead' });
   const { title,first_name,last_name,hebrew_title,hebrew_full_name,email,cell,home_phone,
           street,apt,city,state,zip,neighborhood_id,labels,category,notes,assigned_to,status } = req.body;
 

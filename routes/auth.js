@@ -271,34 +271,33 @@ router.post('/orgs/:orgId/users/invite', requireAuth, requireOrg, requireOrgAdmi
     const { generateToken } = require('../middleware/auth');
     const setupToken = generateToken({ userId: user.id, setupMode: true, orgId: req.orgId });
 
-    // Get email settings for this org's signup SMTP
-    const emailSettings = req.orgId ? get('SELECT * FROM email_settings WHERE org_id = ?', [req.orgId]) : null;
-    // Use the org's configured SMTP (admin email + app password)
-    // Falls back to SIGNUP_SMTP_EMAIL env var if org SMTP not configured
+    // Org's email settings — same provider selection as every other outbound email
+    // (receipts, notices, etc.): Brevo API if configured, else SMTP (falls back to
+    // SIGNUP_SMTP_* env vars if the org never set up email at all).
     const orgEmailCfg = req.orgId
       ? (get('SELECT * FROM email_settings WHERE org_id=?', [req.orgId]) ||
          get('SELECT es.* FROM email_settings es JOIN org_users ou ON es.org_id=ou.org_id WHERE ou.user_id=? LIMIT 1', [req.user.id]))
       : get('SELECT es.* FROM email_settings es JOIN org_users ou ON es.org_id=ou.org_id WHERE ou.user_id=? LIMIT 1', [req.user.id]);
-    const signupEmail = orgEmailCfg?.smtp_email || process.env.SIGNUP_SMTP_EMAIL;
-    const signupPass  = orgEmailCfg?.smtp_password || process.env.SIGNUP_SMTP_PASSWORD;
     const appUrl = process.env.APP_URL || 'https://drm.everythingshul.com';
     const setupUrl = `${appUrl}/complete-setup?token=${setupToken}`;
 
     // Try sending the invite email
     let emailSent = false;
-    if (signupEmail && signupPass) {
+    const effectiveSettings = {
+      ...orgEmailCfg,
+      smtp_email: orgEmailCfg?.smtp_email || process.env.SIGNUP_SMTP_EMAIL,
+      smtp_password: orgEmailCfg?.smtp_password || process.env.SIGNUP_SMTP_PASSWORD
+    };
+    if (effectiveSettings.brevo_api_key || (effectiveSettings.smtp_email && effectiveSettings.smtp_password)) {
       try {
-        const nodemailer = require('nodemailer');
-        const transporter = nodemailer.createTransport({
-          host: orgEmailCfg?.smtp_host || 'smtp.gmail.com',
-          port: orgEmailCfg?.smtp_port || 587,
-          secure: false,
-          auth: { user: signupEmail, pass: signupPass }
-        });
-        await transporter.sendMail({
-          from: `"DRM – Everything Shul" <${signupEmail}>`,
+        const { sendMail, fromAddr } = require('../utils/mailer');
+        await sendMail({
+          settings: effectiveSettings,
+          orgId: req.orgId,
           to: email,
+          from: fromAddr(effectiveSettings, req.org.name),
           subject: 'You\'ve been invited to DRM',
+          type: 'invite',
           html: `
             <div style="font-family:Inter,sans-serif;max-width:520px;margin:0 auto">
               <h2 style="color:#1a3a6b">Welcome to DRM</h2>

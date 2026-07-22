@@ -334,6 +334,7 @@ async function init() {
   const params = new URLSearchParams(location.search);
   const token = params.get('token');
   if (token && location.pathname.includes('new-account')) { showNewAcct(token); return; }
+  if (token && location.pathname.includes('complete-setup')) { showCompleteSetup(token); return; }
 
   // Check if first-run setup needed
   let status;
@@ -383,7 +384,7 @@ async function init() {
 }
 
 function showSetup() {
-  _show('setup-screen'); _hide('login-screen'); _hide('app'); _hide('newacct-screen');
+  _show('setup-screen'); _hide('login-screen'); _hide('app'); _hide('newacct-screen'); _hide('setupinvite-screen');
   $('setup-form').onsubmit = async e => {
     e.preventDefault();
     const err = $('setup-err'); err.style.display = 'none';
@@ -396,7 +397,7 @@ function showSetup() {
 }
 
 function showLogin() {
-  _show('login-screen'); _hide('setup-screen'); _hide('app'); _hide('newacct-screen');
+  _show('login-screen'); _hide('setup-screen'); _hide('app'); _hide('newacct-screen'); _hide('setupinvite-screen');
   const form = $('login-form');
   form.onsubmit = async e => {
     e.preventDefault();
@@ -427,7 +428,7 @@ function showLogin() {
 }
 
 function showNewAcct(token) {
-  _show('newacct-screen'); _hide('login-screen'); _hide('setup-screen'); _hide('app');
+  _show('newacct-screen'); _hide('login-screen'); _hide('setup-screen'); _hide('app'); _hide('setupinvite-screen');
   $('newacct-form').onsubmit = async e => {
     e.preventDefault();
     const err = $('newacct-err'); err.style.display = 'none';
@@ -442,6 +443,23 @@ function showNewAcct(token) {
   };
 }
 
+function showCompleteSetup(token) {
+  _show('setupinvite-screen'); _hide('login-screen'); _hide('setup-screen'); _hide('app'); _hide('newacct-screen');
+  $('setupinvite-form').onsubmit = async e => {
+    e.preventDefault();
+    const err = $('setupinvite-err'); err.style.display = 'none';
+    const p1 = val('si-pass'), p2 = val('si-pass2');
+    if (p1 !== p2) { err.textContent = 'Passwords do not match'; err.style.display = 'block'; return; }
+    if (p1.length < 6) { err.textContent = 'Password must be at least 6 characters'; err.style.display = 'block'; return; }
+    try {
+      await API.post('/auth/complete-setup', { token, full_name: val('si-name'), password: p1 });
+      history.replaceState({}, '', '/');
+      toast('Account set up! Please sign in.');
+      showLogin();
+    } catch(e) { err.textContent = e.message; err.style.display = 'block'; }
+  };
+}
+
 async function setOrg(org) {
   try { window._orgTz = JSON.parse(org?.settings||'{}').timezone || window._orgTz; } catch {}
   DRM.org = org; API.orgId = org.id;
@@ -449,7 +467,7 @@ async function setOrg(org) {
 }
 
 function showApp() {
-  _show('app'); _hide('login-screen'); _hide('setup-screen'); _hide('newacct-screen');
+  _show('app'); _hide('login-screen'); _hide('setup-screen'); _hide('newacct-screen'); _hide('setupinvite-screen');
   const sbUser = $('sb-user'); if (sbUser) sbUser.textContent = DRM.user?.full_name || '';
   // Restore sidebar state
   const sb = $('sidebar');
@@ -5013,7 +5031,9 @@ async function _leadView(id) {
           </div>`).join('') : '<div style="padding:14px;text-align:center;color:var(--gray-4);font-size:13px">No follow-ups yet</div>'}
       </div>
       <div class="bg">
-        <button class="btn btn-primary btn-sm" onclick="_leadEdit('${id}')">Edit</button>
+        ${lead.status!=='converted'
+          ? `<button class="btn btn-primary btn-sm" onclick="_leadEdit('${id}')">Edit</button>`
+          : `<button class="btn btn-primary btn-sm" onclick="Modal.close();DonorDetail.open('${lead.converted_donor_id}')">View Donor Record</button>`}
         <button class="btn btn-ghost btn-sm" onclick="Modal.close();_leadAddFollowup('${id}')">+ Follow Up</button>
         ${lead.status!=='converted'?`<button class="btn btn-green btn-sm" onclick="Modal.close();_leadConvert('${id}')">Convert to Donor</button>`:''}
         <button class="btn btn-icon" style="color:var(--red)" onclick="confirmDlg('Remove this lead? Restorable for 30 days from Recently Removed.',async()=>{await API.del('/api/orgs/'+API.orgId+'/leads/${id}');toast('Removed');Modal.close();_loadLeads();})">&#10005;</button>

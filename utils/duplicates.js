@@ -76,4 +76,15 @@ function findDuplicateClusters(orgId) {
   return [...pairs.values()].map(p => ({ a: p.a, b: p.b, reasons: [...p.reasons] }));
 }
 
-module.exports = { findDuplicateClusters };
+// True if this donor/lead is currently in a pending (non-dismissed) duplicate pair —
+// used to block recording donations/charges until the flag is resolved (dismiss or merge).
+function hasUnresolvedDuplicate(orgId, entityId) {
+  const clusters = findDuplicateClusters(orgId);
+  const relevant = clusters.filter(c => c.a.id === entityId || c.b.id === entityId);
+  if (!relevant.length) return false;
+  const dismissals = all('SELECT * FROM duplicate_dismissals WHERE org_id=?', [orgId]);
+  const dismissedKeys = new Set(dismissals.map(d => `${d.entity_a_type}:${d.entity_a_id}|${d.entity_b_type}:${d.entity_b_id}`));
+  return relevant.some(c => !dismissedKeys.has(`${c.a.type}:${c.a.id}|${c.b.type}:${c.b.id}`));
+}
+
+module.exports = { findDuplicateClusters, hasUnresolvedDuplicate };
