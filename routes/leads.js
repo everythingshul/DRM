@@ -126,7 +126,7 @@ router.post('/import', requireOrgAdmin, leadUpload.single('file'), (req, res) =>
         const id = uuidv4();
         run(`INSERT INTO leads (id,org_id,donor_number,title,first_name,last_name,hebrew_title,hebrew_full_name,
              email,cell,home_phone,street,apt,city,state,zip,category,notes,status,created_by)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           [id, req.orgId, donorNum||null,
            (row['Title']||'').toString().trim()||null, fn||'', ln||'',
            (row['Hebrew Title']||'').toString().trim()||null,
