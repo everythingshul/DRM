@@ -165,6 +165,19 @@ function _todayInTz() {
   const d = new Date(), pad = n => String(n).padStart(2,'0');
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
 }
+// SQLite's CURRENT_TIMESTAMP (used as the default for created_at/updated_at/sent_at
+// throughout the schema) returns UTC time as a bare "YYYY-MM-DD HH:MM:SS" string with
+// no "Z"/offset. `new Date()` parses a bare date-time string as LOCAL time per spec, so
+// without this fix a value that's really e.g. 19:58 UTC (15:58 EDT) gets misread as
+// 19:58 local — exactly the "4 hours ahead" bug. Any string that looks like a full
+// date-time and has no zone marker is normalized to explicit UTC before parsing.
+function _parseServerDate(d) {
+  if (d instanceof Date) return d;
+  if (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(d) && !/[Zz]|[+-]\d{2}:?\d{2}$/.test(d)) {
+    return new Date(d.replace(' ', 'T') + 'Z');
+  }
+  return new Date(d);
+}
 function fmtD(d) {
   if (!d) return '—';
   try {
@@ -173,12 +186,12 @@ function fmtD(d) {
     if (/^\d{4}-\d{2}-\d{2}$/.test(d)) {
       return new Date(d+'T12:00:00').toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});
     }
-    return new Date(d).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});
+    return _parseServerDate(d).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});
   } catch { return d; }
 }
 function fmtDT(d) {
   if (!d) return '—';
-  try { return new Date(d).toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}); }
+  try { return _parseServerDate(d).toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}); }
   catch { return d; }
 }
 function age(m) { if (!m && m !== 0) return '—'; const mo = parseInt(m); if (mo < 12) return mo + 'mo'; const y = Math.floor(mo / 12), r = mo % 12; return r ? `${y}y ${r}mo` : `${y}y`; }
@@ -189,7 +202,7 @@ function fmtFreq(f) { return { weekly: 'Weekly', biweekly: 'Bi-Weekly', monthly:
 function toLocalDT(d) {
   if (!d) return '';
   try {
-    const dt = new Date(d), pad = n => String(n).padStart(2,'0');
+    const dt = _parseServerDate(d), pad = n => String(n).padStart(2,'0');
     return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
   } catch { return ''; }
 }
@@ -5359,7 +5372,7 @@ function _renderNotifPage() {
   // Group by day
   const groups = {};
   for (const n of items) {
-    const day = new Date(n.created_at).toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
+    const day = _parseServerDate(n.created_at).toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
     (groups[day] = groups[day]||[]).push(n);
   }
   wrap.innerHTML = Object.entries(groups).map(([day, list]) => `
