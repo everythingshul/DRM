@@ -153,71 +153,53 @@ function confirmDlg(msg, yes) {
 }
 
 function fmt$(n) { return '$' + parseFloat(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
-function _tz() {
-  if (window._orgTz) return window._orgTz;
-  try { return JSON.parse(DRM.org?.settings||'{}').timezone || 'America/New_York'; } catch { return 'America/New_York'; }
-}
-// "Today" as a YYYY-MM-DD string in the org's timezone — for comparing against date-only
-// fields like next_followup_date. Never use `new Date(dateOnlyString)` for this: a bare
-// "YYYY-MM-DD" is parsed as UTC midnight, so comparing it against `new Date()` (or against
-// UTC "today") marks anything due today as overdue for any org west of UTC.
+// ── Date/time handling — rewritten to use the browser's own local time directly ────
+// Every person using this app is physically at (or near) the organization, so "my
+// browser's local time" and "the org's time" are the same thing in practice. Trying
+// to separately track and convert to an explicit "org timezone" setting (via Intl +
+// UTC-offset arithmetic) was fragile and hard to verify remotely — this removes that
+// entire layer in favor of the browser's native, battle-tested local-time handling.
+// The org's configured Settings > Timezone is still used server-side (emails, PDFs,
+// autopay/follow-up cron) where there is no "local" — a server has no physical location.
 function _todayInTz() {
-  try { return new Intl.DateTimeFormat('en-CA', { timeZone: _tz(), year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date()); }
-  catch { return new Date().toISOString().slice(0,10); }
+  const d = new Date(), pad = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
 }
 function fmtD(d) {
   if (!d) return '—';
   try {
-    // Date-only strings: treat as local date in org timezone
+    // Date-only strings: append a noon time so the browser doesn't parse it as UTC
+    // midnight (which can roll it back a day once converted to local display).
     if (/^\d{4}-\d{2}-\d{2}$/.test(d)) {
-      return new Date(d+'T12:00:00').toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric',timeZone:_tz()});
+      return new Date(d+'T12:00:00').toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});
     }
-    return new Date(d).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric',timeZone:_tz()});
+    return new Date(d).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});
   } catch { return d; }
 }
 function fmtDT(d) {
   if (!d) return '—';
-  try { return new Date(d).toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit',timeZone:_tz()}); }
+  try { return new Date(d).toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}); }
   catch { return d; }
 }
 function age(m) { if (!m && m !== 0) return '—'; const mo = parseInt(m); if (mo < 12) return mo + 'mo'; const y = Math.floor(mo / 12), r = mo % 12; return r ? `${y}y ${r}mo` : `${y}y`; }
 function fmtMethod(m) { return { credit_card: 'Credit Card', daf: 'DAF', check: 'Check', cash: 'Cash', wire: 'Wire', other: 'Other' }[m] || m; }
 function fmtFreq(f) { return { weekly: 'Weekly', biweekly: 'Bi-Weekly', monthly: 'Monthly', quarterly: 'Quarterly', yearly: 'Yearly', once: 'One-Time' }[f] || f; }
+// Renders a UTC instant as a "YYYY-MM-DDTHH:mm" value for a <input type="datetime-local">,
+// using the browser's own local time (the getFullYear/getHours/etc. getters, not UTC ones).
 function toLocalDT(d) {
   if (!d) return '';
   try {
-    const dt = new Date(d);
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: _tz(), year:'numeric', month:'2-digit', day:'2-digit',
-      hour:'2-digit', minute:'2-digit', hour12:false
-    }).formatToParts(dt);
-    const g = t => parts.find(p=>p.type===t)?.value || '00';
-    let hh = g('hour'); if (hh === '24') hh = '00';
-    return `${g('year')}-${g('month')}-${g('day')}T${hh}:${g('minute')}`;
+    const dt = new Date(d), pad = n => String(n).padStart(2,'0');
+    return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
   } catch { return ''; }
 }
 // Inverse of toLocalDT: a "YYYY-MM-DDTHH:mm" string typed into a <input type="datetime-local">
-// represents a wall-clock time in the org's timezone, NOT the browser's — convert it to the
-// correct UTC instant before sending to the server. (Without this, editing a donation's or
-// scheduled email's date/time silently shifts it by the gap between the browser's local zone
-// and the org's configured zone.)
-function fromLocalDT(str, tz) {
+// is already the browser's own local wall-clock time — `new Date(str)` parses a bare
+// (no "Z"/offset) date-time string as local time per spec, so this is a direct, native
+// conversion to a UTC instant with no manual offset arithmetic involved.
+function fromLocalDT(str) {
   if (!str) return null;
-  tz = tz || _tz();
-  try {
-    const [datePart, timePart] = str.split('T');
-    const [y, mo, d] = datePart.split('-').map(Number);
-    const [hh, mm] = (timePart || '00:00').split(':').map(Number);
-    const guessUtc = Date.UTC(y, mo - 1, d, hh, mm);
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit',
-      hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false
-    }).formatToParts(new Date(guessUtc));
-    const g = t => parseInt(parts.find(p=>p.type===t)?.value, 10);
-    let ghh = g('hour'); if (ghh === 24) ghh = 0;
-    const asIfUtc = Date.UTC(g('year'), g('month') - 1, g('day'), ghh, g('minute'), g('second'));
-    return new Date(guessUtc + (guessUtc - asIfUtc)).toISOString();
-  } catch { return str; }
+  try { return new Date(str).toISOString(); } catch { return str; }
 }
 function inits(f, l) { return ((f || '')[0] || '').toUpperCase() + ((l || '')[0] || '').toUpperCase(); }
 function avatar(d, sz=30) { return `<div class="av" style="width:${sz}px;height:${sz}px;font-size:${Math.round(sz/2.8)}px">${inits(d.first_name, d.last_name)}</div>`; }
@@ -1138,7 +1120,7 @@ const DonorDetail = {
         <strong style="color:var(--navy)">Full Details</strong><br>
         Date &amp; Time: ${fmtDT(d.donation_date)} | Trans ID: ${d.transaction_id||'—'} | Status: ${d.status}<br>
         ${d.refund_amount>0?'Refunded: '+fmt$(d.refund_amount)+(d.refund_notes?' — '+d.refund_notes:'')+'<br>':''}
-        ${d.notes?`<span style="color:var(--gray-5)">${d.notes}</span><br>`:''}
+        ${d.notes?`<span style="color:var(--gray-5);white-space:pre-wrap">${d.notes}</span><br>`:''}
         <div style="margin-top:8px;font-weight:600">Notes (${dn.length})</div>
         <div id="dpr-n-${d.id}" style="margin-top:4px">${_renderNotesList(dn, d.id, did, true)}</div>
       </td>
@@ -1201,7 +1183,7 @@ const DonorDetail = {
   notesList(donor) {
     const notes = jsonParse(donor.notes);
     if (!notes.length) return '<p style="color:var(--gray-5)">No notes yet</p>';
-    return notes.slice().reverse().map(n=>`<div class="note-item"><div class="note-meta">${fmtDT(n.at)}${n.by?' · '+n.by:''}</div><div>${n.text}</div></div>`).join('');
+    return notes.slice().reverse().map(n=>`<div class="note-item"><div class="note-meta">${fmtDT(n.at)}${n.by?' · '+n.by:''}</div><div style="white-space:pre-wrap">${n.text}</div></div>`).join('');
   },
 
   async verify(id) { await API.post(`/api/orgs/${API.orgId}/donors/${id}/verify`,{}); toast('Verified ✓'); this.open(id); loadBadges(); },
@@ -1587,7 +1569,7 @@ function _renderNotesList(notes, donId, did, onSave) {
   return notes.map((n, i) => `
     <div style="padding:6px 8px;border-bottom:1px solid var(--gray-1);display:flex;gap:8px;align-items:flex-start">
       <div style="flex:1">
-        <div id="note-text-${donId}-${i}" style="font-size:13px">${n.text}</div>
+        <div id="note-text-${donId}-${i}" style="font-size:13px;white-space:pre-wrap">${n.text}</div>
         <div style="font-size:10px;color:var(--gray-5);margin-top:2px">${fmtDT(n.at)}${n.by?' · '+n.by:''}${n.edited_at?' (edited)':''}</div>
       </div>
       <div class="actions" style="flex-shrink:0">
@@ -1702,7 +1684,7 @@ function _donRows(rows) {
             Transaction ID: ${d.transaction_id||'—'}<br>
             Status: ${d.status}<br>
             ${d.refund_amount>0?'Refunded: '+fmt$(d.refund_amount)+(d.refund_notes?' — '+d.refund_notes:'')+'<br>':''}
-            ${d.notes?'Notes: '+d.notes+'<br>':''}
+            ${d.notes?'Notes: <span style="white-space:pre-wrap">'+d.notes+'</span><br>':''}
             ${(jsonParse(d.labels||'[]')).length?'Labels: '+jsonParse(d.labels||'[]').join(', '):''}
           </div>
           <div>
@@ -3510,7 +3492,7 @@ async function renderOutstanding(el) {
             <td><strong>${c.first_name} ${c.last_name}</strong>${c.cell?`<br><span style="font-size:11px;color:var(--gray-5)">${c.cell}</span>`:''}</td>
             <td style="font-weight:600">${fmt$(c.amount)}</td>
             <td style="font-size:12px">${c.pm_label||c.pm_type||'Manual'}</td>
-            <td style="font-size:12px">${c.notes||''}</td>
+            <td style="font-size:12px;white-space:pre-wrap">${c.notes||''}</td>
             <td><div class="actions">
               <button class="btn btn-primary btn-sm" onclick="_collectCharge('${c.id}','${c.amount}')">Collect</button>
               <button class="btn btn-ghost btn-sm" onclick="DonorDetail.open('${c.donor_id}')">View Donor</button>
@@ -5011,7 +4993,7 @@ async function _leadView(id) {
             Labels:
             ${(() => { try { return JSON.parse(lead.labels||'[]'); } catch { return []; } })().map(l=>`<span class="pill pill-blue" style="font-size:11px">${l}</span>`).join('') || '<span style="color:var(--gray-4)">None</span>'}
           </div>
-          ${lead.notes?`<div style="font-size:12px;color:var(--gray-6);margin-top:8px">${lead.notes}</div>`:''}
+          ${lead.notes?`<div style="font-size:12px;color:var(--gray-6);margin-top:8px;white-space:pre-wrap">${lead.notes}</div>`:''}
         </div>
       </div>
       <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;margin-bottom:8px">Follow-up History (${lead.followups?.length||0})</div>
@@ -5026,7 +5008,7 @@ async function _leadView(id) {
                   onclick="event.stopPropagation();_editFollowupDate('${fu.id}','${fu.next_followup_date||''}','${(fu.notes||'').replace(/'/g,"\\'").replace(/\n/g,' ')}')">✏ Edit</button>
               </div>
             </div>
-            <div style="font-size:13px;margin-bottom:4px">${fu.notes}</div>
+            <div style="font-size:13px;margin-bottom:4px;white-space:pre-wrap">${fu.notes}</div>
             ${fu.next_followup_date?`<div style="font-size:11px;color:var(--blue)">📅 Next follow-up: ${fmtD(fu.next_followup_date)}</div>`:'<div style="font-size:11px;color:var(--gray-4)">No follow-up date set</div>'}
           </div>`).join('') : '<div style="padding:14px;text-align:center;color:var(--gray-4);font-size:13px">No follow-ups yet</div>'}
       </div>
@@ -5377,7 +5359,7 @@ function _renderNotifPage() {
   // Group by day
   const groups = {};
   for (const n of items) {
-    const day = new Date(n.created_at).toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric',timeZone:_tz()});
+    const day = new Date(n.created_at).toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
     (groups[day] = groups[day]||[]).push(n);
   }
   wrap.innerHTML = Object.entries(groups).map(([day, list]) => `

@@ -315,6 +315,11 @@ router.get('/reports/donors', (req, res) => {
       let labels = '';
       try { labels = JSON.parse(d.labels||'[]').join(', '); } catch {}
 
+      // donor.notes is a JSON array of {text,at,by} entries, not plain text —
+      // export the readable note text (each on its own line) rather than raw JSON.
+      let notesText = '';
+      try { notesText = JSON.parse(d.notes||'[]').map(n => n.text).filter(Boolean).join('\n'); } catch {}
+
       // Get payment methods for this donor
       const cards = all(
         'SELECT type, label, last_four, card_brand, daf_name, other_description, is_default FROM payment_methods WHERE donor_id=? ORDER BY is_default DESC',
@@ -343,7 +348,7 @@ router.get('/reports/donors', (req, res) => {
         'Zip':                d.zip || '',
         'Neighborhood':       d.neighborhood_name || '',
         'Labels':             labels,
-        'Notes':              d.notes || '',
+        'Notes':              notesText,
         'Total Donated':      parseFloat(d.total_donated||0).toFixed(2),
         'Donation Count':     d.donation_count || 0,
         'Last Donation':      d.last_donation_date ? d.last_donation_date.slice(0,10) : '',
