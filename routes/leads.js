@@ -389,13 +389,18 @@ router.post('/:id/convert', requireOrgAdmin, (req, res) => {
   if (lead.converted_donor_id) return res.status(400).json({ error: 'Already converted' });
 
   const donorId = uuidv4();
+  // leads.notes is a plain text field, but donors.notes is a JSON array of {text,at,by}
+  // entries (see DonorDetail.notesList) — copying the raw string across used to silently
+  // vanish, since jsonParse() couldn't parse it as JSON and fell back to []. Carry it over
+  // as a clearly-labeled first entry instead so it's still visible on the donor record.
+  const donorNotes = lead.notes ? [{ text: lead.notes, at: lead.updated_at || lead.created_at || new Date().toISOString(), by: 'Carried over from Lead' }] : [];
   run(`INSERT INTO donors (id,org_id,donor_number,title,first_name,last_name,hebrew_title,hebrew_full_name,
        email,cell,home_phone,street,apt,city,state,zip,neighborhood_id,labels,notes)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [donorId,req.orgId,lead.donor_number||null,lead.title,lead.first_name||'',lead.last_name||'',
      lead.hebrew_title,lead.hebrew_full_name,lead.email,lead.cell,lead.home_phone,
      lead.street,lead.apt,lead.city,lead.state,lead.zip,lead.neighborhood_id,
-     lead.labels||'[]',lead.notes]);
+     lead.labels||'[]',JSON.stringify(donorNotes)]);
 
   run('UPDATE leads SET status=?,converted_donor_id=? WHERE id=?', ['converted',donorId,req.params.id]);
   res.json({ success: true, donor_id: donorId });

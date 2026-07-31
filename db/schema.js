@@ -144,7 +144,16 @@ function createTables() {
       autopay_day INTEGER DEFAULT 1, autopay_hour INTEGER DEFAULT 9, autopay_minute INTEGER DEFAULT 0,
       donation_emails_paused INTEGER DEFAULT 0, marketing_emails_paused INTEGER DEFAULT 0,
       info_verified_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME
+      updated_at DATETIME, next_followup_date DATE
+    );
+    CREATE TABLE IF NOT EXISTS donor_followups (
+      id TEXT PRIMARY KEY, donor_id TEXT NOT NULL, org_id TEXT NOT NULL,
+      notes TEXT NOT NULL,
+      next_followup_date DATE,
+      done_by TEXT NOT NULL,
+      done_by_name TEXT,
+      notified INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS payment_methods (
       id TEXT PRIMARY KEY, donor_id TEXT NOT NULL, org_id TEXT NOT NULL,
@@ -422,6 +431,7 @@ function runMigrations() {
   safe("ALTER TABLE donations ADD COLUMN labels TEXT DEFAULT '[]'");
   safe("ALTER TABLE org_label_lists ADD COLUMN lead_labels TEXT DEFAULT '[]'");
   safe("ALTER TABLE leads ADD COLUMN next_followup_date DATE");
+  safe("ALTER TABLE donors ADD COLUMN next_followup_date DATE");
   safe("ALTER TABLE email_settings ADD COLUMN brevo_api_key TEXT DEFAULT ''");
   // Invite permissions column
   safe("ALTER TABLE org_users ADD COLUMN permissions TEXT DEFAULT '{}'");
@@ -499,6 +509,13 @@ function runMigrations() {
   )`); saveDb(); } catch(e) {}
   try { db.run(`CREATE TABLE IF NOT EXISTS lead_followups (
     id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, org_id TEXT NOT NULL,
+    notes TEXT NOT NULL, next_followup_date DATE,
+    done_by TEXT NOT NULL, done_by_name TEXT,
+    notified INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`); saveDb(); } catch(e) {}
+  try { db.run(`CREATE TABLE IF NOT EXISTS donor_followups (
+    id TEXT PRIMARY KEY, donor_id TEXT NOT NULL, org_id TEXT NOT NULL,
     notes TEXT NOT NULL, next_followup_date DATE,
     done_by TEXT NOT NULL, done_by_name TEXT,
     notified INTEGER DEFAULT 0,

@@ -995,7 +995,7 @@ const DonorDetail = {
   },
 
   render() {
-    const { donor, paymentMethods, donations, recurring } = this.data;
+    const { donor, paymentMethods, donations, recurring, followups } = this.data;
     const lbls = jsonParse(donor.labels);
     Modal.title('');
     Modal.body(`
@@ -1024,6 +1024,7 @@ const DonorDetail = {
         <div class="tab" data-tc="dd-rec">Recurring</div>
         <div class="tab" data-tc="dd-kv">Kvitel</div>
         <div class="tab" data-tc="dd-notes">Notes</div>
+        <div class="tab" data-tc="dd-fu">Follow-ups</div>
       </div>
       <div id="dd-ov" class="tc on" style="padding:16px">
         <div class="g2">
@@ -1084,6 +1085,28 @@ const DonorDetail = {
           <button class="btn btn-primary btn-sm" style="margin-top:6px" onclick="DonorDetail.addNote('${donor.id}')">Add Note</button>
         </div>
         ${this.notesList(donor)}
+      </div>
+      <div id="dd-fu" class="tc" style="padding:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <strong>Follow-up History (${followups?.length||0})</strong>
+          <button class="btn btn-primary btn-sm" onclick="_donorAddFollowup('${donor.id}')">+ Follow Up</button>
+        </div>
+        ${donor.next_followup_date?`<div style="font-size:12px;color:var(--blue);margin-bottom:10px">📅 Next follow-up: ${fmtD(donor.next_followup_date)}</div>`:''}
+        <div style="max-height:260px;overflow-y:auto;border:1px solid var(--gray-2);border-radius:6px">
+          ${followups?.length ? followups.map(fu=>`
+            <div style="padding:10px 14px;border-bottom:1px solid var(--gray-1)">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
+                <strong style="font-size:12px">${fu.done_by_name||'Unknown'}</strong>
+                <div style="display:flex;align-items:center;gap:6px">
+                  <span style="font-size:11px;color:var(--gray-5)">${fmtDT(fu.created_at)}</span>
+                  <button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px"
+                    onclick="event.stopPropagation();_editDonorFollowupDate('${fu.id}','${fu.next_followup_date||''}','${(fu.notes||'').replace(/'/g,"\\'").replace(/\n/g,' ')}','${donor.id}')">✏ Edit</button>
+                </div>
+              </div>
+              <div style="font-size:13px;margin-bottom:4px;white-space:pre-wrap">${fu.notes}</div>
+              ${fu.next_followup_date?`<div style="font-size:11px;color:var(--blue)">📅 Next follow-up: ${fmtD(fu.next_followup_date)}</div>`:'<div style="font-size:11px;color:var(--gray-4)">No follow-up date set</div>'}
+            </div>`).join('') : '<div style="padding:14px;text-align:center;color:var(--gray-4);font-size:13px">No follow-ups yet</div>'}
+        </div>
       </div>`);
     tabsInit('#modal-body');
   },
@@ -6006,11 +6029,70 @@ async function _saveFollowupDate(followupId) {
   } catch(e) { toast(e.message||'Error','err'); }
 }
 
+// ── Donor follow-ups (mirrors the lead follow-up flow above) ──────────────────
+function _donorAddFollowup(donorId) {
+  Modal.open('Add Follow-Up', `
+    <div style="font-size:12px;color:var(--gray-5);margin-bottom:10px">Auto-signed with your name.</div>
+    <label>Notes <span style="color:var(--red)">*</span></label>
+    <textarea id="dfu-notes" placeholder="How did the call go?" style="min-height:80px"></textarea>
+    <label style="margin-top:8px">Next Follow-up Date <span style="font-size:11px;color:var(--gray-4)">(optional)</span></label>
+    <input type="date" id="dfu-date" value="">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_donorSaveFollowup('${donorId}')">Save Follow-up</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+async function _donorSaveFollowup(donorId) {
+  const notes = val('dfu-notes')?.trim();
+  if (!notes) { toast('Notes required','err'); return; }
+  try {
+    const nextDate = val('dfu-date')||null;
+    await API.post(`/api/orgs/${API.orgId}/donors/${donorId}/followup`, { notes, next_followup_date: nextDate });
+    toast('Follow-up saved ✓');
+    DonorDetail.open(donorId);
+  } catch(e) { toast(e.message||'Error','err'); }
+}
+
+function _editDonorFollowupDate(followupId, currentDate, currentNotes, donorId) {
+  Modal.open('Edit Follow-Up', `
+    <label>Notes</label>
+    <textarea id="dfu-edit-notes" style="min-height:90px">${(currentNotes||'').replace(/"/g,'&quot;')}</textarea>
+    <label style="margin-top:10px">Next Follow-up Date <span style="font-size:11px;color:var(--gray-4)">(optional)</span></label>
+    <input type="date" id="dfu-edit-date" value="${currentDate||''}"
+      style="padding:10px 12px;border:1.5px solid var(--gray-3);border-radius:6px;width:100%;box-sizing:border-box">
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_saveDonorFollowupDate('${followupId}','${donorId||''}')">Save</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
+}
+
+async function _saveDonorFollowupDate(followupId, donorId) {
+  const date  = val('dfu-edit-date');
+  const notes = val('dfu-edit-notes');
+  try {
+    await API.put(`/api/orgs/${API.orgId}/donors/followups/${followupId}`, { next_followup_date: date||null, notes });
+    toast('Follow-up updated ✓');
+    Modal.close();
+    if (donorId) DonorDetail.open(donorId);
+    if (typeof renderScheduledFollowups === 'function' && $('page-followups')?.classList.contains('active')) {
+      renderScheduledFollowups($('page-followups'));
+    }
+  } catch(e) { toast(e.message||'Error','err'); }
+}
+
 // ── Scheduled Follow-ups page ─────────────────────────────────────────────────
 async function renderScheduledFollowups(el) {
   el.innerHTML = '<div class="spinner"></div>';
   try {
-    const followups = await API.get(`/api/orgs/${API.orgId}/leads/followups/scheduled`);
+    const [leadFus, donorFus] = await Promise.all([
+      API.get(`/api/orgs/${API.orgId}/leads/followups/scheduled`),
+      API.get(`/api/orgs/${API.orgId}/donors/followups/scheduled`)
+    ]);
+    const followups = [
+      ...leadFus.map(f => ({ ...f, _type:'lead', _name:f.lead_name, _cell:f.lead_cell, _assigned:f.lead_assigned_name })),
+      ...donorFus.map(f => ({ ...f, _type:'donor', _name:[f.title,f.first_name,f.last_name].filter(Boolean).join(' '), _cell:f.cell, _assigned:'—' }))
+    ].sort((a,b) => (a.next_followup_date||'').localeCompare(b.next_followup_date||''));
     const todayStr = _todayInTz();
     el.innerHTML = `
       <div class="ph">
@@ -6018,18 +6100,19 @@ async function renderScheduledFollowups(el) {
           <div class="ph-sub">${followups.length} scheduled</div>
         </div>
       </div>
-      ${!followups.length ? '<div class="card"><div class="empty"><h3>No scheduled follow-ups</h3><p>Add follow-ups with a date from the Leads page.</p></div></div>' : `
+      ${!followups.length ? '<div class="card"><div class="empty"><h3>No scheduled follow-ups</h3><p>Add follow-ups with a date from the Leads or Donors page.</p></div></div>' : `
       <div class="card" style="padding:0;overflow:hidden"><div class="tw"><table>
         <thead><tr>
-          <th>Lead</th><th>Follow-up Date</th><th>Notes</th><th>Assigned To</th><th>Fundraiser</th><th></th>
+          <th>Name</th><th>Follow-up Date</th><th>Notes</th><th>Assigned To</th><th>Fundraiser</th><th></th>
         </tr></thead>
         <tbody>${followups.map(f => {
           const isOverdue = f.next_followup_date < todayStr;
           const isToday   = f.next_followup_date === todayStr;
+          const entId = f._type==='lead' ? f.lead_id : f.donor_id;
           return `<tr style="${isOverdue?'background:#fef2f2':isToday?'background:#fefce8':''}">
             <td>
-              <div style="font-weight:600;font-size:13px">${f.lead_name||'Unknown Lead'}</div>
-              ${f.lead_cell?`<div style="font-size:11px;color:var(--gray-5)">${f.lead_cell}</div>`:''}
+              <div style="font-weight:600;font-size:13px">${f._name||(f._type==='lead'?'Unknown Lead':'Unknown Donor')} <span class="pill" style="font-size:9px;background:${f._type==='lead'?'#e0e7ff':'#dcfce7'};color:${f._type==='lead'?'#4338ca':'#15803d'}">${f._type==='lead'?'Lead':'Donor'}</span></div>
+              ${f._cell?`<div style="font-size:11px;color:var(--gray-5)">${f._cell}</div>`:''}
             </td>
             <td style="font-weight:600;color:${isOverdue?'var(--red)':isToday?'var(--amber)':'inherit'}">
               ${fmtD(f.next_followup_date)}
@@ -6037,12 +6120,16 @@ async function renderScheduledFollowups(el) {
               ${isToday?'<span style="font-size:10px;margin-left:4px">📅 Today</span>':''}
             </td>
             <td style="font-size:12px;max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${f.notes||'—'}</td>
-            <td style="font-size:12px">${f.lead_assigned_name||'—'}</td>
+            <td style="font-size:12px">${f._assigned||'—'}</td>
             <td style="font-size:12px">${f.done_by_name||'—'}</td>
             <td><div class="actions">
-              <button class="btn btn-blue btn-sm" onclick="_leadView('${f.lead_id}')">View Lead</button>
-              <button class="btn btn-ghost btn-sm" onclick="_leadAddFollowup('${f.lead_id}')">+ Follow Up</button>
-              <button class="btn btn-ghost btn-sm" onclick="_editFollowupDate('${f.id}','${f.next_followup_date||''}','${(f.notes||'').replace(/'/g,"\\'").replace(/\n/g,' ')}')">✏ Edit</button>
+              ${f._type==='lead'
+                ? `<button class="btn btn-blue btn-sm" onclick="_leadView('${entId}')">View Lead</button>
+                   <button class="btn btn-ghost btn-sm" onclick="_leadAddFollowup('${entId}')">+ Follow Up</button>
+                   <button class="btn btn-ghost btn-sm" onclick="_editFollowupDate('${f.id}','${f.next_followup_date||''}','${(f.notes||'').replace(/'/g,"\\'").replace(/\n/g,' ')}')">✏ Edit</button>`
+                : `<button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${entId}')">View Donor</button>
+                   <button class="btn btn-ghost btn-sm" onclick="_donorAddFollowup('${entId}')">+ Follow Up</button>
+                   <button class="btn btn-ghost btn-sm" onclick="_editDonorFollowupDate('${f.id}','${f.next_followup_date||''}','${(f.notes||'').replace(/'/g,"\\'").replace(/\n/g,' ')}','${entId}')">✏ Edit</button>`}
             </div></td>
           </tr>`;
         }).join('')}</tbody>

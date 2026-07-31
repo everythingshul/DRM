@@ -228,8 +228,9 @@ router.get('/:id', (req, res) => {
     LIMIT 100
   `, [req.params.id]);
   const scheduledCharges = all('SELECT * FROM scheduled_charges WHERE donor_id = ? AND status = ? ORDER BY scheduled_for', [req.params.id, 'pending']);
+  const followups = all('SELECT df.*, u.full_name as done_by_name FROM donor_followups df LEFT JOIN users u ON u.id=df.done_by WHERE df.donor_id=? ORDER BY df.created_at DESC', [req.params.id]);
 
-  res.json({ donor, paymentMethods, donations, scheduledCharges });
+  res.json({ donor, paymentMethods, donations, scheduledCharges, followups });
 });
 
 // Create donor
@@ -402,6 +403,17 @@ router.post('/:id/move-to-lead', requireOrgAdmin, (req, res) => {
   const hasDonations = get('SELECT id FROM donations WHERE donor_id=? LIMIT 1', [req.params.id]);
   if (hasDonations) return res.status(400).json({ error: 'This donor has donation history and cannot be moved back to Leads. Delete the donations first if this was a mistake.' });
 
+  // donors.notes is a JSON array of {text,at,by} entries but leads.notes is a plain text
+  // field — dumping the raw JSON string in would show as an unreadable blob, so flatten it
+  // to plain text first (mirrors the fix on the lead->donor convert path).
+  let donorNotesText = donor.notes || '';
+  try {
+    const parsed = JSON.parse(donor.notes || '[]');
+    if (Array.isArray(parsed)) {
+      donorNotesText = parsed.map(n => `${n.text}${n.by ? ` — ${n.by}` : ''}${n.at ? ` (${n.at.slice(0,10)})` : ''}`).join('\n\n');
+    }
+  } catch {} // not JSON — already plain text, leave as-is
+
   const leadId = uuidv4();
   run(`INSERT INTO leads (id,org_id,donor_number,title,first_name,last_name,hebrew_title,hebrew_full_name,
        email,cell,home_phone,street,apt,city,state,zip,neighborhood_id,labels,notes,status,created_by)
@@ -409,7 +421,7 @@ router.post('/:id/move-to-lead', requireOrgAdmin, (req, res) => {
     [leadId, req.orgId, donor.donor_number||null, donor.title, donor.first_name||'', donor.last_name||'',
      donor.hebrew_title, donor.hebrew_full_name, donor.email, donor.cell, donor.home_phone,
      donor.street, donor.apt, donor.city, donor.state, donor.zip, donor.neighborhood_id,
-     donor.labels||'[]', donor.notes, 'in_progress', req.user.id]);
+     donor.labels||'[]', donorNotesText, 'in_progress', req.user.id]);
 
   run('DELETE FROM scheduled_charges WHERE donor_id=?', [req.params.id]);
   run('DELETE FROM recurring_schedules WHERE donor_id=?', [req.params.id]);
@@ -417,6 +429,56 @@ router.post('/:id/move-to-lead', requireOrgAdmin, (req, res) => {
   run('DELETE FROM donors WHERE id=?', [req.params.id]);
 
   res.json({ success: true, lead_id: leadId });
+});
+
+// ── Donor follow-ups ─────────────────────────────────────────────────────────
+router.get('/followups/scheduled', (req, res) => {
+  const followups = all(`
+    SELECT d.id as donor_id, d.next_followup_date,
+      d.title, d.first_name, d.last_name, d.cell,
+      (SELECT df.notes FROM donor_followups df WHERE df.donor_id=d.id ORDER BY df.created_at DESC LIMIT 1) as notes,
+      (SELECT df.id FROM donor_followups df WHERE df.donor_id=d.id ORDER BY df.created_at DESC LIMIT 1) as id,
+      (SELECT df.done_by_name FROM donor_followups df WHERE df.donor_id=d.id ORDER BY df.created_at DESC LIMIT 1) as done_by_name
+    FROM donors d
+    WHERE d.org_id=? AND d.next_followup_date IS NOT NULL AND d.removed_at IS NULL
+    ORDER BY d.next_followup_date ASC
+  `, [req.orgId]);
+  res.json(followups);
+});
+
+router.post('/:id/followup', (req, res) => {
+  const donor = get('SELECT * FROM donors WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
+  if (!donor) return res.status(404).json({ error: 'Donor not found' });
+  const { notes, next_followup_date } = req.body;
+  if (!notes) return res.status(400).json({ error: 'Notes required' });
+  const id = uuidv4();
+  // Record this follow-up permanently in history (never modify older rows)
+  run(`INSERT INTO donor_followups (id,donor_id,org_id,notes,next_followup_date,done_by,done_by_name)
+       VALUES (?,?,?,?,?,?,?)`,
+    [id,req.params.id,req.orgId,notes,next_followup_date||null,req.user.id,req.user.full_name]);
+
+  // The donor's single "active" scheduled date lives on the donor row itself —
+  // this is what supersedes, not the history
+  run('UPDATE donors SET next_followup_date=? WHERE id=?', [next_followup_date||null, req.params.id]);
+
+  // Notification is sent by the hourly scheduler exactly when the date arrives (see utils/scheduler.js)
+  res.json({ success: true, followup: get('SELECT * FROM donor_followups WHERE id=?', [id]) });
+});
+
+router.put('/followups/:id', (req, res) => {
+  const fu = get('SELECT * FROM donor_followups WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
+  if (!fu) return res.status(404).json({ error: 'Follow-up not found' });
+  const { notes, next_followup_date } = req.body;
+  run('UPDATE donor_followups SET notes=?,next_followup_date=? WHERE id=?',
+    [notes!==undefined?notes:fu.notes, next_followup_date!==undefined?(next_followup_date||null):fu.next_followup_date, req.params.id]);
+
+  // If this is the most recent follow-up for the donor, keep the donor's active date in sync
+  const latest = get('SELECT id FROM donor_followups WHERE donor_id=? ORDER BY created_at DESC LIMIT 1', [fu.donor_id]);
+  if (latest && latest.id === req.params.id) {
+    run('UPDATE donors SET next_followup_date=? WHERE id=?',
+      [next_followup_date!==undefined?(next_followup_date||null):fu.next_followup_date, fu.donor_id]);
+  }
+  res.json({ success: true });
 });
 
 // --- AUTOPAY CONTROLS ---

@@ -672,6 +672,40 @@ async function processFollowupNotifications() {
         console.error(`[followup] Notification error: ${e.message}`);
       }
     }
+
+    // Donors have no "assigned fundraiser" field, so notify whoever set the follow-up
+    // (done_by) plus org admins, same as the lead path above.
+    const donorDue = all(`
+      SELECT df.*, d.first_name, d.last_name, d.org_id
+      FROM donor_followups df
+      JOIN donors d ON d.id = df.donor_id
+      WHERE d.org_id = ? AND df.next_followup_date = ? AND df.notified = 0
+        AND d.next_followup_date = df.next_followup_date AND d.removed_at IS NULL
+    `, [org.id, today]);
+
+    for (const fu of donorDue) {
+      try {
+        run(`INSERT INTO notifications (id, org_id, user_id, type, title, body, link)
+             VALUES (?, ?, ?, 'followup_due', ?, ?, ?)`,
+          [require('uuid').v4(), fu.org_id, fu.done_by,
+           `Follow-up due: ${fu.first_name||''} ${fu.last_name||''}`,
+           `Scheduled follow-up today. Notes: ${fu.notes?.slice(0,80)||'—'}`,
+           `#donors/${fu.donor_id}`]);
+        const admins = all(`SELECT u.id FROM users u JOIN org_users ou ON ou.user_id=u.id
+          WHERE ou.org_id=? AND ou.role='admin' AND u.id!=?`, [fu.org_id, fu.done_by]);
+        for (const admin of admins) {
+          run(`INSERT INTO notifications (id, org_id, user_id, type, title, body, link) VALUES (?, ?, ?, 'followup_due', ?, ?, ?)`,
+            [require('uuid').v4(), fu.org_id, admin.id,
+             `Follow-up due: ${fu.first_name||''} ${fu.last_name||''}`,
+             `Assigned to ${fu.done_by_name||'staff'}. Follow-up scheduled today.`,
+             `#donors/${fu.donor_id}`]);
+        }
+        run('UPDATE donor_followups SET notified=1 WHERE id=?', [fu.id]);
+        console.log(`[followup] Notified for donor ${fu.donor_id} (org tz: ${tz}, org-local date: ${today})`);
+      } catch(e) {
+        console.error(`[followup] Notification error: ${e.message}`);
+      }
+    }
   }
 }
 
