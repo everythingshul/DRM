@@ -1,0 +1,118 @@
+// server.js - DRM Main Server
+require('dotenv').config();
+const express = require('express');
+const path = require('path');
+const cookieParser = require('cookie-parser');
+const cors = require('cors');
+const helmet = require('helmet');
+const multer = require('multer');
+const { v4: uuidv4 } = require('uuid');
+const XLSX = require('xlsx');
+const fs = require('fs');
+
+const { initDb, all, get, run } = require('./db/schema');
+const authRouter = require('./routes/auth');
+const donorsRouter = require('./routes/donors');
+const orgRouter = require('./routes/org');
+const kvitelRouter = require('./routes/kvitel');
+const paymentsRouter = require('./routes/payments');
+const { startScheduler } = require('./utils/scheduler');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+
+// Middleware
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(cors({ origin: true, credentials: true }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(cookieParser());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// File upload
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const dir = path.join(DATA_DIR, 'uploads');
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => cb(null, uuidv4() + path.extname(file.originalname))
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 }
+});
+
+// Routes
+app.use('/api/auth', authRouter);
+app.use('/api/orgs/:orgId/donors', donorsRouter);
+app.use('/api/orgs/:orgId', orgRouter);
+app.use('/api/orgs/:orgId/kvitel', kvitelRouter);
+app.use('/api/orgs/:orgId/payments', paymentsRouter);
+
+// Check setup
+app.get('/api/setup-status', (req, res) => {
+  const users = all('SELECT id FROM users LIMIT 1', []);
+  res.json({ needsSetup: users.length === 0 });
+});
+
+// Donor import via XLSX
+app.post('/api/orgs/:orgId/import/donors',
+  (req, res, next) => {
+    const { requireAuth, requireOrg, requireOrgAdmin } = require('./middleware/auth');
+    requireAuth(req, res, () => requireOrg(req, res, () => requireOrgAdmin(req, res, next)));
+  },
+  upload.single('file'),
+  (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+      const wb = XLSX.readFile(req.file.path);
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws);
+
+      let imported = 0, errors = [];
+      for (const row of rows) {
+        try {
+          const firstName = row['First Name'] || row['first_name'] || '';
+          const lastName = row['Last Name'] || row['last_name'] || '';
+          if (!firstName || !lastName) { errors.push(`Row skipped: missing name`); continue; }
+
+          const id = uuidv4();
+          run(`INSERT INTO donors (id, org_id, first_name, last_name, hebrew_full_name, email, cell, street, city, state, zip)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [id, req.params.orgId, firstName, lastName,
+             row['Hebrew Name'] || row['hebrew_full_name'] || null,
+             row['Email'] || row['email'] || null,
+             row['Cell'] || row['cell'] || null,
+             row['Street'] || row['street'] || null,
+             row['City'] || row['city'] || null,
+             row['State'] || row['state'] || null,
+             row['Zip'] || row['zip'] || null]);
+          imported++;
+        } catch (e) { errors.push(e.message); }
+      }
+
+      fs.unlinkSync(req.file.path);
+      res.json({ success: true, imported, errors });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+// Serve SPA
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Start
+async function start() {
+  await initDb();
+  startScheduler();
+  app.listen(PORT, () => {
+    console.log(`\n🚀 DRM Server running on port ${PORT}`);
+    console.log(`   Visit: http://localhost:${PORT}\n`);
+  });
+}
+
+start().catch(console.error);
