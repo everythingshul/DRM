@@ -191,10 +191,6 @@ async function processScheduledCharge(charge) {
   const pm = get('SELECT * FROM payment_methods WHERE id = ?', [charge.payment_method_id]);
   const org = get('SELECT * FROM organizations WHERE id = ?', [charge.org_id]);
   if (!donor || !pm || !org) return;
-  if (donor.removed_at) {
-    run(`UPDATE scheduled_charges SET status='cancelled' WHERE id=?`, [charge.id]);
-    return;
-  }
 
   try {
     let txResult;
@@ -258,7 +254,7 @@ async function processAutopay() {
   const donors = all(`
     SELECT d.*, o.settings as org_settings FROM donors d
     JOIN organizations o ON o.id = d.org_id
-    WHERE d.autopay_enabled = 1 AND d.autopay_paused = 0 AND d.removed_at IS NULL
+    WHERE d.autopay_enabled = 1 AND d.autopay_paused = 0
   `, []);
 
   const matching = donors.filter(donor => {
@@ -327,16 +323,16 @@ async function processScheduledEmails() {
       const group = email.recipient_group || 'all_donors';
 
       if (group === 'all_donors') {
-        const donors = all('SELECT email FROM donors WHERE org_id=? AND email IS NOT NULL AND email != "" AND donation_emails_paused=0 AND removed_at IS NULL', [email.org_id]);
+        const donors = all('SELECT email FROM donors WHERE org_id=? AND email IS NOT NULL AND email != "" AND donation_emails_paused=0', [email.org_id]);
         recipients = donors.map(d => d.email);
       } else if (group.startsWith('label:')) {
         const label = group.replace('label:', '');
-        const donors = all('SELECT email, labels FROM donors WHERE org_id=? AND email IS NOT NULL AND email != "" AND donation_emails_paused=0 AND removed_at IS NULL', [email.org_id]);
+        const donors = all('SELECT email, labels FROM donors WHERE org_id=? AND email IS NOT NULL AND email != "" AND donation_emails_paused=0', [email.org_id]);
         recipients = donors.filter(d => {
           try { return JSON.parse(d.labels||'[]').includes(label); } catch { return false; }
         }).map(d => d.email);
       } else if (email.donor_id) {
-        const donor = get('SELECT email FROM donors WHERE id=? AND removed_at IS NULL', [email.donor_id]);
+        const donor = get('SELECT email FROM donors WHERE id=?', [email.donor_id]);
         if (donor?.email) recipients = [donor.email];
       } else {
         // Fallback to org admin email
@@ -460,7 +456,6 @@ async function processRecurringSchedules() {
     FROM recurring_schedules rs
     JOIN donors d ON rs.donor_id = d.id
     WHERE rs.status = 'active'
-      AND d.removed_at IS NULL
       AND rs.next_run <= datetime('now')
       AND (rs.end_date IS NULL OR rs.next_run <= rs.end_date)
       AND (rs.occurrences_limit IS NULL OR rs.occurrences_count < rs.occurrences_limit)
@@ -501,7 +496,7 @@ async function processRecurringSchedules() {
          `Recurring ${sched.frequency} — ${sched.notes || ''}`]);
 
       // Calculate next run
-      const nextRun = calcNextRun(sched.next_run, sched.frequency);
+      const nextRun = await calcNextRun(sched.next_run, sched.frequency, sched.hebrew_day);
       const newCount = (sched.occurrences_count || 0) + 1;
       const limitHit = sched.occurrences_limit && newCount >= sched.occurrences_limit;
       const endHit = sched.end_date && new Date(nextRun) > new Date(sched.end_date);
@@ -520,7 +515,7 @@ async function processRecurringSchedules() {
       // Advance next_run to the NEXT occurrence date — this failed occurrence is skipped,
       // not retried. Status stays 'active' so future scheduled dates still run.
       // One failure email is sent now; the next occurrence will try again fresh.
-      const nextRun = calcNextRun(sched.next_run, sched.frequency);
+      const nextRun = await calcNextRun(sched.next_run, sched.frequency, sched.hebrew_day);
       const limitHit = sched.occurrences_limit && (sched.occurrences_count || 0) >= sched.occurrences_limit;
       const endHit   = sched.end_date && new Date(nextRun) > new Date(sched.end_date);
 
@@ -537,7 +532,11 @@ async function processRecurringSchedules() {
   }
 }
 
-function calcNextRun(fromDate, frequency) {
+async function calcNextRun(fromDate, frequency, hebrewDay) {
+  if (frequency === 'hebrew_monthly') {
+    const hebcal = require('./hebcal');
+    return hebcal.advanceToNextHebrewMonthDate(fromDate, hebrewDay);
+  }
   const d = new Date(fromDate);
   switch (frequency) {
     case 'weekly':    d.setDate(d.getDate() + 7); break;
@@ -644,7 +643,7 @@ async function processFollowupNotifications() {
       FROM lead_followups lf
       JOIN leads l ON l.id = lf.lead_id
       WHERE l.org_id = ? AND lf.next_followup_date = ? AND lf.notified = 0 AND l.assigned_to IS NOT NULL
-        AND l.next_followup_date = lf.next_followup_date AND l.removed_at IS NULL
+        AND l.next_followup_date = lf.next_followup_date
     `, [org.id, today]);
 
     for (const fu of due) {
@@ -668,40 +667,6 @@ async function processFollowupNotifications() {
         }
         run('UPDATE lead_followups SET notified=1 WHERE id=?', [fu.id]);
         console.log(`[followup] Notified for lead ${fu.lead_id} (org tz: ${tz}, org-local date: ${today})`);
-      } catch(e) {
-        console.error(`[followup] Notification error: ${e.message}`);
-      }
-    }
-
-    // Donors have no "assigned fundraiser" field, so notify whoever set the follow-up
-    // (done_by) plus org admins, same as the lead path above.
-    const donorDue = all(`
-      SELECT df.*, d.first_name, d.last_name, d.org_id
-      FROM donor_followups df
-      JOIN donors d ON d.id = df.donor_id
-      WHERE d.org_id = ? AND df.next_followup_date = ? AND df.notified = 0
-        AND d.next_followup_date = df.next_followup_date AND d.removed_at IS NULL
-    `, [org.id, today]);
-
-    for (const fu of donorDue) {
-      try {
-        run(`INSERT INTO notifications (id, org_id, user_id, type, title, body, link)
-             VALUES (?, ?, ?, 'followup_due', ?, ?, ?)`,
-          [require('uuid').v4(), fu.org_id, fu.done_by,
-           `Follow-up due: ${fu.first_name||''} ${fu.last_name||''}`,
-           `Scheduled follow-up today. Notes: ${fu.notes?.slice(0,80)||'—'}`,
-           `#donors/${fu.donor_id}`]);
-        const admins = all(`SELECT u.id FROM users u JOIN org_users ou ON ou.user_id=u.id
-          WHERE ou.org_id=? AND ou.role='admin' AND u.id!=?`, [fu.org_id, fu.done_by]);
-        for (const admin of admins) {
-          run(`INSERT INTO notifications (id, org_id, user_id, type, title, body, link) VALUES (?, ?, ?, 'followup_due', ?, ?, ?)`,
-            [require('uuid').v4(), fu.org_id, admin.id,
-             `Follow-up due: ${fu.first_name||''} ${fu.last_name||''}`,
-             `Assigned to ${fu.done_by_name||'staff'}. Follow-up scheduled today.`,
-             `#donors/${fu.donor_id}`]);
-        }
-        run('UPDATE donor_followups SET notified=1 WHERE id=?', [fu.id]);
-        console.log(`[followup] Notified for donor ${fu.donor_id} (org tz: ${tz}, org-local date: ${today})`);
       } catch(e) {
         console.error(`[followup] Notification error: ${e.message}`);
       }

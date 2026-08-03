@@ -156,7 +156,7 @@ router.get('/stats', (req, res) => {
     params.push(from, to);
   }
 
-  const totalDonors = get('SELECT COUNT(*) as n FROM donors WHERE org_id = ? AND removed_at IS NULL', [req.orgId])?.n || 0;
+  const totalDonors = get('SELECT COUNT(*) as n FROM donors WHERE org_id = ?', [req.orgId])?.n || 0;
   const activeDonors = get(`SELECT COUNT(DISTINCT donor_id) as n FROM donations WHERE org_id = ?${dateFilter} AND status = 'completed'`, params)?.n || 0;
   const totalAmount = get(`SELECT COALESCE(SUM(amount),0) as n FROM donations WHERE org_id = ?${dateFilter} AND status = 'completed'`, params)?.n || 0;
   const totalDonations = get(`SELECT COUNT(*) as n FROM donations WHERE org_id = ?${dateFilter} AND status = 'completed'`, params)?.n || 0;
@@ -197,12 +197,12 @@ router.get('/stats', (req, res) => {
     SELECT COUNT(*) as total,
            SUM(CASE WHEN autopay_enabled = 1 AND autopay_paused = 0 THEN 1 ELSE 0 END) as active,
            SUM(CASE WHEN autopay_enabled = 1 AND autopay_paused = 1 THEN 1 ELSE 0 END) as paused
-    FROM donors WHERE org_id = ? AND removed_at IS NULL
+    FROM donors WHERE org_id = ?
   `, [req.orgId]);
 
   const failedCharges = get(`SELECT COUNT(*) as n FROM charge_failures WHERE org_id = ? AND acknowledged = 0`, [req.orgId])?.n || 0;
   const needsVerification = get(`
-    SELECT COUNT(*) as n FROM donors WHERE org_id = ? AND removed_at IS NULL
+    SELECT COUNT(*) as n FROM donors WHERE org_id = ?
     AND (info_verified_at IS NULL OR julianday('now') - julianday(info_verified_at) > 180)
   `, [req.orgId])?.n || 0;
   const totalExpenses = get(`SELECT COALESCE(SUM(amount),0) as n FROM expenses WHERE org_id=?`, [req.orgId])?.n || 0;
@@ -293,7 +293,7 @@ router.get('/reports/donations', (req, res) => {
 
 // Export donors
 router.get('/reports/donors', (req, res) => {
-  const { format = 'json', include_removed } = req.query;
+  const { format = 'json' } = req.query;
   const donors = all(`
     SELECT d.*, n.name_he as neighborhood_name,
            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE donor_id=d.id AND status='completed') as total_donated,
@@ -302,7 +302,7 @@ router.get('/reports/donors', (req, res) => {
            (SELECT COUNT(*) FROM recurring_schedules WHERE donor_id=d.id AND status='active') as active_recurring
     FROM donors d
     LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
-    WHERE d.org_id = ? ${include_removed === '1' ? '' : 'AND d.removed_at IS NULL'}
+    WHERE d.org_id = ?
     ORDER BY d.last_name, d.first_name
   `, [req.orgId]);
 
@@ -314,11 +314,6 @@ router.get('/reports/donors', (req, res) => {
       // Parse labels JSON
       let labels = '';
       try { labels = JSON.parse(d.labels||'[]').join(', '); } catch {}
-
-      // donor.notes is a JSON array of {text,at,by} entries, not plain text —
-      // export the readable note text (each on its own line) rather than raw JSON.
-      let notesText = '';
-      try { notesText = JSON.parse(d.notes||'[]').map(n => n.text).filter(Boolean).join('\n'); } catch {}
 
       // Get payment methods for this donor
       const cards = all(
@@ -348,7 +343,7 @@ router.get('/reports/donors', (req, res) => {
         'Zip':                d.zip || '',
         'Neighborhood':       d.neighborhood_name || '',
         'Labels':             labels,
-        'Notes':              notesText,
+        'Notes':              d.notes || '',
         'Total Donated':      parseFloat(d.total_donated||0).toFixed(2),
         'Donation Count':     d.donation_count || 0,
         'Last Donation':      d.last_donation_date ? d.last_donation_date.slice(0,10) : '',
@@ -809,6 +804,21 @@ router.put('/timezone', requireOrgAdmin, (req, res) => {
   current.timezone = timezone;
   run('UPDATE organizations SET settings=? WHERE id=?', [JSON.stringify(current), req.orgId]);
   res.json({ success: true });
+});
+
+// ── Rosh Chodesh / Erev Rosh Chodesh dates (next N years, via Hebcal) ──────────
+router.get('/rosh-chodesh', async (req, res) => {
+  try {
+    const hebcal = require('../utils/hebcal');
+    const years = Math.min(Math.max(parseInt(req.query.years, 10) || 5, 1), 10);
+    const now = new Date();
+    const start = now.toISOString().slice(0, 10);
+    const end = new Date(Date.UTC(now.getUTCFullYear() + years, now.getUTCMonth(), now.getUTCDate())).toISOString().slice(0, 10);
+    const list = await hebcal.getRoshChodeshList({ start, end });
+    res.json(list);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ── Outstanding manual charges (non-CC/DAF that need manual collection) ────────

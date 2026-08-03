@@ -4,32 +4,13 @@ const router = express.Router({ mergeParams: true });
 const { v4: uuidv4 } = require('uuid');
 const { all, get, run } = require('../db/schema');
 const { requireAuth, requireOrg, requireOrgAdmin } = require('../middleware/auth');
-const { findDuplicateClusters } = require('../utils/duplicates');
 
 // Apply auth + org middleware
 router.use(requireAuth, requireOrg);
 
-// Build a donor.id -> { other, reason } map from the live duplicate clusters, for
-// annotating list/detail rows with the "⚠ DUPLICATE" badge. Only non-dismissed pairs.
-function _donorDupMap(orgId) {
-  const clusters = findDuplicateClusters(orgId);
-  const dismissals = all('SELECT * FROM duplicate_dismissals WHERE org_id=?', [orgId]);
-  const dismissedKeys = new Set(dismissals.map(d => `${d.entity_a_type}:${d.entity_a_id}|${d.entity_b_type}:${d.entity_b_id}`));
-  const map = new Map();
-  for (const c of clusters) {
-    const key = `${c.a.type}:${c.a.id}|${c.b.type}:${c.b.id}`;
-    if (dismissedKeys.has(key)) continue;
-    if (c.a.type === 'donor' && !map.has(c.a.id)) map.set(c.a.id, { other_id: c.b.id, other_type: c.b.type, reason: c.reasons.join(', ') });
-    if (c.b.type === 'donor' && !map.has(c.b.id)) map.set(c.b.id, { other_id: c.a.id, other_type: c.a.type, reason: c.reasons.join(', ') });
-  }
-  return map;
-}
-
 // List donors
 router.get('/', (req, res) => {
-  const { search, neighborhood, label, kvitel_enabled, autopay, duplicates_only, page = 1, limit = 50 } = req.query;
-  const dupMap = (duplicates_only === '1' || duplicates_only === 'true') ? _donorDupMap(req.orgId) : null;
-
+  const { search, neighborhood, label, kvitel_enabled, autopay, page = 1, limit = 50 } = req.query;
   let sql = `
     SELECT d.*,
       n.name_he as neighborhood_name,
@@ -38,10 +19,12 @@ router.get('/', (req, res) => {
       (SELECT COALESCE(SUM(amount),0) FROM donations WHERE donor_id = d.id AND status = 'completed') as total_amount,
       (SELECT MAX(donation_date) FROM donations WHERE donor_id = d.id AND status = 'completed') as last_donation_date,
       CASE WHEN d.info_verified_at IS NULL OR julianday('now') - julianday(d.info_verified_at) > 180
-           THEN 1 ELSE 0 END as needs_verification
+           THEN 1 ELSE 0 END as needs_verification,
+      (SELECT dd.id FROM donor_duplicates dd WHERE dd.status='pending' AND (dd.donor_id_a=d.id OR dd.donor_id_b=d.id) LIMIT 1) as dup_id,
+      (SELECT CASE WHEN dd.donor_id_a=d.id THEN dd.donor_id_b ELSE dd.donor_id_a END FROM donor_duplicates dd WHERE dd.status='pending' AND (dd.donor_id_a=d.id OR dd.donor_id_b=d.id) LIMIT 1) as dup_other_id
     FROM donors d
     LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
-    WHERE d.org_id = ? AND d.removed_at IS NULL
+    WHERE d.org_id = ?
   `;
   const params = [req.orgId];
 
@@ -53,11 +36,6 @@ router.get('/', (req, res) => {
   if (neighborhood) { sql += ' AND d.neighborhood_id = ?'; params.push(neighborhood); }
   if (kvitel_enabled !== undefined) { sql += ' AND d.kvitel_enabled = ?'; params.push(kvitel_enabled); }
   if (autopay !== undefined) { sql += ' AND d.autopay_enabled = ?'; params.push(autopay); }
-  if (dupMap) {
-    const ids = [...dupMap.keys()];
-    sql += ids.length ? ` AND d.id IN (${ids.map(()=>'?').join(',')})` : ' AND 1=0';
-    params.push(...ids);
-  }
 
   sql += ' ORDER BY d.last_name, d.first_name';
 
@@ -78,16 +56,6 @@ router.get('/', (req, res) => {
     });
   }
 
-  // Annotate with live duplicate badges (compute once if not already, e.g. when duplicates_only wasn't set)
-  const badgeMap = dupMap || _donorDupMap(req.orgId);
-  for (const d of filtered) {
-    const dup = badgeMap.get(d.id);
-    d.dup_id = dup ? d.id : null;
-    d.dup_other_id = dup ? dup.other_id : null;
-    d.dup_other_type = dup ? dup.other_type : null;
-    d.dup_reason = dup ? dup.reason : null;
-  }
-
   res.json({ donors: filtered, total, page: parseInt(page), limit: parseInt(limit) });
 });
 
@@ -98,7 +66,7 @@ router.get('/needs-verification', (req, res) => {
       CAST((julianday('now') - julianday(d.created_at)) / 30.44 AS INTEGER) as months_old
     FROM donors d
     LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
-    WHERE d.org_id = ? AND d.removed_at IS NULL
+    WHERE d.org_id = ?
     AND (d.info_verified_at IS NULL OR julianday('now') - julianday(d.info_verified_at) > 180)
     ORDER BY d.info_verified_at ASC, d.created_at ASC
   `, [req.orgId]);
@@ -111,88 +79,11 @@ router.get('/search', (req, res) => {
   const q = '%' + (req.query.q || '') + '%';
   const donors = all(`
     SELECT id, first_name, last_name, hebrew_full_name, email, cell
-    FROM donors WHERE org_id=? AND removed_at IS NULL
+    FROM donors WHERE org_id=?
       AND (first_name LIKE ? OR last_name LIKE ? OR email LIKE ? OR cell LIKE ? OR hebrew_full_name LIKE ?)
     ORDER BY last_name, first_name LIMIT 20`,
     [req.orgId, q, q, q, q, q]);
   res.json(donors);
-});
-
-// ── Recently removed donors (30-day restore window) — must be before /:id ──────
-router.get('/removed', (req, res) => {
-  const donors = all(`
-    SELECT id, first_name, last_name, donor_number, email, cell, removed_at
-    FROM donors WHERE org_id=? AND removed_at IS NOT NULL
-      AND julianday('now') - julianday(removed_at) <= 30
-    ORDER BY removed_at DESC
-  `, [req.orgId]);
-  res.json(donors);
-});
-
-// ── Duplicate flags (computed live, across donors + leads) — must be before /:id ────
-// See utils/duplicates.js. Status here means: 'pending' (default) = not dismissed,
-// 'dismissed' = explicitly marked "not a duplicate", 'all' = both.
-router.get('/duplicates', (req, res) => {
-  const { status } = req.query;
-  const clusters = findDuplicateClusters(req.orgId);
-  const dismissals = all('SELECT * FROM duplicate_dismissals WHERE org_id=?', [req.orgId]);
-  const dismissedKeys = new Set(dismissals.map(d => `${d.entity_a_type}:${d.entity_a_id}|${d.entity_b_type}:${d.entity_b_id}`));
-
-  const entityInfo = e => ({
-    type: e.type, id: e.id,
-    name: `${e.first_name||''} ${e.last_name||''}`.trim() || '(no name)',
-    email: e.email||null, cell: e.cell||null, number: e.donor_number||null
-  });
-
-  let result = clusters.map(c => {
-    const key = `${c.a.type}:${c.a.id}|${c.b.type}:${c.b.id}`;
-    return { key, reason: c.reasons.join(', '), dismissed: dismissedKeys.has(key), entity_a: entityInfo(c.a), entity_b: entityInfo(c.b) };
-  });
-
-  if (status === 'dismissed')      result = result.filter(c => c.dismissed);
-  else if (status !== 'all')       result = result.filter(c => !c.dismissed); // default: pending
-
-  res.json(result);
-});
-
-// "Keep both" — remembers this pair is not actually a duplicate so it stops resurfacing.
-router.post('/duplicates/dismiss', requireOrgAdmin, (req, res) => {
-  const { entity_a_type, entity_a_id, entity_b_type, entity_b_id } = req.body;
-  if (!entity_a_type || !entity_a_id || !entity_b_type || !entity_b_id) return res.status(400).json({ error: 'Missing entity info' });
-  const ka = `${entity_a_type}:${entity_a_id}`, kb = `${entity_b_type}:${entity_b_id}`;
-  const [aType, aId, bType, bId] = ka < kb
-    ? [entity_a_type, entity_a_id, entity_b_type, entity_b_id]
-    : [entity_b_type, entity_b_id, entity_a_type, entity_a_id];
-  run(`INSERT OR IGNORE INTO duplicate_dismissals (id,org_id,entity_a_type,entity_a_id,entity_b_type,entity_b_id,dismissed_by) VALUES (?,?,?,?,?,?,?)`,
-    [uuidv4(), req.orgId, aType, aId, bType, bId, req.user.id]);
-  res.json({ success: true });
-});
-
-router.post('/duplicates/undismiss', requireOrgAdmin, (req, res) => {
-  const { entity_a_type, entity_a_id, entity_b_type, entity_b_id } = req.body;
-  if (!entity_a_type || !entity_a_id || !entity_b_type || !entity_b_id) return res.status(400).json({ error: 'Missing entity info' });
-  const ka = `${entity_a_type}:${entity_a_id}`, kb = `${entity_b_type}:${entity_b_id}`;
-  const [aType, aId, bType, bId] = ka < kb
-    ? [entity_a_type, entity_a_id, entity_b_type, entity_b_id]
-    : [entity_b_type, entity_b_id, entity_a_type, entity_a_id];
-  run(`DELETE FROM duplicate_dismissals WHERE org_id=? AND entity_a_type=? AND entity_a_id=? AND entity_b_type=? AND entity_b_id=?`,
-    [req.orgId, aType, aId, bType, bId]);
-  res.json({ success: true });
-});
-
-// Merge is only meaningful between two donors — moves donations/payment methods onto the
-// kept donor and deletes the other. For a donor/lead pair, resolve manually (e.g. convert
-// or delete the lead) and dismiss the pair instead.
-router.post('/duplicates/merge', requireOrgAdmin, (req, res) => {
-  const { keep_id, drop_id } = req.body;
-  if (!keep_id || !drop_id || keep_id === drop_id) return res.status(400).json({ error: 'Invalid merge request' });
-  const keep = get('SELECT id FROM donors WHERE id=? AND org_id=?', [keep_id, req.orgId]);
-  const drop = get('SELECT id FROM donors WHERE id=? AND org_id=?', [drop_id, req.orgId]);
-  if (!keep || !drop) return res.status(404).json({ error: 'Donor not found' });
-  run('UPDATE donations SET donor_id=? WHERE donor_id=?', [keep_id, drop_id]);
-  run('UPDATE payment_methods SET donor_id=? WHERE donor_id=?', [keep_id, drop_id]);
-  run('DELETE FROM donors WHERE id=?', [drop_id]);
-  res.json({ success: true });
 });
 
 router.get('/:id', (req, res) => {
@@ -204,19 +95,15 @@ router.get('/:id', (req, res) => {
       (SELECT COALESCE(SUM(amount),0) FROM donations WHERE donor_id = d.id AND status = 'completed') as total_amount,
       (SELECT MAX(donation_date) FROM donations WHERE donor_id = d.id AND status = 'completed') as last_donation_date,
       CASE WHEN d.info_verified_at IS NULL OR julianday('now') - julianday(d.info_verified_at) > 180
-           THEN 1 ELSE 0 END as needs_verification
+           THEN 1 ELSE 0 END as needs_verification,
+      (SELECT dd.id FROM donor_duplicates dd WHERE dd.status='pending' AND (dd.donor_id_a=d.id OR dd.donor_id_b=d.id) LIMIT 1) as dup_id,
+      (SELECT CASE WHEN dd.donor_id_a=d.id THEN dd.donor_id_b ELSE dd.donor_id_a END FROM donor_duplicates dd WHERE dd.status='pending' AND (dd.donor_id_a=d.id OR dd.donor_id_b=d.id) LIMIT 1) as dup_other_id
     FROM donors d
     LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
     WHERE d.id = ? AND d.org_id = ?
   `, [req.params.id, req.orgId]);
 
   if (!donor) return res.status(404).json({ error: 'Donor not found' });
-
-  const dup = _donorDupMap(req.orgId).get(donor.id);
-  donor.dup_id = dup ? donor.id : null;
-  donor.dup_other_id = dup ? dup.other_id : null;
-  donor.dup_other_type = dup ? dup.other_type : null;
-  donor.dup_reason = dup ? dup.reason : null;
 
   const paymentMethods = all('SELECT * FROM payment_methods WHERE donor_id = ? ORDER BY is_default DESC, created_at DESC', [req.params.id]);
   const donations = all(`
@@ -228,9 +115,8 @@ router.get('/:id', (req, res) => {
     LIMIT 100
   `, [req.params.id]);
   const scheduledCharges = all('SELECT * FROM scheduled_charges WHERE donor_id = ? AND status = ? ORDER BY scheduled_for', [req.params.id, 'pending']);
-  const followups = all('SELECT df.*, u.full_name as done_by_name FROM donor_followups df LEFT JOIN users u ON u.id=df.done_by WHERE df.donor_id=? ORDER BY df.created_at DESC', [req.params.id]);
 
-  res.json({ donor, paymentMethods, donations, scheduledCharges, followups });
+  res.json({ donor, paymentMethods, donations, scheduledCharges });
 });
 
 // Create donor
@@ -269,8 +155,37 @@ router.post('/', (req, res) => {
 
     const donor = get('SELECT * FROM donors WHERE id = ?', [id]);
 
-    // Duplicate detection now runs in real time across donors + leads (see
-    // utils/duplicates.js) instead of being computed and stored here at creation time.
+    // ── Duplicate detection — same rules as bulk import ─────────────────────────
+    // Strong signals (flag alone): exact full name, Hebrew name, email, address (incl. apt)
+    // Weak signal (phone alone): only flag if the last name also matches, since shared
+    // household phones (e.g. spouses) are common and legitimate on their own.
+    try {
+      const norm10 = p => (p||'').replace(/\D/g,'').slice(-10);
+      const others = all('SELECT id,first_name,last_name,email,cell,home_phone,hebrew_full_name,street,apt,zip FROM donors WHERE org_id=? AND id!=?', [req.orgId, id]);
+      let matchId = null, reasons = [];
+      const fn2 = (first_name||'').toLowerCase().trim(), ln2 = (last_name||'').toLowerCase().trim();
+      const hebrew2 = (hebrew_full_name||'').toLowerCase().trim();
+      const email2 = (email||'').toLowerCase().trim();
+      const addrKey2 = street && zip ? `${street.toLowerCase().trim()}|${(apt||'').toLowerCase().trim()}|${zip.trim()}` : null;
+      const cell10 = norm10(cell), home10 = norm10(home_phone);
+
+      for (const o of others) {
+        const oFn = (o.first_name||'').toLowerCase().trim(), oLn = (o.last_name||'').toLowerCase().trim();
+        if (fn2 && ln2 && oFn===fn2 && oLn===ln2)                             { reasons.push('Full name match'); matchId = matchId||o.id; }
+        if (hebrew2 && o.hebrew_full_name && o.hebrew_full_name.toLowerCase().trim()===hebrew2) { reasons.push('Hebrew name match'); matchId = matchId||o.id; }
+        if (email2 && o.email && o.email.toLowerCase().trim()===email2)      { reasons.push('Same email'); matchId = matchId||o.id; }
+        if (addrKey2 && o.street && o.zip) {
+          const oAddrKey = `${o.street.toLowerCase().trim()}|${(o.apt||'').toLowerCase().trim()}|${o.zip.trim()}`;
+          if (oAddrKey === addrKey2) { reasons.push('Same address'); matchId = matchId||o.id; }
+        }
+        if (cell10 && o.cell && norm10(o.cell)===cell10 && (!ln2 || !oLn || oLn===ln2)) { reasons.push('Same cell phone'); matchId = matchId||o.id; }
+        if (home10 && o.home_phone && norm10(o.home_phone)===home10 && (!ln2 || !oLn || oLn===ln2)) { reasons.push('Same home phone'); matchId = matchId||o.id; }
+      }
+      if (matchId && reasons.length) {
+        run(`INSERT OR IGNORE INTO donor_duplicates (id,org_id,donor_id_a,donor_id_b,reason) VALUES (?,?,?,?,?)`,
+          [uuidv4(), req.orgId, matchId, id, [...new Set(reasons)].join(', ')]);
+      }
+    } catch(e) { console.error('[donor create] duplicate check error:', e.message); }
 
     // Sync to Sola customer portal (async, don't block response)
     setImmediate(async () => {
@@ -374,25 +289,16 @@ router.post('/:id/verify', (req, res) => {
   res.json({ success: true });
 });
 
-// Remove donor — soft delete, restorable for 30 days (Settings > Users mirrors this for staff)
+// Delete donor — preserve donations for financial tracking
 router.delete('/:id', (req, res) => {
   const existing = get('SELECT id FROM donors WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
   if (!existing) return res.status(404).json({ error: 'Donor not found' });
-  // Stop any billing while removed. Left cancelled/paused on restore — an admin must
-  // manually re-enable autopay/recurring rather than have it silently resume.
-  run(`UPDATE scheduled_charges SET status='cancelled' WHERE donor_id=? AND status='pending'`, [req.params.id]);
-  run(`UPDATE recurring_schedules SET status='cancelled' WHERE donor_id=? AND status='active'`, [req.params.id]);
-  run('UPDATE donors SET removed_at = CURRENT_TIMESTAMP, autopay_paused = 1 WHERE id = ?', [req.params.id]);
-  res.json({ success: true });
-});
-
-router.post('/:id/restore', requireOrgAdmin, (req, res) => {
-  const donor = get('SELECT * FROM donors WHERE id=? AND org_id=? AND removed_at IS NOT NULL', [req.params.id, req.orgId]);
-  if (!donor) return res.status(404).json({ error: 'Not found' });
-  if ((Date.now() - new Date(donor.removed_at).getTime()) > 30*24*60*60*1000) {
-    return res.status(400).json({ error: 'The 30-day restore window has passed' });
-  }
-  run('UPDATE donors SET removed_at = NULL WHERE id = ?', [req.params.id]);
+  run('DELETE FROM scheduled_charges WHERE donor_id = ?', [req.params.id]);
+  run('DELETE FROM recurring_schedules WHERE donor_id = ?', [req.params.id]);
+  run('DELETE FROM payment_methods WHERE donor_id = ?', [req.params.id]);
+  // Keep donations — set donor_id to null so financial records are preserved
+  run('UPDATE donations SET donor_id = NULL WHERE donor_id = ?', [req.params.id]);
+  run('DELETE FROM donors WHERE id = ?', [req.params.id]);
   res.json({ success: true });
 });
 
@@ -403,17 +309,6 @@ router.post('/:id/move-to-lead', requireOrgAdmin, (req, res) => {
   const hasDonations = get('SELECT id FROM donations WHERE donor_id=? LIMIT 1', [req.params.id]);
   if (hasDonations) return res.status(400).json({ error: 'This donor has donation history and cannot be moved back to Leads. Delete the donations first if this was a mistake.' });
 
-  // donors.notes is a JSON array of {text,at,by} entries but leads.notes is a plain text
-  // field — dumping the raw JSON string in would show as an unreadable blob, so flatten it
-  // to plain text first (mirrors the fix on the lead->donor convert path).
-  let donorNotesText = donor.notes || '';
-  try {
-    const parsed = JSON.parse(donor.notes || '[]');
-    if (Array.isArray(parsed)) {
-      donorNotesText = parsed.map(n => `${n.text}${n.by ? ` — ${n.by}` : ''}${n.at ? ` (${n.at.slice(0,10)})` : ''}`).join('\n\n');
-    }
-  } catch {} // not JSON — already plain text, leave as-is
-
   const leadId = uuidv4();
   run(`INSERT INTO leads (id,org_id,donor_number,title,first_name,last_name,hebrew_title,hebrew_full_name,
        email,cell,home_phone,street,apt,city,state,zip,neighborhood_id,labels,notes,status,created_by)
@@ -421,7 +316,7 @@ router.post('/:id/move-to-lead', requireOrgAdmin, (req, res) => {
     [leadId, req.orgId, donor.donor_number||null, donor.title, donor.first_name||'', donor.last_name||'',
      donor.hebrew_title, donor.hebrew_full_name, donor.email, donor.cell, donor.home_phone,
      donor.street, donor.apt, donor.city, donor.state, donor.zip, donor.neighborhood_id,
-     donor.labels||'[]', donorNotesText, 'in_progress', req.user.id]);
+     donor.labels||'[]', donor.notes, 'in_progress', req.user.id]);
 
   run('DELETE FROM scheduled_charges WHERE donor_id=?', [req.params.id]);
   run('DELETE FROM recurring_schedules WHERE donor_id=?', [req.params.id]);
@@ -431,54 +326,50 @@ router.post('/:id/move-to-lead', requireOrgAdmin, (req, res) => {
   res.json({ success: true, lead_id: leadId });
 });
 
-// ── Donor follow-ups ─────────────────────────────────────────────────────────
-router.get('/followups/scheduled', (req, res) => {
-  const followups = all(`
-    SELECT d.id as donor_id, d.next_followup_date,
-      d.title, d.first_name, d.last_name, d.cell,
-      (SELECT df.notes FROM donor_followups df WHERE df.donor_id=d.id ORDER BY df.created_at DESC LIMIT 1) as notes,
-      (SELECT df.id FROM donor_followups df WHERE df.donor_id=d.id ORDER BY df.created_at DESC LIMIT 1) as id,
-      (SELECT df.done_by_name FROM donor_followups df WHERE df.donor_id=d.id ORDER BY df.created_at DESC LIMIT 1) as done_by_name
-    FROM donors d
-    WHERE d.org_id=? AND d.next_followup_date IS NOT NULL AND d.removed_at IS NULL
-    ORDER BY d.next_followup_date ASC
-  `, [req.orgId]);
-  res.json(followups);
+// ── Duplicate flags ───────────────────────────────────────────────────────────
+router.get('/duplicates', (req, res) => {
+  const { status } = req.query;
+  let where = 'dd.org_id=?', params = [req.orgId];
+  if (!status || status === 'pending') { where += " AND dd.status='pending'"; }
+  else if (status !== 'all')            { where += ' AND dd.status=?'; params.push(status); }
+  const dups = all(`
+    SELECT dd.*,
+      da.first_name||' '||COALESCE(da.last_name,'') as name_a, da.email as email_a, da.cell as cell_a, da.donor_number as number_a,
+      db.first_name||' '||COALESCE(db.last_name,'') as name_b, db.email as email_b, db.cell as cell_b, db.donor_number as number_b
+    FROM donor_duplicates dd
+    JOIN donors da ON da.id=dd.donor_id_a
+    JOIN donors db ON db.id=dd.donor_id_b
+    WHERE ${where}
+    ORDER BY dd.created_at DESC
+  `, params);
+  res.json(dups);
 });
 
-router.post('/:id/followup', (req, res) => {
-  const donor = get('SELECT * FROM donors WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
-  if (!donor) return res.status(404).json({ error: 'Donor not found' });
-  const { notes, next_followup_date } = req.body;
-  if (!notes) return res.status(400).json({ error: 'Notes required' });
-  const id = uuidv4();
-  // Record this follow-up permanently in history (never modify older rows)
-  run(`INSERT INTO donor_followups (id,donor_id,org_id,notes,next_followup_date,done_by,done_by_name)
-       VALUES (?,?,?,?,?,?,?)`,
-    [id,req.params.id,req.orgId,notes,next_followup_date||null,req.user.id,req.user.full_name]);
+router.post('/duplicates/:id/resolve', requireOrgAdmin, (req, res) => {
+  try {
+    const { action } = req.body;
+    const dup = get('SELECT * FROM donor_duplicates WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
+    if (!dup) return res.status(404).json({ error: 'Not found' });
 
-  // The donor's single "active" scheduled date lives on the donor row itself —
-  // this is what supersedes, not the history
-  run('UPDATE donors SET next_followup_date=? WHERE id=?', [next_followup_date||null, req.params.id]);
-
-  // Notification is sent by the hourly scheduler exactly when the date arrives (see utils/scheduler.js)
-  res.json({ success: true, followup: get('SELECT * FROM donor_followups WHERE id=?', [id]) });
-});
-
-router.put('/followups/:id', (req, res) => {
-  const fu = get('SELECT * FROM donor_followups WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
-  if (!fu) return res.status(404).json({ error: 'Follow-up not found' });
-  const { notes, next_followup_date } = req.body;
-  run('UPDATE donor_followups SET notes=?,next_followup_date=? WHERE id=?',
-    [notes!==undefined?notes:fu.notes, next_followup_date!==undefined?(next_followup_date||null):fu.next_followup_date, req.params.id]);
-
-  // If this is the most recent follow-up for the donor, keep the donor's active date in sync
-  const latest = get('SELECT id FROM donor_followups WHERE donor_id=? ORDER BY created_at DESC LIMIT 1', [fu.donor_id]);
-  if (latest && latest.id === req.params.id) {
-    run('UPDATE donors SET next_followup_date=? WHERE id=?',
-      [next_followup_date!==undefined?(next_followup_date||null):fu.next_followup_date, fu.donor_id]);
-  }
-  res.json({ success: true });
+    if (action === 'keep_both') {
+      run('UPDATE donor_duplicates SET status=?,resolved_by=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?',
+        ['resolved_separate', req.user.id, req.params.id]);
+    } else if (action === 'merge_into_a') {
+      // Move donations from B to A, delete B
+      run('UPDATE donations SET donor_id=? WHERE donor_id=?', [dup.donor_id_a, dup.donor_id_b]);
+      run('UPDATE payment_methods SET donor_id=? WHERE donor_id=?', [dup.donor_id_a, dup.donor_id_b]);
+      run('DELETE FROM donors WHERE id=?', [dup.donor_id_b]);
+      run('UPDATE donor_duplicates SET status=?,resolved_by=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?',
+        ['merged', req.user.id, req.params.id]);
+    } else if (action === 'merge_into_b') {
+      run('UPDATE donations SET donor_id=? WHERE donor_id=?', [dup.donor_id_b, dup.donor_id_a]);
+      run('UPDATE payment_methods SET donor_id=? WHERE donor_id=?', [dup.donor_id_b, dup.donor_id_a]);
+      run('DELETE FROM donors WHERE id=?', [dup.donor_id_a]);
+      run('UPDATE donor_duplicates SET status=?,resolved_by=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?',
+        ['merged', req.user.id, req.params.id]);
+    }
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // --- AUTOPAY CONTROLS ---
@@ -499,7 +390,7 @@ router.get('/:id/payment-methods', (req, res) => {
 
 router.post('/:id/payment-methods', async (req, res) => {
   try {
-    const { type, label, last_four, card_brand, daf_name, other_description, stripe_payment_method_id, is_default = 0 } = req.body;
+    const { type, label, last_four, card_brand, daf_name, other_description, is_default = 0 } = req.body;
     if (!type) return res.status(400).json({ error: 'Type required' });
 
     const donor = get('SELECT * FROM donors WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
@@ -510,9 +401,9 @@ router.post('/:id/payment-methods', async (req, res) => {
     }
 
     const pmId = uuidv4();
-    run(`INSERT INTO payment_methods (id, donor_id, org_id, type, label, last_four, card_brand, daf_name, other_description, stripe_payment_method_id, is_default)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [pmId, req.params.id, req.orgId, type, label || null, last_four || null, card_brand || null, daf_name || null, other_description || null, stripe_payment_method_id || null, is_default ? 1 : 0]);
+    run(`INSERT INTO payment_methods (id, donor_id, org_id, type, label, last_four, card_brand, daf_name, other_description, is_default)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [pmId, req.params.id, req.orgId, type, label || null, last_four || null, card_brand || null, daf_name || null, other_description || null, is_default ? 1 : 0]);
 
     res.json({ success: true, paymentMethod: get('SELECT * FROM payment_methods WHERE id = ?', [pmId]) });
   } catch (e) {
@@ -546,9 +437,8 @@ router.post('/:id/donations', async (req, res) => {
 
     const donor = get('SELECT * FROM donors WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!donor) return res.status(404).json({ error: 'Donor not found' });
-    if (_donorDupMap(req.orgId).has(req.params.id)) {
-      return res.status(400).json({ error: 'Unresolved duplicate flag on this donor. Resolve in Info Check first.' });
-    }
+    const _dup = get(`SELECT id FROM donor_duplicates WHERE status='pending' AND (donor_id_a=? OR donor_id_b=?)`, [req.params.id, req.params.id]);
+    if (_dup) return res.status(400).json({ error: 'Unresolved duplicate flag on this donor. Resolve in Info Check first.' });
 
     const id = uuidv4();
     const autoTxId = transaction_id || ('ES' + String(Math.floor(Math.random() * 1000000000)).padStart(9, '0'));
@@ -649,61 +539,84 @@ router.get('/:id/recurring', (req, res) => {
   res.json(schedules);
 });
 
-router.post('/:id/recurring', (req, res) => {
+router.post('/:id/recurring', async (req, res) => {
   try {
-    const { payment_method_id, amount, frequency, start_date, end_date, occurrences_limit, notes } = req.body;
+    const { payment_method_id, amount, frequency, start_date, end_date, occurrences_limit, notes, hebrew_day } = req.body;
     if (!payment_method_id || !amount || !frequency || !start_date) {
       return res.status(400).json({ error: 'payment_method_id, amount, frequency and start_date required' });
     }
+    let hebrewDay = null;
+    let nextRun = start_date;
+    if (frequency === 'hebrew_monthly') {
+      hebrewDay = parseInt(hebrew_day, 10);
+      if (!hebrewDay || hebrewDay < 1 || hebrewDay > 30) {
+        return res.status(400).json({ error: 'hebrew_day (1-30) is required for Hebrew Monthly frequency' });
+      }
+      const hebcal = require('../utils/hebcal');
+      nextRun = await hebcal.firstHebrewMonthlyRun(start_date, hebrewDay);
+    }
     const id = uuidv4();
     run(`INSERT INTO recurring_schedules
-         (id, org_id, donor_id, payment_method_id, amount, frequency, start_date, next_run, end_date, occurrences_limit, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, org_id, donor_id, payment_method_id, amount, frequency, start_date, next_run, end_date, occurrences_limit, notes, hebrew_day)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, req.orgId, req.params.id, payment_method_id, amount, frequency,
-       start_date, start_date, end_date || null, occurrences_limit || null, notes || null]);
+       start_date, nextRun, end_date || null, occurrences_limit || null, notes || null, hebrewDay]);
     res.json({ success: true, schedule: get('SELECT * FROM recurring_schedules WHERE id = ?', [id]) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-router.put('/:id/recurring/:sid', (req, res) => {
-  const { amount, frequency, next_run, end_date, occurrences_limit, status, notes } = req.body;
-  const existing = get('SELECT * FROM recurring_schedules WHERE id = ? AND donor_id = ?', [req.params.sid, req.params.id]);
-  if (!existing) return res.status(404).json({ error: 'Schedule not found' });
+router.put('/:id/recurring/:sid', async (req, res) => {
+  try {
+    const { amount, frequency, next_run, end_date, occurrences_limit, status, notes, hebrew_day } = req.body;
+    const existing = get('SELECT * FROM recurring_schedules WHERE id = ? AND donor_id = ?', [req.params.sid, req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Schedule not found' });
 
-  // When resuming, recalculate next_run from today's date using frequency
-  let resolvedNextRun = next_run ?? existing.next_run;
-  if (status === 'active' && existing.status === 'paused') {
-    const freq = frequency ?? existing.frequency;
-    const now = new Date();
-    const next = new Date(now);
-    switch(freq) {
-      case 'weekly':     next.setDate(now.getDate() + 7); break;
-      case 'biweekly':   next.setDate(now.getDate() + 14); break;
-      case 'monthly':    next.setMonth(now.getMonth() + 1); break;
-      case 'quarterly':  next.setMonth(now.getMonth() + 3); break;
-      case 'yearly':     next.setFullYear(now.getFullYear() + 1); break;
-      default:           next.setMonth(now.getMonth() + 1);
+    const resolvedFreq = frequency ?? existing.frequency;
+    const resolvedHebrewDay = resolvedFreq === 'hebrew_monthly'
+      ? (hebrew_day !== undefined ? parseInt(hebrew_day, 10) : existing.hebrew_day)
+      : null;
+    if (resolvedFreq === 'hebrew_monthly' && (!resolvedHebrewDay || resolvedHebrewDay < 1 || resolvedHebrewDay > 30)) {
+      return res.status(400).json({ error: 'hebrew_day (1-30) is required for Hebrew Monthly frequency' });
     }
-    // If next_run is today or in the past, keep today so UI shows "Due today"
-    const existingNext = existing.next_run ? new Date(existing.next_run) : null;
-    const todayMidnight = new Date(); todayMidnight.setHours(0,0,0,0);
-    if (existingNext && existingNext <= todayMidnight) {
-      resolvedNextRun = now.toISOString().slice(0,10); // today
-    } else {
-      resolvedNextRun = next.toISOString().slice(0,10);
+
+    // When resuming, recalculate next_run from today's date using frequency
+    let resolvedNextRun = next_run ?? existing.next_run;
+    if (status === 'active' && existing.status === 'paused') {
+      const now = new Date();
+      const existingNext = existing.next_run ? new Date(existing.next_run) : null;
+      const todayMidnight = new Date(); todayMidnight.setHours(0,0,0,0);
+      if (existingNext && existingNext <= todayMidnight) {
+        resolvedNextRun = now.toISOString().slice(0,10); // If next_run is today/past, keep today so UI shows "Due today"
+      } else if (resolvedFreq === 'hebrew_monthly') {
+        const hebcal = require('../utils/hebcal');
+        resolvedNextRun = await hebcal.firstHebrewMonthlyRun(now.toISOString().slice(0,10), resolvedHebrewDay);
+      } else {
+        const next = new Date(now);
+        switch(resolvedFreq) {
+          case 'weekly':     next.setDate(now.getDate() + 7); break;
+          case 'biweekly':   next.setDate(now.getDate() + 14); break;
+          case 'monthly':    next.setMonth(now.getMonth() + 1); break;
+          case 'quarterly':  next.setMonth(now.getMonth() + 3); break;
+          case 'yearly':     next.setFullYear(now.getFullYear() + 1); break;
+          default:           next.setMonth(now.getMonth() + 1);
+        }
+        resolvedNextRun = next.toISOString().slice(0,10);
+      }
     }
+
+    run(`UPDATE recurring_schedules SET
+         amount = ?, frequency = ?, next_run = ?, end_date = ?,
+         occurrences_limit = ?, status = ?, notes = ?, hebrew_day = ?
+         WHERE id = ?`,
+      [amount ?? existing.amount, resolvedFreq, resolvedNextRun,
+       end_date ?? existing.end_date, occurrences_limit ?? existing.occurrences_limit,
+       status ?? existing.status, notes ?? existing.notes, resolvedHebrewDay, req.params.sid]);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-
-  run(`UPDATE recurring_schedules SET
-       amount = ?, frequency = ?, next_run = ?, end_date = ?,
-       occurrences_limit = ?, status = ?, notes = ?
-       WHERE id = ?`,
-    [amount ?? existing.amount, frequency ?? existing.frequency, resolvedNextRun,
-     end_date ?? existing.end_date, occurrences_limit ?? existing.occurrences_limit,
-     status ?? existing.status, notes ?? existing.notes, req.params.sid]);
-  res.json({ success: true });
 });
 
 router.delete('/:id/recurring/:sid', (req, res) => {

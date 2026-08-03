@@ -83,6 +83,7 @@ const API = {
     log:         ()   => `/api/orgs/${API.orgId}/login-log`,
     schedEmails: ()   => `/api/orgs/${API.orgId}/scheduled-emails`,
     daf:         ()   => `/api/orgs/${API.orgId}/daf`,
+    roshChodesh: ()   => `/api/orgs/${API.orgId}/rosh-chodesh`,
   }
 };
 
@@ -153,66 +154,40 @@ function confirmDlg(msg, yes) {
 }
 
 function fmt$(n) { return '$' + parseFloat(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
-// ── Date/time handling — rewritten to use the browser's own local time directly ────
-// Every person using this app is physically at (or near) the organization, so "my
-// browser's local time" and "the org's time" are the same thing in practice. Trying
-// to separately track and convert to an explicit "org timezone" setting (via Intl +
-// UTC-offset arithmetic) was fragile and hard to verify remotely — this removes that
-// entire layer in favor of the browser's native, battle-tested local-time handling.
-// The org's configured Settings > Timezone is still used server-side (emails, PDFs,
-// autopay/follow-up cron) where there is no "local" — a server has no physical location.
-function _todayInTz() {
-  const d = new Date(), pad = n => String(n).padStart(2,'0');
-  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
-}
-// SQLite's CURRENT_TIMESTAMP (used as the default for created_at/updated_at/sent_at
-// throughout the schema) returns UTC time as a bare "YYYY-MM-DD HH:MM:SS" string with
-// no "Z"/offset. `new Date()` parses a bare date-time string as LOCAL time per spec, so
-// without this fix a value that's really e.g. 19:58 UTC (15:58 EDT) gets misread as
-// 19:58 local — exactly the "4 hours ahead" bug. Any string that looks like a full
-// date-time and has no zone marker is normalized to explicit UTC before parsing.
-function _parseServerDate(d) {
-  if (d instanceof Date) return d;
-  if (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(d) && !/[Zz]|[+-]\d{2}:?\d{2}$/.test(d)) {
-    return new Date(d.replace(' ', 'T') + 'Z');
-  }
-  return new Date(d);
+function _tz() {
+  if (window._orgTz) return window._orgTz;
+  try { return JSON.parse(DRM.org?.settings||'{}').timezone || 'America/New_York'; } catch { return 'America/New_York'; }
 }
 function fmtD(d) {
   if (!d) return '—';
   try {
-    // Date-only strings: append a noon time so the browser doesn't parse it as UTC
-    // midnight (which can roll it back a day once converted to local display).
+    // Date-only strings: treat as local date in org timezone
     if (/^\d{4}-\d{2}-\d{2}$/.test(d)) {
-      return new Date(d+'T12:00:00').toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});
+      return new Date(d+'T12:00:00').toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric',timeZone:_tz()});
     }
-    return _parseServerDate(d).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});
+    return new Date(d).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric',timeZone:_tz()});
   } catch { return d; }
 }
 function fmtDT(d) {
   if (!d) return '—';
-  try { return _parseServerDate(d).toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}); }
+  try { return new Date(d).toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit',timeZone:_tz()}); }
   catch { return d; }
 }
 function age(m) { if (!m && m !== 0) return '—'; const mo = parseInt(m); if (mo < 12) return mo + 'mo'; const y = Math.floor(mo / 12), r = mo % 12; return r ? `${y}y ${r}mo` : `${y}y`; }
 function fmtMethod(m) { return { credit_card: 'Credit Card', daf: 'DAF', check: 'Check', cash: 'Cash', wire: 'Wire', other: 'Other' }[m] || m; }
-function fmtFreq(f) { return { weekly: 'Weekly', biweekly: 'Bi-Weekly', monthly: 'Monthly', quarterly: 'Quarterly', yearly: 'Yearly', once: 'One-Time' }[f] || f; }
-// Renders a UTC instant as a "YYYY-MM-DDTHH:mm" value for a <input type="datetime-local">,
-// using the browser's own local time (the getFullYear/getHours/etc. getters, not UTC ones).
+function fmtFreq(f) { return { weekly: 'Weekly', biweekly: 'Bi-Weekly', monthly: 'Monthly', quarterly: 'Quarterly', yearly: 'Yearly', once: 'One-Time', hebrew_monthly: 'Hebrew Monthly' }[f] || f; }
 function toLocalDT(d) {
   if (!d) return '';
   try {
-    const dt = _parseServerDate(d), pad = n => String(n).padStart(2,'0');
-    return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+    const dt = new Date(d);
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: _tz(), year:'numeric', month:'2-digit', day:'2-digit',
+      hour:'2-digit', minute:'2-digit', hour12:false
+    }).formatToParts(dt);
+    const g = t => parts.find(p=>p.type===t)?.value || '00';
+    let hh = g('hour'); if (hh === '24') hh = '00';
+    return `${g('year')}-${g('month')}-${g('day')}T${hh}:${g('minute')}`;
   } catch { return ''; }
-}
-// Inverse of toLocalDT: a "YYYY-MM-DDTHH:mm" string typed into a <input type="datetime-local">
-// is already the browser's own local wall-clock time — `new Date(str)` parses a bare
-// (no "Z"/offset) date-time string as local time per spec, so this is a direct, native
-// conversion to a UTC instant with no manual offset arithmetic involved.
-function fromLocalDT(str) {
-  if (!str) return null;
-  try { return new Date(str).toISOString(); } catch { return str; }
 }
 function inits(f, l) { return ((f || '')[0] || '').toUpperCase() + ((l || '')[0] || '').toUpperCase(); }
 function avatar(d, sz=30) { return `<div class="av" style="width:${sz}px;height:${sz}px;font-size:${Math.round(sz/2.8)}px">${inits(d.first_name, d.last_name)}</div>`; }
@@ -329,7 +304,6 @@ async function init() {
   const params = new URLSearchParams(location.search);
   const token = params.get('token');
   if (token && location.pathname.includes('new-account')) { showNewAcct(token); return; }
-  if (token && location.pathname.includes('complete-setup')) { showCompleteSetup(token); return; }
 
   // Check if first-run setup needed
   let status;
@@ -356,13 +330,12 @@ async function init() {
 
   // Try to restore existing session
   try {
-    // If this window was opened as a super-admin access overlay (?embedded_org=ID),
-    // pass it along so /auth/me can include that one approved org.
-    const embeddedOrgId = new URLSearchParams(location.search).get('embedded_org');
-    const me = await API.get('/auth/me' + (embeddedOrgId ? `?embedded_org=${embeddedOrgId}` : ''));
+    const me = await API.get('/auth/me');
     DRM.user = me.user;
     _allOrgs = me.orgs;
-    // Switch straight into that org instead of the user's own default org.
+    // If this window was opened as a super-admin access overlay (?embedded_org=ID),
+    // switch straight into that org instead of the user's own default org.
+    const embeddedOrgId = new URLSearchParams(location.search).get('embedded_org');
     let startOrg = me.orgs[0];
     if (embeddedOrgId) {
       const target = me.orgs.find(o => o.id === embeddedOrgId);
@@ -379,7 +352,7 @@ async function init() {
 }
 
 function showSetup() {
-  _show('setup-screen'); _hide('login-screen'); _hide('app'); _hide('newacct-screen'); _hide('setupinvite-screen');
+  _show('setup-screen'); _hide('login-screen'); _hide('app'); _hide('newacct-screen');
   $('setup-form').onsubmit = async e => {
     e.preventDefault();
     const err = $('setup-err'); err.style.display = 'none';
@@ -392,7 +365,7 @@ function showSetup() {
 }
 
 function showLogin() {
-  _show('login-screen'); _hide('setup-screen'); _hide('app'); _hide('newacct-screen'); _hide('setupinvite-screen');
+  _show('login-screen'); _hide('setup-screen'); _hide('app'); _hide('newacct-screen');
   const form = $('login-form');
   form.onsubmit = async e => {
     e.preventDefault();
@@ -423,7 +396,7 @@ function showLogin() {
 }
 
 function showNewAcct(token) {
-  _show('newacct-screen'); _hide('login-screen'); _hide('setup-screen'); _hide('app'); _hide('setupinvite-screen');
+  _show('newacct-screen'); _hide('login-screen'); _hide('setup-screen'); _hide('app');
   $('newacct-form').onsubmit = async e => {
     e.preventDefault();
     const err = $('newacct-err'); err.style.display = 'none';
@@ -438,31 +411,21 @@ function showNewAcct(token) {
   };
 }
 
-function showCompleteSetup(token) {
-  _show('setupinvite-screen'); _hide('login-screen'); _hide('setup-screen'); _hide('app'); _hide('newacct-screen');
-  $('setupinvite-form').onsubmit = async e => {
-    e.preventDefault();
-    const err = $('setupinvite-err'); err.style.display = 'none';
-    const p1 = val('si-pass'), p2 = val('si-pass2');
-    if (p1 !== p2) { err.textContent = 'Passwords do not match'; err.style.display = 'block'; return; }
-    if (p1.length < 6) { err.textContent = 'Password must be at least 6 characters'; err.style.display = 'block'; return; }
-    try {
-      await API.post('/auth/complete-setup', { token, full_name: val('si-name'), password: p1 });
-      history.replaceState({}, '', '/');
-      toast('Account set up! Please sign in.');
-      showLogin();
-    } catch(e) { err.textContent = e.message; err.style.display = 'block'; }
-  };
-}
-
 async function setOrg(org) {
   try { window._orgTz = JSON.parse(org?.settings||'{}').timezone || window._orgTz; } catch {}
   DRM.org = org; API.orgId = org.id;
   DRM.orgs = _allOrgs;
+  const sel = $('org-select');
+  if (!sel) return;
+  sel.innerHTML = _allOrgs.map(o => `<option value="${o.id}" ${o.id===org.id?'selected':''}>${o.name}</option>`).join('');
+  sel.onchange = async () => {
+    const found = _allOrgs.find(x => x.id === sel.value);
+    if (found) { await setOrg(found); navigateTo(_currentPage); }
+  };
 }
 
 function showApp() {
-  _show('app'); _hide('login-screen'); _hide('setup-screen'); _hide('newacct-screen'); _hide('setupinvite-screen');
+  _show('app'); _hide('login-screen'); _hide('setup-screen'); _hide('newacct-screen');
   const sbUser = $('sb-user'); if (sbUser) sbUser.textContent = DRM.user?.full_name || '';
   // Restore sidebar state
   const sb = $('sidebar');
@@ -607,7 +570,7 @@ async function renderDashboard(el) {
 // ── Donors ────────────────────────────────────────────────────────────────────
 const Donors = {
   donors:[], total:0, page:1, perPage:25,
-  search:'', hood:'', label:'', autopay:'', duplicatesOnly:false,
+  search:'', hood:'', label:'', autopay:'',
   sortBy:'last_name', sortDir:'asc', selected:new Set(),
   hoods:[], labelList:[],
 
@@ -625,7 +588,6 @@ const Donors = {
       <div class="bg">
         <button class="btn btn-ghost btn-sm" onclick="Donors.importXlsx()">&#8679; Import</button>
         <button class="btn btn-ghost btn-sm" onclick="Donors.exportXlsx()">&#8681; Export</button>
-        <button class="btn btn-ghost btn-sm" onclick="Donors.showRemoved()">🗑 Recently Removed</button>
         <button class="btn btn-primary btn-sm" onclick="Donors.openAdd()">+ Add Donor</button>
       </div>
     </div>
@@ -637,7 +599,6 @@ const Donors = {
         <select id="d-hood"><option value="">All Neighborhoods</option></select>
         <select id="d-label"><option value="">All Labels</option></select>
         <select id="d-ap"><option value="">All AutoPay</option><option value="1">On</option><option value="0">Off</option></select>
-        <select id="d-dup"><option value="">All Donors</option><option value="1">⚠ Duplicates Only</option></select>
       </div>
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-top:6px">
         <div class="bg">
@@ -651,7 +612,6 @@ const Donors = {
       <div id="d-bulk" class="bulk-bar">
         <span id="d-bulk-cnt">0 selected</span>
         <button class="btn btn-ghost btn-sm" onclick="Donors.bulkLabel()">+ Label</button>
-        <button class="btn btn-ghost btn-sm" onclick="Donors.bulkRemoveLabel()">− Remove Label</button>
         <button class="btn btn-ghost btn-sm" onclick="Donors.bulkAutopay()">⚡ AutoPay</button>
         <button class="btn btn-ghost btn-sm" onclick="Donors.bulkDelete()">Delete</button>
         <button class="btn btn-ghost btn-sm" onclick="Donors.clearSel()">Clear</button>
@@ -692,7 +652,6 @@ const Donors = {
     if (this.hood) p.set('neighborhood', this.hood);
     if (this.label) p.set('label', this.label);
     if (this.autopay !== '') p.set('autopay', this.autopay);
-    if (this.duplicatesOnly) p.set('duplicates_only', '1');
     try {
       const res = await API.get(API.o.donors() + '?' + p);
       this.donors = res.donors || []; this.total = res.total || 0;
@@ -720,7 +679,7 @@ const Donors = {
           <div>
             <div style="font-weight:600;font-size:13px">${d.first_name} ${d.last_name}</div>
             ${d.donor_number?`<div style="font-size:10px;color:var(--gray-4);font-family:monospace">#${d.donor_number}</div>`:''}
-            ${d.dup_id?`<button class="pill" style="font-size:9px;background:#fef3c7;color:#b45309;border:1px solid #f59e0b;cursor:pointer" onclick="event.stopPropagation();_openDupEntity('${d.dup_other_type}','${d.dup_other_id}')" title="Open linked duplicate">⚠ DUPLICATE ↗</button>`:''}
+            ${d.dup_id?`<button class="pill" style="font-size:9px;background:#fef3c7;color:#b45309;border:1px solid #f59e0b;cursor:pointer" onclick="event.stopPropagation();DonorDetail.open('${d.dup_other_id}')" title="Open linked duplicate">⚠ DUPLICATE ↗</button>`:''}
             ${lbls.length ? `<div class="bg" style="gap:3px;margin-top:2px;flex-wrap:wrap">${lbls.map(l=>`<span class="pill pill-blue" style="font-size:10px">${l}</span>`).join('')}</div>` : ''}
             ${d.needs_verification ? '<div style="font-size:10px;color:var(--amber);font-weight:600">⚠ Verify</div>' : ''}
           </div>
@@ -755,7 +714,6 @@ const Donors = {
     $('d-hood')?.addEventListener('change', e => { Donors.hood=e.target.value; Donors.page=1; Donors.load(); });
     $('d-label')?.addEventListener('change', e => { Donors.label=e.target.value; Donors.page=1; Donors.load(); });
     $('d-ap')?.addEventListener('change', e => { Donors.autopay=e.target.value; Donors.page=1; Donors.load(); });
-    $('d-dup')?.addEventListener('change', e => { Donors.duplicatesOnly=e.target.value==='1'; Donors.page=1; Donors.load(); });
     $('d-pp')?.addEventListener('change', e => { Donors.perPage=parseInt(e.target.value); Donors.page=1; Donors.load(); });
   },
   toggleAll(c) { document.querySelectorAll('#d-tbody input[type=checkbox]').forEach(cb => { cb.checked=c; if(c)Donors.selected.add(cb.value); else Donors.selected.delete(cb.value); }); Donors.updateBulk(); },
@@ -782,58 +740,13 @@ const Donors = {
         <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
       </div>`, {sm:true});
   },
-  async bulkRemoveLabel() {
-    if(!this.selected.size) return;
-    const labels = await API.get(`/api/orgs/${API.orgId}/label-lists`);
-    const donorLabels = (labels?.donor_labels || []);
-    Modal.open(`Remove Label From ${this.selected.size} Donor(s)`, `
-      <div style="margin-bottom:10px">
-        <div style="font-size:12px;color:var(--gray-5);margin-bottom:8px">Select a label to remove from all selected donors:</div>
-        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px" id="bulk-label-pills">
-          ${donorLabels.map(l=>`<button type="button" class="btn btn-ghost btn-sm" id="blp-${l.replace(/[^a-z0-9]/gi,'_')}"
-            onclick="_bulkLabelSelect('${l.replace(/'/g,"\\'")}',this)">${l}</button>`).join('')}
-        </div>
-        <input type="hidden" id="bulk-label-val" value="">
-      </div>
-      <div class="bg mt">
-        <button class="btn btn-primary" onclick="_bulkLabelRemoveApplyDonors()">Remove Label</button>
-        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-      </div>`, {sm:true});
-  },
-  bulkDelete() { if(!this.selected.size)return; confirmDlg(`Remove ${this.selected.size} donor(s)? They'll be restorable for 30 days from Recently Removed.`,async()=>{for(const id of this.selected)await API.del(API.o.donor(id)).catch(()=>{}); this.selected.clear(); toast('Removed'); Donors.load(); }); },
+  bulkDelete() { if(!this.selected.size)return; confirmDlg(`Delete ${this.selected.size} donor(s)?`,async()=>{for(const id of this.selected)await API.del(API.o.donor(id)).catch(()=>{}); this.selected.clear(); toast('Deleted'); Donors.load(); }); },
   async pauseAll() { confirmDlg('Pause AutoPay for all donors?',async()=>{await API.post(`/api/orgs/${API.orgId}/donors/autopay/pause-all`,{}); toast('Paused'); Donors.load();}); },
   async resumeAll() { await API.post(`/api/orgs/${API.orgId}/donors/autopay/resume-all`,{}); toast('Resumed'); this.load(); },
   openAdd() { this.form(null); },
   async openEdit(id) { try { const d = await API.get(API.o.donor(id)); this.form(d.donor); } catch(e) { toast(e.message||'Unknown error','err'); } },
-  del(id, name) { confirmDlg(`Remove "${name}"? They'll be restorable for 30 days from Recently Removed.`, async () => { await API.del(API.o.donor(id)); toast('Removed'); Donors.load(); }); },
-  async showRemoved() {
-    try {
-      const removed = await API.get(`/api/orgs/${API.orgId}/donors/removed`);
-      Modal.open('Recently Removed', `
-        <div style="font-size:12px;color:var(--gray-5);margin-bottom:10px">Restorable for 30 days after removal.</div>
-        ${!removed.length ? '<div class="empty"><p>No recently removed donors</p></div>' : removed.map(d => {
-          const daysLeft = 30 - Math.floor((Date.now() - new Date(d.removed_at).getTime()) / 86400000);
-          return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--gray-05);border-radius:6px;margin-bottom:6px">
-            <div>
-              <span style="font-size:13px;font-weight:600">${d.first_name} ${d.last_name}</span>
-              <span style="font-size:11px;color:var(--gray-5);margin-left:6px">Removed ${_timeAgo(d.removed_at)} · ${daysLeft} day${daysLeft!==1?'s':''} left to restore</span>
-            </div>
-            <button class="btn btn-ghost btn-sm" onclick="Donors.restore('${d.id}','${(d.first_name+' '+d.last_name).replace(/'/g,"\\\\'")}')">↩ Restore</button>
-          </div>`;
-        }).join('')}
-        <div class="bg mt"><button class="btn btn-ghost" onclick="Modal.close()">Close</button></div>`, {sm:true});
-    } catch(e) { toast(e.message,'err'); }
-  },
-  async restore(id, name) {
-    try {
-      await API.post(`/api/orgs/${API.orgId}/donors/${id}/restore`, {});
-      toast(`${name} restored ✓`); Modal.close(); Donors.load();
-    } catch(e) { toast(e.message,'err'); }
-  },
-  exportXlsx() {
-    _exportIncludeRemovedDlg('donor', () => API.dl(`/api/orgs/${API.orgId}/reports/donors?format=xlsx`, 'donors.xlsx').catch(e=>toast(e.message||'Unknown error','err')),
-      () => API.dl(`/api/orgs/${API.orgId}/reports/donors?format=xlsx&include_removed=1`, 'donors.xlsx').catch(e=>toast(e.message||'Unknown error','err')));
-  },
+  del(id, name) { confirmDlg(`Delete "${name}"?`, async () => { await API.del(API.o.donor(id)); toast('Deleted'); Donors.load(); }); },
+  exportXlsx() { API.dl(`/api/orgs/${API.orgId}/reports/donors?format=xlsx`, 'donors.xlsx').catch(e=>toast(e.message||'Unknown error','err')); },
   importXlsx() {
     Modal.open('Import Donors', `
       <div class="alert alert-info" style="font-size:12px;margin-bottom:12px">
@@ -995,14 +908,14 @@ const DonorDetail = {
   },
 
   render() {
-    const { donor, paymentMethods, donations, recurring, followups } = this.data;
+    const { donor, paymentMethods, donations, recurring } = this.data;
     const lbls = jsonParse(donor.labels);
     Modal.title('');
     Modal.body(`
       <div class="donor-detail-hdr">
         <div class="dd-av">${inits(donor.first_name, donor.last_name)}</div>
         <div style="flex:1">
-          <div style="font-size:19px;font-weight:700">${donor.title?donor.title+' ':''}${donor.first_name} ${donor.last_name} ${donor.donor_number?`<span style=\"font-size:12px;color:var(--gray-4);font-family:monospace\">#${donor.donor_number}</span>`:''} ${donor.dup_id?`<button class=\"pill\" style=\"font-size:10px;background:#fef3c7;color:#b45309;border:1px solid #f59e0b;cursor:pointer;vertical-align:middle\" onclick=\"_openDupEntity('${donor.dup_other_type}','${donor.dup_other_id}')\">⚠ DUPLICATE — view other ↗</button>`:''}</div>
+          <div style="font-size:19px;font-weight:700">${donor.title?donor.title+' ':''}${donor.first_name} ${donor.last_name} ${donor.donor_number?`<span style=\"font-size:12px;color:var(--gray-4);font-family:monospace\">#${donor.donor_number}</span>`:''} ${donor.dup_id?`<button class=\"pill\" style=\"font-size:10px;background:#fef3c7;color:#b45309;border:1px solid #f59e0b;cursor:pointer;vertical-align:middle\" onclick=\"DonorDetail.open('${donor.dup_other_id}')\">⚠ DUPLICATE — view other ↗</button>`:''}</div>
           ${donor.hebrew_full_name?`<div style="font-family:var(--font-he);direction:rtl;text-align:left;opacity:.85;font-size:14px">${donor.hebrew_title||''} ${donor.hebrew_full_name}</div>`:''}
           <div style="font-size:12px;opacity:.7;margin-top:3px">${age(donor.months_old)} · ${donor.email||''} ${donor.cell?'· '+donor.cell:''} ${donor.neighborhood_name?'· '+donor.neighborhood_name:''}</div>
           <div class="bg" style="gap:4px;margin-top:5px;flex-wrap:wrap">${lbls.map(l=>`<span class="pill pill-blue" style="font-size:10px">${l}</span>`).join('')}${donor.needs_verification?'<span class="pill pill-amber" style="font-size:10px">⚠ Verify</span>':''}</div>
@@ -1024,7 +937,6 @@ const DonorDetail = {
         <div class="tab" data-tc="dd-rec">Recurring</div>
         <div class="tab" data-tc="dd-kv">Kvitel</div>
         <div class="tab" data-tc="dd-notes">Notes</div>
-        <div class="tab" data-tc="dd-fu">Follow-ups</div>
       </div>
       <div id="dd-ov" class="tc on" style="padding:16px">
         <div class="g2">
@@ -1085,28 +997,6 @@ const DonorDetail = {
           <button class="btn btn-primary btn-sm" style="margin-top:6px" onclick="DonorDetail.addNote('${donor.id}')">Add Note</button>
         </div>
         ${this.notesList(donor)}
-      </div>
-      <div id="dd-fu" class="tc" style="padding:16px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-          <strong>Follow-up History (${followups?.length||0})</strong>
-          <button class="btn btn-primary btn-sm" onclick="_donorAddFollowup('${donor.id}')">+ Follow Up</button>
-        </div>
-        ${donor.next_followup_date?`<div style="font-size:12px;color:var(--blue);margin-bottom:10px">📅 Next follow-up: ${fmtD(donor.next_followup_date)}</div>`:''}
-        <div style="max-height:260px;overflow-y:auto;border:1px solid var(--gray-2);border-radius:6px">
-          ${followups?.length ? followups.map(fu=>`
-            <div style="padding:10px 14px;border-bottom:1px solid var(--gray-1)">
-              <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
-                <strong style="font-size:12px">${fu.done_by_name||'Unknown'}</strong>
-                <div style="display:flex;align-items:center;gap:6px">
-                  <span style="font-size:11px;color:var(--gray-5)">${fmtDT(fu.created_at)}</span>
-                  <button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px"
-                    onclick="event.stopPropagation();_editDonorFollowupDate('${fu.id}','${fu.next_followup_date||''}','${(fu.notes||'').replace(/'/g,"\\'").replace(/\n/g,' ')}','${donor.id}')">✏ Edit</button>
-                </div>
-              </div>
-              <div style="font-size:13px;margin-bottom:4px;white-space:pre-wrap">${fu.notes}</div>
-              ${fu.next_followup_date?`<div style="font-size:11px;color:var(--blue)">📅 Next follow-up: ${fmtD(fu.next_followup_date)}</div>`:'<div style="font-size:11px;color:var(--gray-4)">No follow-up date set</div>'}
-            </div>`).join('') : '<div style="padding:14px;text-align:center;color:var(--gray-4);font-size:13px">No follow-ups yet</div>'}
-        </div>
       </div>`);
     tabsInit('#modal-body');
   },
@@ -1156,7 +1046,7 @@ const DonorDetail = {
         <strong style="color:var(--navy)">Full Details</strong><br>
         Date &amp; Time: ${fmtDT(d.donation_date)} | Trans ID: ${d.transaction_id||'—'} | Status: ${d.status}<br>
         ${d.refund_amount>0?'Refunded: '+fmt$(d.refund_amount)+(d.refund_notes?' — '+d.refund_notes:'')+'<br>':''}
-        ${d.notes?`<span style="color:var(--gray-5);white-space:pre-wrap">${d.notes}</span><br>`:''}
+        ${d.notes?`<span style="color:var(--gray-5)">${d.notes}</span><br>`:''}
         <div style="margin-top:8px;font-weight:600">Notes (${dn.length})</div>
         <div id="dpr-n-${d.id}" style="margin-top:4px">${_renderNotesList(dn, d.id, did, true)}</div>
       </td>
@@ -1179,7 +1069,7 @@ const DonorDetail = {
       </div>`,{sm:true});
   },
   async _saveEditDon(did, donId){
-    try{await API.put(`/api/orgs/${API.orgId}/donations/${donId}/edit`,{method:val('edd-meth'),donation_date:fromLocalDT(val('edd-date')),transaction_id:val('edd-tx')||null,notes:val('edd-notes')||null});toast('Updated ✓');Modal.close();DonorDetail.open(did);}catch(e){toast(e.message,'err');}
+    try{await API.put(`/api/orgs/${API.orgId}/donations/${donId}/edit`,{method:val('edd-meth'),donation_date:val('edd-date'),transaction_id:val('edd-tx')||null,notes:val('edd-notes')||null});toast('Updated ✓');Modal.close();DonorDetail.open(did);}catch(e){toast(e.message,'err');}
   },
   _delDon(did, donId){
     confirmDlg('Delete this donation? Cannot be undone.',async()=>{
@@ -1210,7 +1100,7 @@ const DonorDetail = {
       <div class="bg">
         ${isDueToday?`<button class="btn btn-primary btn-sm" onclick="DonorDetail._chargeRecurringNow('${did}','${s.id}','${s.payment_method_id||''}','${s.amount}')">Charge Now</button>`:''}
         ${s.status==='active'?`<button class="btn btn-ghost btn-sm" onclick="DonorDetail.toggleRec('${did}','${s.id}','paused')">Pause</button>`:`<button class="btn btn-ghost btn-sm" onclick="DonorDetail.toggleRec('${did}','${s.id}','active')">Resume</button>`}
-        <button class="btn btn-ghost btn-sm" onclick="DonorDetail.editRec('${did}','${s.id}','${s.amount}','${s.frequency}','${s.next_run||''}')">Edit</button>
+        <button class="btn btn-ghost btn-sm" onclick="DonorDetail.editRec('${did}','${s.id}','${s.amount}','${s.frequency}','${s.next_run||''}','${s.hebrew_day||''}')">Edit</button>
         <button class="btn btn-icon" style="color:var(--red)" onclick="DonorDetail.delRec('${did}','${s.id}')">&#10005;</button>
       </div>
     </div>`;
@@ -1219,7 +1109,7 @@ const DonorDetail = {
   notesList(donor) {
     const notes = jsonParse(donor.notes);
     if (!notes.length) return '<p style="color:var(--gray-5)">No notes yet</p>';
-    return notes.slice().reverse().map(n=>`<div class="note-item"><div class="note-meta">${fmtDT(n.at)}${n.by?' · '+n.by:''}</div><div style="white-space:pre-wrap">${n.text}</div></div>`).join('');
+    return notes.slice().reverse().map(n=>`<div class="note-item"><div class="note-meta">${fmtDT(n.at)}${n.by?' · '+n.by:''}</div><div>${n.text}</div></div>`).join('');
   },
 
   async verify(id) { await API.post(`/api/orgs/${API.orgId}/donors/${id}/verify`,{}); toast('Verified ✓'); this.open(id); loadBadges(); },
@@ -1489,7 +1379,7 @@ const DonorDetail = {
       const r = await API.post(`/api/orgs/${API.orgId}/donors/${did}/donations`, {
         amount: amt, method,
         check_number: method==='check' ? val('md-chknum') : undefined,
-        donation_date: fromLocalDT(val('md-date')) || new Date().toISOString(),
+        donation_date: val('md-date') || new Date().toISOString(),
         transaction_id: val('md-tx') || null,
         notes: val('md-notes') || null,
         send_receipt: $('md-send-receipt')?.checked !== false
@@ -1569,14 +1459,28 @@ const DonorDetail = {
       <label>Payment Method</label>
       <select id="rec-pm">${pms.map(p=>`<option value="${p.id}">${p.type==='credit_card'?((p.card_brand||'Card')+' ••'+(p.last_four||'??')):fmtMethod(p.type)} ${p.label?'('+p.label+')':''}</option>`).join('')}</select>
       <div class="r2"><div><label>Amount ($) *</label><input type="number" id="rec-amt" step="0.01" placeholder="0.00"></div><div><label>Frequency *</label>
-        <select id="rec-freq"><option value="weekly">Weekly</option><option value="biweekly">Bi-Weekly</option><option value="monthly" selected>Monthly</option><option value="quarterly">Quarterly</option><option value="yearly">Yearly</option><option value="once">One-Time</option></select></div></div>
+        <select id="rec-freq" onchange="document.getElementById('rec-hday-wrap').style.display=this.value==='hebrew_monthly'?'block':'none'"><option value="weekly">Weekly</option><option value="biweekly">Bi-Weekly</option><option value="monthly" selected>Monthly</option><option value="quarterly">Quarterly</option><option value="yearly">Yearly</option><option value="hebrew_monthly">Hebrew Monthly</option><option value="once">One-Time</option></select></div></div>
+      <div id="rec-hday-wrap" style="display:none">
+        <label>Hebrew Day of Month (1-30) *</label>
+        <input type="number" id="rec-hday" min="1" max="30" placeholder="e.g. 15">
+        <p style="font-size:11px;color:var(--gray-5);margin:2px 0 0">Charges on this day of every Hebrew month (real dates via Hebcal). Months with fewer than 30 days use the last day of that month.</p>
+      </div>
       <div class="r2"><div><label>Start Date *</label><input type="date" id="rec-start" value="${new Date().toISOString().slice(0,10)}"></div><div><label>End Date (optional)</label><input type="date" id="rec-end"></div></div>
       <label>Max Charges (blank = unlimited)</label>
       <input type="number" id="rec-lim" placeholder="e.g. 12 for one year of monthly" min="1">
       <label>Notes</label><input id="rec-notes" autocomplete="off">
       <div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveRec('${did}')">Save</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`, {sm:true});
   },
-  async _saveRec(did) { const amt=parseFloat(val('rec-amt')); if(!amt||amt<=0){toast('Amount required','err');return;} try{await API.post(`/api/orgs/${API.orgId}/donors/${did}/recurring`,{payment_method_id:val('rec-pm'),amount:amt,frequency:val('rec-freq'),start_date:val('rec-start'),end_date:val('rec-end')||null,occurrences_limit:val('rec-lim')?parseInt(val('rec-lim')):null,notes:val('rec-notes')||null}); toast('Schedule created'); this.open(did);}catch(e){toast(e.message||'Unknown error','err');} },
+  async _saveRec(did) {
+    const amt=parseFloat(val('rec-amt')); if(!amt||amt<=0){toast('Amount required','err');return;}
+    const freq = val('rec-freq');
+    const hebrewDay = freq==='hebrew_monthly' ? parseInt(val('rec-hday')) : null;
+    if (freq==='hebrew_monthly' && (!hebrewDay || hebrewDay<1 || hebrewDay>30)) { toast('Hebrew day of month (1-30) required','err'); return; }
+    try{
+      await API.post(`/api/orgs/${API.orgId}/donors/${did}/recurring`,{payment_method_id:val('rec-pm'),amount:amt,frequency:freq,hebrew_day:hebrewDay,start_date:val('rec-start'),end_date:val('rec-end')||null,occurrences_limit:val('rec-lim')?parseInt(val('rec-lim')):null,notes:val('rec-notes')||null});
+      toast('Schedule created'); this.open(did);
+    }catch(e){toast(e.message||'Unknown error','err');}
+  },
   async toggleRec(did, sid, status) {
     try {
       const body = { status };
@@ -1593,8 +1497,26 @@ const DonorDetail = {
       this.open(did);
     } catch(e) { toast(e.message||'Error','err'); }
   },
-  editRec(did, sid, amt, freq, nextRun) { Modal.open('Edit Schedule', `<label>Amount ($)</label><input type="number" id="er-amt" value="${amt}" step="0.01"><label>Frequency</label><select id="er-freq">${['weekly','biweekly','monthly','quarterly','yearly','once'].map(f=>`<option value="${f}" ${f===freq?'selected':''}>${fmtFreq(f)}</option>`).join('')}</select><label>Next Run</label><input type="date" id="er-next" value="${nextRun?nextRun.slice(0,10):''}"><div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveEditRec('${did}','${sid}')">Save</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true}); },
-  async _saveEditRec(did, sid) { await API.put(`/api/orgs/${API.orgId}/donors/${did}/recurring/${sid}`,{amount:parseFloat(val('er-amt')),frequency:val('er-freq'),next_run:val('er-next')}); toast('Updated'); this.open(did); },
+  editRec(did, sid, amt, freq, nextRun, hebrewDay) {
+    Modal.open('Edit Schedule', `<label>Amount ($)</label><input type="number" id="er-amt" value="${amt}" step="0.01">
+      <label>Frequency</label>
+      <select id="er-freq" onchange="document.getElementById('er-hday-wrap').style.display=this.value==='hebrew_monthly'?'block':'none'">${['weekly','biweekly','monthly','quarterly','yearly','hebrew_monthly','once'].map(f=>`<option value="${f}" ${f===freq?'selected':''}>${fmtFreq(f)}</option>`).join('')}</select>
+      <div id="er-hday-wrap" style="display:${freq==='hebrew_monthly'?'block':'none'}">
+        <label>Hebrew Day of Month (1-30)</label>
+        <input type="number" id="er-hday" min="1" max="30" value="${hebrewDay||''}">
+      </div>
+      <label>Next Run</label><input type="date" id="er-next" value="${nextRun?nextRun.slice(0,10):''}">
+      <div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveEditRec('${did}','${sid}')">Save</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});
+  },
+  async _saveEditRec(did, sid) {
+    const freq = val('er-freq');
+    const hebrewDay = freq==='hebrew_monthly' ? parseInt(val('er-hday')) : null;
+    if (freq==='hebrew_monthly' && (!hebrewDay || hebrewDay<1 || hebrewDay>30)) { toast('Hebrew day of month (1-30) required','err'); return; }
+    try {
+      await API.put(`/api/orgs/${API.orgId}/donors/${did}/recurring/${sid}`,{amount:parseFloat(val('er-amt')),frequency:freq,hebrew_day:hebrewDay,next_run:val('er-next')});
+      toast('Updated'); this.open(did);
+    } catch(e) { toast(e.message||'Unknown error','err'); }
+  },
   async delRec(did, sid) { confirmDlg('Cancel this schedule?', async()=>{ await API.del(`/api/orgs/${API.orgId}/donors/${did}/recurring/${sid}`); toast('Cancelled'); DonorDetail.open(did); }); },
 };
 
@@ -1605,7 +1527,7 @@ function _renderNotesList(notes, donId, did, onSave) {
   return notes.map((n, i) => `
     <div style="padding:6px 8px;border-bottom:1px solid var(--gray-1);display:flex;gap:8px;align-items:flex-start">
       <div style="flex:1">
-        <div id="note-text-${donId}-${i}" style="font-size:13px;white-space:pre-wrap">${n.text}</div>
+        <div id="note-text-${donId}-${i}" style="font-size:13px">${n.text}</div>
         <div style="font-size:10px;color:var(--gray-5);margin-top:2px">${fmtDT(n.at)}${n.by?' · '+n.by:''}${n.edited_at?' (edited)':''}</div>
       </div>
       <div class="actions" style="flex-shrink:0">
@@ -1720,7 +1642,7 @@ function _donRows(rows) {
             Transaction ID: ${d.transaction_id||'—'}<br>
             Status: ${d.status}<br>
             ${d.refund_amount>0?'Refunded: '+fmt$(d.refund_amount)+(d.refund_notes?' — '+d.refund_notes:'')+'<br>':''}
-            ${d.notes?'Notes: <span style="white-space:pre-wrap">'+d.notes+'</span><br>':''}
+            ${d.notes?'Notes: '+d.notes+'<br>':''}
             ${(jsonParse(d.labels||'[]')).length?'Labels: '+jsonParse(d.labels||'[]').join(', '):''}
           </div>
           <div>
@@ -1749,7 +1671,7 @@ async function _editDonList(donId){
     </div>`,{sm:true});
 }
 async function _saveEditDonList(id){
-  try{await API.put(`/api/orgs/${API.orgId}/donations/${id}/edit`,{method:val('edl-meth'),donation_date:fromLocalDT(val('edl-date')),transaction_id:val('edl-tx')||null,notes:val('edl-notes')||null});toast('Updated ✓');Modal.close();renderDonations($('page-donations'));}catch(e){toast(e.message,'err');}
+  try{await API.put(`/api/orgs/${API.orgId}/donations/${id}/edit`,{method:val('edl-meth'),donation_date:val('edl-date'),transaction_id:val('edl-tx')||null,notes:val('edl-notes')||null});toast('Updated ✓');Modal.close();renderDonations($('page-donations'));}catch(e){toast(e.message,'err');}
 }
 async function _delDonList(id){
   confirmDlg('Delete this donation? Cannot be undone.',async()=>{
@@ -1834,9 +1756,8 @@ async function renderVerification(el) {
           </table></div>
         </div>` :
         `<div class="card"><div class="empty"><h3>All donors verified!</h3><p>No info checks needed right now.</p></div></div>`}`;
-  // Load unassigned vault cards and duplicate flags below the verification list
+  // Load unassigned vault cards below the verification list
   setTimeout(() => _loadUnassignedCards(el), 100);
-  _loadDuplicateFlags();
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
 function _verRows(donors) {
@@ -2925,7 +2846,7 @@ function _editSchedEmail(id, subject, scheduledFor) {
     <label>Body (HTML)</label><textarea id="ese-body" style="min-height:140px;font-size:12px"></textarea>
     <label>Send At</label><input type="datetime-local" id="ese-at" value="${toLocalDT(scheduledFor)}">
     <div class="bg mt">
-      <button class="btn btn-primary" onclick="API.put(API.o.schedEmails()+'/'+id,{subject:val('ese-subj'),html_body:val('ese-body'),scheduled_for:fromLocalDT(val('ese-at'))}).then(()=>{toast('Updated');Modal.close();renderEmails($('page-emails'))}).catch(e=>toast(e.message||'Unknown error','err'))">Save</button>
+      <button class="btn btn-primary" onclick="API.put(API.o.schedEmails()+'/'+id,{subject:val('ese-subj'),html_body:val('ese-body'),scheduled_for:val('ese-at')}).then(()=>{toast('Updated');Modal.close();renderEmails($('page-emails'))}).catch(e=>toast(e.message||'Unknown error','err'))">Save</button>
       <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
     </div>`, {sm:true});
 }
@@ -2962,7 +2883,7 @@ function _schedEmail(){
         const label=val('se-label-sel');
         API.post(API.o.schedEmails(),{
           subject:val('se-subj'),html_body:val('se-body'),
-          scheduled_for:fromLocalDT(val('se-at')),
+          scheduled_for:val('se-at'),
           recipient_group:recip==='label'&&label?'label:'+label:'all_donors'
         }).then(()=>{toast('Scheduled');Modal.close();renderEmails(\$('page-emails'))}).catch(e=>toast(e.message||'Unknown error','err'))
       ">Schedule</button>
@@ -3169,7 +3090,7 @@ async function renderSettings(el) {
     
     el.innerHTML = `
       <div class="ph"><div class="ph-title">Settings</div></div>
-      <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-labels">Labels</div><div class="tab" data-tc="st-tz">Timezone</div><div class="tab" data-tc="st-log">Login Log</div><div class="tab" data-tc="st-backup">Backup</div><div class="tab" data-tc="st-imports">Import History</div>${DRM.user?.is_super_admin?'<div class="tab" data-tc="st-all-orgs">All Orgs</div>':''}</div>
+      <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-labels">Labels</div><div class="tab" data-tc="st-tz">Timezone</div><div class="tab" data-tc="st-hebrew">Hebrew Calendar</div><div class="tab" data-tc="st-log">Login Log</div><div class="tab" data-tc="st-backup">Backup</div><div class="tab" data-tc="st-imports">Import History</div>${DRM.user?.is_super_admin?'<div class="tab" data-tc="st-all-orgs">All Orgs</div>':''}</div>
       <div id="st-users" class="tc on">
         <div class="card" style="margin-bottom:12px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -3207,6 +3128,7 @@ async function renderSettings(el) {
               </div></td>
             </tr>`).join('')}</tbody>
           </table></div>
+          <div id="removed-users-section" style="margin-top:14px"></div>
         </div>
       </div>
       <div id="st-nh" class="tc"><div class="card">
@@ -3229,6 +3151,9 @@ async function renderSettings(el) {
           <button class="btn btn-primary" onclick="_saveTz()">Save Timezone</button>
         </div>
       </div></div>
+      <div id="st-hebrew" class="tc">
+        <div class="card" id="st-hebrew-card"><div class="spinner"></div></div>
+      </div>
       <div id="st-backup" class="tc">
         <div class="card" id="st-backup-card"><div class="spinner"></div></div>
       </div>
@@ -3245,11 +3170,13 @@ async function renderSettings(el) {
         </table></div>
       </div></div>`;
     tabsInit('#page-settings');
+    document.querySelector('#page-settings .tab[data-tc="st-hebrew"]')?.addEventListener('click', _loadRoshChodesh);
     document.querySelector('#page-settings .tab[data-tc="st-backup"]')?.addEventListener('click', _loadBackupStatus);
     document.querySelector('#page-settings .tab[data-tc="st-imports"]')?.addEventListener('click', _loadImportHistory);
     document.querySelector('#page-settings .tab[data-tc="st-all-orgs"]')?.addEventListener('click', _loadAllOrgs);
     // Check for pending access requests for org admins
     _checkAccessRequests();
+    _loadRemovedUsers();
     // Load label lists when Labels tab is clicked
     document.querySelector('#page-settings .tab[data-tc="st-labels"]').addEventListener('click', _loadLabelSettings);
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
@@ -3409,6 +3336,39 @@ async function _loadLabelSettings() {
     renderLabelList('lead-lbl-list',     leadLbls,     'lead');
   } catch(e) { c.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
+async function _loadRoshChodesh() {
+  const c = $('st-hebrew-card'); if (!c) return;
+  c.innerHTML = '<div class="spinner"></div>';
+  try {
+    const list = await API.get(API.o.roshChodesh());
+    window._roshChodeshList = list;
+    c.innerHTML = `
+      <div class="card-title">Rosh Chodesh &amp; Erev Rosh Chodesh — Next 5 Years</div>
+      <p style="font-size:12px;color:var(--gray-5);margin-bottom:12px">Real dates pulled live from Hebcal. Erev Rosh Chodesh is the day before Rosh Chodesh begins.</p>
+      <input id="rc-filter" placeholder="Filter by month or year (e.g. Sivan, 2027)…" style="margin-bottom:12px" oninput="_renderRoshChodeshTable()">
+      <div class="tw"><table>
+        <thead><tr><th>Hebrew Month</th><th>Rosh Chodesh</th><th>Erev Rosh Chodesh</th><th>Days</th></tr></thead>
+        <tbody id="rc-tbody"></tbody>
+      </table></div>
+      <div id="rc-empty" style="display:none;color:var(--gray-5);font-size:13px;padding:12px 0">No matching dates.</div>`;
+    _renderRoshChodeshTable();
+  } catch(e) { c.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+function _renderRoshChodeshTable() {
+  const tbody = $('rc-tbody'), empty = $('rc-empty');
+  const list = window._roshChodeshList || [];
+  const q = (val('rc-filter') || '').trim().toLowerCase();
+  const filtered = q ? list.filter(r => r.month.toLowerCase().includes(q) || r.roshChodeshStart.includes(q) || r.erevRoshChodesh.includes(q)) : list;
+  if (!filtered.length) { tbody.innerHTML = ''; empty.style.display = 'block'; return; }
+  empty.style.display = 'none';
+  tbody.innerHTML = filtered.map(r => `<tr>
+    <td><strong>${r.month}</strong>${r.hebrew ? `<div class="he" style="font-size:12px;color:var(--gray-5)">${r.hebrew}</div>` : ''}</td>
+    <td>${fmtD(r.roshChodeshStart)}${r.days===2 ? ' – ' + fmtD(r.roshChodeshEnd) : ''}</td>
+    <td>${fmtD(r.erevRoshChodesh)}</td>
+    <td>${r.days}</td>
+  </tr>`).join('');
+}
+
 async function _loadBackupStatus() {
   const c = $('st-backup-card'); if(!c) return;
   c.innerHTML = '<div class="spinner"></div>';
@@ -3528,7 +3488,7 @@ async function renderOutstanding(el) {
             <td><strong>${c.first_name} ${c.last_name}</strong>${c.cell?`<br><span style="font-size:11px;color:var(--gray-5)">${c.cell}</span>`:''}</td>
             <td style="font-weight:600">${fmt$(c.amount)}</td>
             <td style="font-size:12px">${c.pm_label||c.pm_type||'Manual'}</td>
-            <td style="font-size:12px;white-space:pre-wrap">${c.notes||''}</td>
+            <td style="font-size:12px">${c.notes||''}</td>
             <td><div class="actions">
               <button class="btn btn-primary btn-sm" onclick="_collectCharge('${c.id}','${c.amount}')">Collect</button>
               <button class="btn btn-ghost btn-sm" onclick="DonorDetail.open('${c.donor_id}')">View Donor</button>
@@ -3874,7 +3834,7 @@ async function _saveUnlinkedDonation() {
       r = await API.post(`/api/orgs/${API.orgId}/donors/${_ulSelectedDonorId}/donations`, {
         amount: amt, method,
         check_number: method === 'check' ? val('ul-chknum') : undefined,
-        donation_date: fromLocalDT(val('ul-date')) || new Date().toISOString(),
+        donation_date: val('ul-date') || new Date().toISOString(),
         transaction_id: val('ul-tx') || null,
         notes: val('ul-extra-notes') || null,
         send_receipt: $('ul-send-receipt')?.checked !== false
@@ -3884,7 +3844,7 @@ async function _saveUnlinkedDonation() {
         amount: amt, method,
         check_number: method === 'check' ? val('ul-chknum') : undefined,
         donor_name: val('ul-name') || 'Anonymous',
-        donation_date: fromLocalDT(val('ul-date')) || new Date().toISOString(),
+        donation_date: val('ul-date') || new Date().toISOString(),
         transaction_id: val('ul-tx') || null,
         notes: val('ul-extra-notes') || null
       });
@@ -4273,7 +4233,7 @@ async function _waCreateBroadcast(sendNow) {
   const gid = val('wab-group');
   if (!gid) { toast('Select a group','err'); return; }
   const schedOn = document.getElementById('wab-sched-on')?.checked;
-  const schedDt = schedOn ? fromLocalDT(val('wab-sched-dt')) : null;
+  const schedDt = schedOn ? val('wab-sched-dt') : null;
   try {
     const r = await API.post(`/api/orgs/${API.orgId}/whatsapp/broadcasts`, {
       name: val('wab-name')||null,
@@ -4718,7 +4678,7 @@ async function _edDoSchedule() {
     if (!savedId) { toast('Save failed','err'); if(btn){btn.textContent='Save & Schedule';btn.disabled=false;} return; }
     // Then schedule it
     const subject = val('ed-subject')?.trim();
-    const scheduledAt = fromLocalDT(val('sched-at'));
+    const scheduledAt = val('sched-at');
     // Generate HTML from blocks
     const html = _edBlocksToHtml(window._edBlocks);
     await API.post(API.o.schedEmails(), {
@@ -4799,7 +4759,7 @@ async function _bulkLabelApplyDonors() {
     if (!ids.length) { toast('No donors selected','err'); return; }
     // Apply label to each selected donor
     await Promise.all(ids.map(async id => {
-      const { donor } = await API.get(`/api/orgs/${API.orgId}/donors/${id}`);
+      const donor = await API.get(`/api/orgs/${API.orgId}/donors/${id}`);
       const labels = jsonParse(donor.labels||'[]');
       if (!labels.includes(label)) {
         labels.push(label);
@@ -4807,25 +4767,6 @@ async function _bulkLabelApplyDonors() {
       }
     }));
     toast(`Label "${label}" added to ${ids.length} donor(s) ✓`);
-    Modal.close();
-    Donors.load();
-  } catch(e) { toast(e.message||'Error','err'); }
-}
-
-async function _bulkLabelRemoveApplyDonors() {
-  const label = val('bulk-label-val');
-  if (!label) { toast('Select a label','err'); return; }
-  try {
-    const ids = [...(Donors.selected || new Set())];
-    if (!ids.length) { toast('No donors selected','err'); return; }
-    await Promise.all(ids.map(async id => {
-      const { donor } = await API.get(`/api/orgs/${API.orgId}/donors/${id}`);
-      const labels = jsonParse(donor.labels||'[]');
-      if (labels.includes(label)) {
-        await API.put(`/api/orgs/${API.orgId}/donors/${id}`, { labels: labels.filter(l=>l!==label) });
-      }
-    }));
-    toast(`Label "${label}" removed from ${ids.length} donor(s) ✓`);
     Modal.close();
     Donors.load();
   } catch(e) { toast(e.message||'Error','err'); }
@@ -4889,7 +4830,6 @@ async function renderLeads(el) {
           <button class="btn btn-ghost btn-sm" onclick="_showScheduledFollowups()">📅 Follow-up Schedule</button>
           <button class="btn btn-ghost btn-sm" onclick="_leadsImportModal()">&#8593; Import</button>
           <button class="btn btn-ghost btn-sm" onclick="_leadsExport()">&#8595; Export</button>
-          <button class="btn btn-ghost btn-sm" onclick="_leadsShowRemoved()">🗑 Recently Removed</button>
           <button class="btn btn-ghost btn-sm" id="leads-mass-btn" style="display:none" onclick="_leadsMassAction()">⚡ Mass Action</button>
           <button class="btn btn-primary btn-sm" onclick="_leadAdd()">+ Add Lead</button>
         </div>
@@ -4916,10 +4856,6 @@ async function renderLeads(el) {
             <option value="">All Labels</option>
             ${leadLabelOptions.map(l=>`<option value="${l}">${l}</option>`).join('')}
           </select>
-          <select id="leads-dup" onchange="_leadsFilter()">
-            <option value="">All Leads</option>
-            <option value="1">⚠ Duplicates Only</option>
-          </select>
         </div>
       </div>
       <div id="leads-list"></div>`;
@@ -4932,13 +4868,11 @@ async function _loadLeads() {
   const status = val('leads-status')||'';
   const assigned = val('leads-assigned')||'';
   const category = val('leads-category')||'';
-  const dupOnly = val('leads-dup')||'';
   const p = new URLSearchParams();
   if (q) p.set('q',q);
   if (status) p.set('status',status);
   if (assigned) p.set('assigned_to',assigned);
   if (category) p.set('category',category);
-  if (dupOnly) p.set('duplicates_only',dupOnly);
 
   try {
     _leadsData = await API.get(`/api/orgs/${API.orgId}/leads?${p}`);
@@ -4972,19 +4906,20 @@ function _renderLeadsList() {
       const cat = _leadCategories.find(c=>c.name===l.category);
       const leadLbls = (() => { try { return JSON.parse(l.labels||'[]'); } catch { return []; } })();
       const nextFu = l.next_followup ? fmtD(l.next_followup) : '—';
-      const isOverdue = l.next_followup && l.next_followup < _todayInTz();
+      const isOverdue = l.next_followup && new Date(l.next_followup) < new Date();
       return `<tr>
         <td><input type="checkbox" value="${l.id}" onchange="_leadsToggleOne('${l.id}',this.checked)"></td>
         <td><div style="font-weight:600;font-size:13px">${name}</div>
           ${l.donor_number?`<div style="font-size:10px;color:var(--gray-4);font-family:monospace">#${l.donor_number}</div>`:''}
           ${l.hebrew_full_name?`<div style="font-family:var(--font-he);font-size:11px;color:var(--gray-5)">${l.hebrew_full_name}</div>`:''}
-          ${l.dup_id?`<button class="pill" style="font-size:9px;background:#fef3c7;color:#b45309;border:1px solid #f59e0b;cursor:pointer" onclick="event.stopPropagation();_openDupEntity('${l.dup_other_type}','${l.dup_other_id}')" title="Open linked duplicate">⚠ DUPLICATE ↗</button>`:''}
         </td>
         <td style="font-size:12px">${l.cell||l.email||'—'}</td>
         <td>${cat?`<span class="pill" style="background:${cat.color}20;color:${cat.color};font-size:10px">${cat.name}</span>`:(l.category||'—')}</td>
         <td>
           <div style="display:flex;flex-wrap:wrap;gap:3px;align-items:center;max-width:160px">
             ${leadLbls.map(lb=>`<span class="pill pill-blue" style="font-size:10px">${lb}</span>`).join('')}
+            <button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px"
+              onclick="_leadLabels('${l.id}','${(l.labels||'[]').replace(/'/g,"\\'")}')">${leadLbls.length?'Edit':'+ Label'}</button>
           </div>
         </td>
         <td style="font-size:12px">${l.assigned_name||'<span style="color:var(--gray-4)">Unassigned</span>'}</td>
@@ -5011,7 +4946,6 @@ async function _leadView(id) {
     const lead = await API.get(`/api/orgs/${API.orgId}/leads/${id}`);
     const cat = _leadCategories.find(c=>c.name===lead.category);
     Modal.open(`Lead: ${[lead.title,lead.first_name,lead.last_name].filter(Boolean).join(' ')||'Unnamed'}`, `
-      ${lead.dup_id?`<div style="margin-bottom:12px"><button class="pill" style="font-size:10px;background:#fef3c7;color:#b45309;border:1px solid #f59e0b;cursor:pointer" onclick="_openDupEntity('${lead.dup_other_type}','${lead.dup_other_id}')">⚠ DUPLICATE — view other ↗</button></div>`:''}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
         <div>
           <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;margin-bottom:6px">Contact Info</div>
@@ -5028,8 +4962,9 @@ async function _leadView(id) {
           <div style="font-size:13px;margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
             Labels:
             ${(() => { try { return JSON.parse(lead.labels||'[]'); } catch { return []; } })().map(l=>`<span class="pill pill-blue" style="font-size:11px">${l}</span>`).join('') || '<span style="color:var(--gray-4)">None</span>'}
+            <button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px" onclick="_leadLabels('${id}','${(lead.labels||'[]').replace(/'/g,"\\\\'")}')">+ Label</button>
           </div>
-          ${lead.notes?`<div style="font-size:12px;color:var(--gray-6);margin-top:8px;white-space:pre-wrap">${lead.notes}</div>`:''}
+          ${lead.notes?`<div style="font-size:12px;color:var(--gray-6);margin-top:8px">${lead.notes}</div>`:''}
         </div>
       </div>
       <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;margin-bottom:8px">Follow-up History (${lead.followups?.length||0})</div>
@@ -5044,17 +4979,15 @@ async function _leadView(id) {
                   onclick="event.stopPropagation();_editFollowupDate('${fu.id}','${fu.next_followup_date||''}','${(fu.notes||'').replace(/'/g,"\\'").replace(/\n/g,' ')}')">✏ Edit</button>
               </div>
             </div>
-            <div style="font-size:13px;margin-bottom:4px;white-space:pre-wrap">${fu.notes}</div>
+            <div style="font-size:13px;margin-bottom:4px">${fu.notes}</div>
             ${fu.next_followup_date?`<div style="font-size:11px;color:var(--blue)">📅 Next follow-up: ${fmtD(fu.next_followup_date)}</div>`:'<div style="font-size:11px;color:var(--gray-4)">No follow-up date set</div>'}
           </div>`).join('') : '<div style="padding:14px;text-align:center;color:var(--gray-4);font-size:13px">No follow-ups yet</div>'}
       </div>
       <div class="bg">
-        ${lead.status!=='converted'
-          ? `<button class="btn btn-primary btn-sm" onclick="_leadEdit('${id}')">Edit</button>`
-          : `<button class="btn btn-primary btn-sm" onclick="Modal.close();DonorDetail.open('${lead.converted_donor_id}')">View Donor Record</button>`}
+        <button class="btn btn-primary btn-sm" onclick="_leadEdit('${id}')">Edit</button>
         <button class="btn btn-ghost btn-sm" onclick="Modal.close();_leadAddFollowup('${id}')">+ Follow Up</button>
         ${lead.status!=='converted'?`<button class="btn btn-green btn-sm" onclick="Modal.close();_leadConvert('${id}')">Convert to Donor</button>`:''}
-        <button class="btn btn-icon" style="color:var(--red)" onclick="confirmDlg('Remove this lead? Restorable for 30 days from Recently Removed.',async()=>{await API.del('/api/orgs/'+API.orgId+'/leads/${id}');toast('Removed');Modal.close();_loadLeads();})">&#10005;</button>
+        <button class="btn btn-icon" style="color:var(--red)" onclick="confirmDlg('Delete this lead?',async()=>{await API.del('/api/orgs/'+API.orgId+'/leads/${id}');toast('Deleted');Modal.close();_loadLeads();})">&#10005;</button>
       </div>`, {lg:true});
   } catch(e) { toast(e.message,'err'); }
 }
@@ -5395,7 +5328,7 @@ function _renderNotifPage() {
   // Group by day
   const groups = {};
   for (const n of items) {
-    const day = _parseServerDate(n.created_at).toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
+    const day = new Date(n.created_at).toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric',timeZone:_tz()});
     (groups[day] = groups[day]||[]).push(n);
   }
   wrap.innerHTML = Object.entries(groups).map(([day, list]) => `
@@ -5444,29 +5377,32 @@ async function _superAdminUseApprovedAccess(requestId, orgName) {
   } catch(e) { toast(e.message||'Error','err'); }
 }
 
-// ── New tab for viewing another org's data ──────────────────────────────────
-// Access lasts only as long as that tab stays open — closing it revokes access
+// ── Full-screen overlay for viewing another org's data ─────────────────────────
+// Access lasts only as long as this overlay stays open — closing it revokes access
 // immediately and the org admin must approve a fresh request next time.
 function _openAccessOverlay(orgId, orgName, requestId) {
-  const win = window.open(`/?embedded_org=${orgId}`, `access-${requestId}`);
-  if (!win) { toast('Please allow pop-ups to switch into this organisation','err'); return; }
+  const existing = $('access-overlay'); if (existing) existing.remove();
 
-  toast(`Viewing ${orgName} in a new tab — closing it ends your access`);
+  const overlay = document.createElement('div');
+  overlay.id = 'access-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:#fff;display:flex;flex-direction:column';
+  overlay.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;background:var(--navy);color:#fff;flex-shrink:0">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-size:13px;font-weight:700">🔑 Viewing as Super Admin: ${orgName}</span>
+        <span style="font-size:11px;opacity:.75">Access ends when you close this window</span>
+      </div>
+      <button id="access-overlay-close" class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff;border:none">✕ Close &amp; End Access</button>
+    </div>
+    <iframe id="access-overlay-frame" src="/?embedded_org=${orgId}" style="flex:1;border:none;width:100%"></iframe>
+  `;
+  document.body.appendChild(overlay);
 
-  const revoke = async () => {
-    clearInterval(poll);
-    try { await API.post(`/api/auth/access-requests/${requestId}/revoke`, {}); } catch {}
-    _loadAllOrgs();
-  };
-
-  // Poll for the tab closing (either the user closes it, or it navigates away)
-  const poll = setInterval(() => {
-    if (win.closed) revoke();
-  }, 1000);
-
-  // Best-effort: if this (parent) tab closes first, revoke via sendBeacon
+  // Best-effort: if the whole tab/browser closes instead of using the button,
+  // try to revoke via sendBeacon (fire-and-forget, survives page teardown)
   const beaconRevoke = () => {
     try {
+      const token = localStorage.getItem('drm_token');
       navigator.sendBeacon(
         `/api/auth/access-requests/${requestId}/revoke`,
         new Blob([JSON.stringify({})], { type: 'application/json' })
@@ -5474,6 +5410,16 @@ function _openAccessOverlay(orgId, orgName, requestId) {
     } catch {}
   };
   window.addEventListener('beforeunload', beaconRevoke, { once: true });
+
+  $('access-overlay-close').addEventListener('click', async () => {
+    confirmDlg('End your access to this organisation now? You will need a new approval to view it again.', async () => {
+      window.removeEventListener('beforeunload', beaconRevoke);
+      try { await API.post(`/api/auth/access-requests/${requestId}/revoke`, {}); } catch {}
+      overlay.remove();
+      toast('Access ended');
+      _loadAllOrgs();
+    });
+  });
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -5797,7 +5743,6 @@ function _leadsMassAction() {
       <button class="btn btn-ghost" style="text-align:left" onclick="Modal.close();_leadsMassStatus()">🔄 Set Status</button>
       <button class="btn btn-ghost" style="text-align:left" onclick="Modal.close();_leadsMassAssign()">👤 Assign To</button>
       <button class="btn btn-ghost" style="text-align:left" onclick="Modal.close();_leadsMassLabel()">+ Add Label</button>
-      <button class="btn btn-ghost" style="text-align:left" onclick="Modal.close();_leadsMassRemoveLabel()">− Remove Label</button>
       <hr class="divider">
       <button class="btn btn-ghost" style="text-align:left;color:var(--red)" onclick="Modal.close();_leadsMassDelete()">🗑 Delete Selected</button>
     </div>`, {sm:true});
@@ -5877,42 +5822,6 @@ async function _leadsMassAddLabel() {
   } catch(e) { toast(e.message,'err'); }
 }
 
-async function _leadsMassRemoveLabel() {
-  const labels = await API.get(`/api/orgs/${API.orgId}/label-lists`);
-  const leadLabels = (labels?.lead_labels || []);
-  Modal.open('Remove Label From Selected Leads', `
-    <div style="margin-bottom:10px">
-      <div style="font-size:12px;color:var(--gray-5);margin-bottom:8px">Select a label to remove from all selected leads:</div>
-      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px" id="bulk-label-pills">
-        ${leadLabels.map(l=>`<button type="button" class="btn btn-ghost btn-sm"
-          onclick="_bulkLabelSelect('${l.replace(/'/g,"\\\\'")}',this)">${l}</button>`).join('')}
-      </div>
-      <input type="hidden" id="bulk-label-val" value="">
-    </div>
-    <div class="bg">
-      <button class="btn btn-primary" onclick="_leadsMassRemoveLabelApply()">Remove Label</button>
-      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-    </div>`, {sm:true});
-}
-
-async function _leadsMassRemoveLabelApply() {
-  const label = val('bulk-label-val');
-  if (!label) { toast('Select a label','err'); return; }
-  const ids = [...window._leadsSelected];
-  try {
-    await Promise.all(ids.map(async id => {
-      const lead = _leadsData.find(l=>l.id===id);
-      const labels = (() => { try { return JSON.parse(lead?.labels||'[]'); } catch { return []; } })();
-      if (labels.includes(label)) {
-        await API.put(`/api/orgs/${API.orgId}/leads/${id}`, { labels: labels.filter(l=>l!==label) });
-      }
-    }));
-    toast(`Label "${label}" removed from ${ids.length} lead(s) ✓`);
-    Modal.close();
-    _loadLeads();
-  } catch(e) { toast(e.message,'err'); }
-}
-
 async function _leadsMassUpdate(data) {
   const ids = [...window._leadsSelected];
   try {
@@ -5926,39 +5835,13 @@ async function _leadsMassUpdate(data) {
 }
 
 async function _leadsMassDelete() {
-  confirmDlg(`Remove ${window._leadsSelected.size} leads? Restorable for 30 days from Recently Removed.`, async () => {
+  confirmDlg(`Delete ${window._leadsSelected.size} leads?`, async () => {
     const ids = [...window._leadsSelected];
     await Promise.all(ids.map(id => API.del(`/api/orgs/${API.orgId}/leads/${id}`).catch(()=>{})));
-    toast(`${ids.length} leads removed`);
+    toast(`${ids.length} leads deleted`);
     window._leadsSelected.clear();
     _loadLeads();
   });
-}
-
-async function _leadsShowRemoved() {
-  try {
-    const removed = await API.get(`/api/orgs/${API.orgId}/leads/removed`);
-    Modal.open('Recently Removed', `
-      <div style="font-size:12px;color:var(--gray-5);margin-bottom:10px">Restorable for 30 days after removal.</div>
-      ${!removed.length ? '<div class="empty"><p>No recently removed leads</p></div>' : removed.map(l => {
-        const daysLeft = 30 - Math.floor((Date.now() - new Date(l.removed_at).getTime()) / 86400000);
-        return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--gray-05);border-radius:6px;margin-bottom:6px">
-          <div>
-            <span style="font-size:13px;font-weight:600">${l.first_name} ${l.last_name}</span>
-            <span style="font-size:11px;color:var(--gray-5);margin-left:6px">Removed ${_timeAgo(l.removed_at)} · ${daysLeft} day${daysLeft!==1?'s':''} left to restore</span>
-          </div>
-          <button class="btn btn-ghost btn-sm" onclick="_leadsRestore('${l.id}','${(l.first_name+' '+l.last_name).replace(/'/g,"\\\\'")}')">↩ Restore</button>
-        </div>`;
-      }).join('')}
-      <div class="bg mt"><button class="btn btn-ghost" onclick="Modal.close()">Close</button></div>`, {sm:true});
-  } catch(e) { toast(e.message,'err'); }
-}
-
-async function _leadsRestore(id, name) {
-  try {
-    await API.post(`/api/orgs/${API.orgId}/leads/${id}/restore`, {});
-    toast(`${name} restored ✓`); Modal.close(); _loadLeads();
-  } catch(e) { toast(e.message,'err'); }
 }
 
 // ── Donors mass neighborhood + autopay ───────────────────────────────────────
@@ -6029,90 +5912,29 @@ async function _saveFollowupDate(followupId) {
   } catch(e) { toast(e.message||'Error','err'); }
 }
 
-// ── Donor follow-ups (mirrors the lead follow-up flow above) ──────────────────
-function _donorAddFollowup(donorId) {
-  Modal.open('Add Follow-Up', `
-    <div style="font-size:12px;color:var(--gray-5);margin-bottom:10px">Auto-signed with your name.</div>
-    <label>Notes <span style="color:var(--red)">*</span></label>
-    <textarea id="dfu-notes" placeholder="How did the call go?" style="min-height:80px"></textarea>
-    <label style="margin-top:8px">Next Follow-up Date <span style="font-size:11px;color:var(--gray-4)">(optional)</span></label>
-    <input type="date" id="dfu-date" value="">
-    <div class="bg mt">
-      <button class="btn btn-primary" onclick="_donorSaveFollowup('${donorId}')">Save Follow-up</button>
-      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-    </div>`, {sm:true});
-}
-
-async function _donorSaveFollowup(donorId) {
-  const notes = val('dfu-notes')?.trim();
-  if (!notes) { toast('Notes required','err'); return; }
-  try {
-    const nextDate = val('dfu-date')||null;
-    await API.post(`/api/orgs/${API.orgId}/donors/${donorId}/followup`, { notes, next_followup_date: nextDate });
-    toast('Follow-up saved ✓');
-    DonorDetail.open(donorId);
-  } catch(e) { toast(e.message||'Error','err'); }
-}
-
-function _editDonorFollowupDate(followupId, currentDate, currentNotes, donorId) {
-  Modal.open('Edit Follow-Up', `
-    <label>Notes</label>
-    <textarea id="dfu-edit-notes" style="min-height:90px">${(currentNotes||'').replace(/"/g,'&quot;')}</textarea>
-    <label style="margin-top:10px">Next Follow-up Date <span style="font-size:11px;color:var(--gray-4)">(optional)</span></label>
-    <input type="date" id="dfu-edit-date" value="${currentDate||''}"
-      style="padding:10px 12px;border:1.5px solid var(--gray-3);border-radius:6px;width:100%;box-sizing:border-box">
-    <div class="bg mt">
-      <button class="btn btn-primary" onclick="_saveDonorFollowupDate('${followupId}','${donorId||''}')">Save</button>
-      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-    </div>`, {sm:true});
-}
-
-async function _saveDonorFollowupDate(followupId, donorId) {
-  const date  = val('dfu-edit-date');
-  const notes = val('dfu-edit-notes');
-  try {
-    await API.put(`/api/orgs/${API.orgId}/donors/followups/${followupId}`, { next_followup_date: date||null, notes });
-    toast('Follow-up updated ✓');
-    Modal.close();
-    if (donorId) DonorDetail.open(donorId);
-    if (typeof renderScheduledFollowups === 'function' && $('page-followups')?.classList.contains('active')) {
-      renderScheduledFollowups($('page-followups'));
-    }
-  } catch(e) { toast(e.message||'Error','err'); }
-}
-
 // ── Scheduled Follow-ups page ─────────────────────────────────────────────────
 async function renderScheduledFollowups(el) {
   el.innerHTML = '<div class="spinner"></div>';
   try {
-    const [leadFus, donorFus] = await Promise.all([
-      API.get(`/api/orgs/${API.orgId}/leads/followups/scheduled`),
-      API.get(`/api/orgs/${API.orgId}/donors/followups/scheduled`)
-    ]);
-    const followups = [
-      ...leadFus.map(f => ({ ...f, _type:'lead', _name:f.lead_name, _cell:f.lead_cell, _assigned:f.lead_assigned_name })),
-      ...donorFus.map(f => ({ ...f, _type:'donor', _name:[f.title,f.first_name,f.last_name].filter(Boolean).join(' '), _cell:f.cell, _assigned:'—' }))
-    ].sort((a,b) => (a.next_followup_date||'').localeCompare(b.next_followup_date||''));
-    const todayStr = _todayInTz();
+    const followups = await API.get(`/api/orgs/${API.orgId}/leads/followups/scheduled`);
     el.innerHTML = `
       <div class="ph">
         <div><div class="ph-title">Scheduled Follow-ups</div>
           <div class="ph-sub">${followups.length} scheduled</div>
         </div>
       </div>
-      ${!followups.length ? '<div class="card"><div class="empty"><h3>No scheduled follow-ups</h3><p>Add follow-ups with a date from the Leads or Donors page.</p></div></div>' : `
+      ${!followups.length ? '<div class="card"><div class="empty"><h3>No scheduled follow-ups</h3><p>Add follow-ups with a date from the Leads page.</p></div></div>' : `
       <div class="card" style="padding:0;overflow:hidden"><div class="tw"><table>
         <thead><tr>
-          <th>Name</th><th>Follow-up Date</th><th>Notes</th><th>Assigned To</th><th>Fundraiser</th><th></th>
+          <th>Lead</th><th>Follow-up Date</th><th>Notes</th><th>Assigned To</th><th>Fundraiser</th><th></th>
         </tr></thead>
         <tbody>${followups.map(f => {
-          const isOverdue = f.next_followup_date < todayStr;
-          const isToday   = f.next_followup_date === todayStr;
-          const entId = f._type==='lead' ? f.lead_id : f.donor_id;
+          const isOverdue = new Date(f.next_followup_date) < new Date();
+          const isToday   = f.next_followup_date === new Date().toISOString().slice(0,10);
           return `<tr style="${isOverdue?'background:#fef2f2':isToday?'background:#fefce8':''}">
             <td>
-              <div style="font-weight:600;font-size:13px">${f._name||(f._type==='lead'?'Unknown Lead':'Unknown Donor')} <span class="pill" style="font-size:9px;background:${f._type==='lead'?'#e0e7ff':'#dcfce7'};color:${f._type==='lead'?'#4338ca':'#15803d'}">${f._type==='lead'?'Lead':'Donor'}</span></div>
-              ${f._cell?`<div style="font-size:11px;color:var(--gray-5)">${f._cell}</div>`:''}
+              <div style="font-weight:600;font-size:13px">${f.lead_name||'Unknown Lead'}</div>
+              ${f.lead_cell?`<div style="font-size:11px;color:var(--gray-5)">${f.lead_cell}</div>`:''}
             </td>
             <td style="font-weight:600;color:${isOverdue?'var(--red)':isToday?'var(--amber)':'inherit'}">
               ${fmtD(f.next_followup_date)}
@@ -6120,16 +5942,12 @@ async function renderScheduledFollowups(el) {
               ${isToday?'<span style="font-size:10px;margin-left:4px">📅 Today</span>':''}
             </td>
             <td style="font-size:12px;max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${f.notes||'—'}</td>
-            <td style="font-size:12px">${f._assigned||'—'}</td>
+            <td style="font-size:12px">${f.lead_assigned_name||'—'}</td>
             <td style="font-size:12px">${f.done_by_name||'—'}</td>
             <td><div class="actions">
-              ${f._type==='lead'
-                ? `<button class="btn btn-blue btn-sm" onclick="_leadView('${entId}')">View Lead</button>
-                   <button class="btn btn-ghost btn-sm" onclick="_leadAddFollowup('${entId}')">+ Follow Up</button>
-                   <button class="btn btn-ghost btn-sm" onclick="_editFollowupDate('${f.id}','${f.next_followup_date||''}','${(f.notes||'').replace(/'/g,"\\'").replace(/\n/g,' ')}')">✏ Edit</button>`
-                : `<button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${entId}')">View Donor</button>
-                   <button class="btn btn-ghost btn-sm" onclick="_donorAddFollowup('${entId}')">+ Follow Up</button>
-                   <button class="btn btn-ghost btn-sm" onclick="_editDonorFollowupDate('${f.id}','${f.next_followup_date||''}','${(f.notes||'').replace(/'/g,"\\'").replace(/\n/g,' ')}','${entId}')">✏ Edit</button>`}
+              <button class="btn btn-blue btn-sm" onclick="_leadView('${f.lead_id}')">View Lead</button>
+              <button class="btn btn-ghost btn-sm" onclick="_leadAddFollowup('${f.lead_id}')">+ Follow Up</button>
+              <button class="btn btn-ghost btn-sm" onclick="_editFollowupDate('${f.id}','${f.next_followup_date||''}','${(f.notes||'').replace(/'/g,"\\'").replace(/\n/g,' ')}')">✏ Edit</button>
             </div></td>
           </tr>`;
         }).join('')}</tbody>
@@ -6264,6 +6082,10 @@ async function _donationLabels(donationId, currentLabelsJson) {
       ${donLabels.map(l=>`<button type="button" class="btn btn-ghost btn-sm" style="font-size:11px"
         onclick="_donLabelAdd('${donationId}','${l.replace(/'/g,"\\\\'")}',this)">${l}</button>`).join('')}
     </div>
+    <div style="display:flex;gap:6px">
+      <input id="don-label-custom" placeholder="Custom label…" autocomplete="new-password" style="flex:1;font-size:12px">
+      <button class="btn btn-ghost btn-sm" onclick="_donLabelAddCustom('${donationId}')">Add</button>
+    </div>
     <input type="hidden" id="don-label-donid" value="${donationId}">
     <div class="bg mt">
       <button class="btn btn-primary" onclick="_donLabelSave('${donationId}')">Save</button>
@@ -6287,6 +6109,11 @@ function _donLabelAdd(donId, label, btn) {
   if (btn) { btn.className = 'btn btn-primary btn-sm'; btn.style.fontSize = '11px'; }
 }
 
+function _donLabelAddCustom(donId) {
+  const v = val('don-label-custom')?.trim();
+  if (v) { _donLabelAdd(donId, v, null); $('don-label-custom').value = ''; }
+}
+
 async function _donLabelSave(donId) {
   const labels = [...($('don-label-current')?.querySelectorAll('.pill')||[])].map(c=>c.textContent.replace('×','').trim()).filter(Boolean);
   try {
@@ -6297,16 +6124,62 @@ async function _donLabelSave(donId) {
   } catch(e) { toast(e.message,'err'); }
 }
 
-// ── Duplicate flags (computed live, across donors + leads) ─────────────────────
-function _openDupEntity(type, id) {
-  if (type === 'lead') _leadView(id);
-  else DonorDetail.open(id);
+// ── Lead labels — same as donors ─────────────────────────────────────────────
+async function _leadLabels(leadId, currentLabelsJson) {
+  const labels = await API.get(`/api/orgs/${API.orgId}/label-lists`).catch(()=>({}));
+  const leadLabels = labels?.lead_labels || [];
+  let current = [];
+  try { current = JSON.parse(currentLabelsJson||'[]'); } catch {}
+
+  Modal.open('Lead Labels', `
+    <div style="margin-bottom:10px">
+      <div style="font-size:11px;font-weight:700;color:var(--gray-5);margin-bottom:6px">Current Labels</div>
+      <div id="lead-label-current" style="display:flex;flex-wrap:wrap;gap:4px;min-height:24px">
+        ${current.map(l=>`<span class="pill pill-blue" style="font-size:11px">${l}
+          <span onclick="this.parentElement.remove()" style="cursor:pointer;margin-left:3px">×</span>
+        </span>`).join('')}
+      </div>
+    </div>
+    <div style="font-size:11px;font-weight:700;color:var(--gray-5);margin-bottom:6px">Add Label</div>
+    <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px">
+      ${leadLabels.map(l=>`<button type="button" class="btn btn-ghost btn-sm" style="font-size:11px"
+        onclick="_leadLabelAdd('${l.replace(/'/g,"\\\\'")}',this)">${l}</button>`).join('')}
+    </div>
+    <div style="display:flex;gap:6px">
+      <input id="lead-label-custom" placeholder="Custom label…" autocomplete="new-password" style="flex:1;font-size:12px">
+      <button class="btn btn-ghost btn-sm" onclick="
+        const v=val('lead-label-custom')?.trim();
+        if(v){_leadLabelAdd(v,null);$('lead-label-custom').value='';}
+      ">Add</button>
+    </div>
+    <div class="bg mt">
+      <button class="btn btn-primary" onclick="_leadLabelSave('${leadId}')">Save</button>
+      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+    </div>`, {sm:true});
 }
-function _dupPill(type) {
-  return type === 'lead'
-    ? '<span class="pill" style="font-size:9px;background:#e0e7ff;color:#4338ca;margin-left:4px">Lead</span>'
-    : '<span class="pill" style="font-size:9px;background:#dbeafe;color:#1d4ed8;margin-left:4px">Donor</span>';
+
+function _leadLabelAdd(label, btn) {
+  const cur = $('lead-label-current');
+  if (!cur) return;
+  const existing = [...cur.querySelectorAll('.pill')].map(c=>c.textContent.replace('×','').trim());
+  if (existing.includes(label)) return;
+  const chip = document.createElement('span');
+  chip.className = 'pill pill-blue';
+  chip.style.fontSize = '11px';
+  chip.innerHTML = `${label} <span onclick="this.parentElement.remove()" style="cursor:pointer;margin-left:3px">×</span>`;
+  cur.appendChild(chip);
+  if (btn) { btn.className = 'btn btn-primary btn-sm'; btn.style.fontSize='11px'; }
 }
+
+async function _leadLabelSave(leadId) {
+  const labels = [...($('lead-label-current')?.querySelectorAll('.pill')||[])].map(c=>c.textContent.replace('×','').trim()).filter(Boolean);
+  try {
+    await API.put(`/api/orgs/${API.orgId}/leads/${leadId}`, { labels });
+    toast('Labels saved ✓'); Modal.close(); _loadLeads();
+  } catch(e) { toast(e.message,'err'); }
+}
+
+// ── Duplicate flags ───────────────────────────────────────────────────────────
 async function _loadDuplicateFlags(statusFilter) {
   statusFilter = statusFilter || window._dupFilter || 'pending';
   window._dupFilter = statusFilter;
@@ -6322,67 +6195,46 @@ async function _loadDuplicateFlags(statusFilter) {
     wrap.id = 'dup-flags-section';
     wrap.innerHTML = `
       <div class="ph" style="margin-top:24px">
-        <div><div class="ph-title" style="color:var(--red)">⚠ Duplicates (Donors + Leads)</div>
-          <div class="ph-sub">Checked in real time — resolving one side clears the flag automatically.</div>
+        <div><div class="ph-title" style="color:var(--red)">⚠ Duplicate Donors</div>
+          <div class="ph-sub">Donors flagged as possible duplicates. Resolve each pair.</div>
         </div>
         <select id="dup-status-filter" style="width:auto" onchange="_loadDuplicateFlags(this.value)">
           <option value="pending" ${statusFilter==='pending'?'selected':''}>Pending</option>
-          <option value="dismissed" ${statusFilter==='dismissed'?'selected':''}>Dismissed — Kept Both</option>
+          <option value="resolved_separate" ${statusFilter==='resolved_separate'?'selected':''}>Resolved — Kept Both</option>
+          <option value="merged" ${statusFilter==='merged'?'selected':''}>Merged</option>
           <option value="all" ${statusFilter==='all'?'selected':''}>All</option>
         </select>
       </div>
-      ${!dups.length ? `<div class="card"><div class="empty"><h3>No ${statusFilter==='all'?'':statusFilter} duplicates</h3></div></div>` : `
+      ${!dups.length ? `<div class="card"><div class="empty"><h3>No ${statusFilter==='all'?'':statusFilter.replace('_',' ')} duplicates</h3></div></div>` : `
       <div class="card" style="padding:0;overflow:hidden"><div class="tw"><table>
-        <thead><tr><th>Entry A</th><th>Entry B</th><th>Reason</th><th></th></tr></thead>
-        <tbody>${dups.map(d=>{
-          const argsA = `'${d.entity_a.type}','${d.entity_a.id}'`, argsB = `'${d.entity_b.type}','${d.entity_b.id}'`;
-          const both_donors = d.entity_a.type==='donor' && d.entity_b.type==='donor';
-          return `<tr>
-          <td><div style="font-weight:600;font-size:13px">${d.entity_a.number?'#'+d.entity_a.number+' ':''}${d.entity_a.name}${_dupPill(d.entity_a.type)}</div><div style="font-size:11px;color:var(--gray-5)">${d.entity_a.email||d.entity_a.cell||''}</div></td>
-          <td><div style="font-weight:600;font-size:13px">${d.entity_b.number?'#'+d.entity_b.number+' ':''}${d.entity_b.name}${_dupPill(d.entity_b.type)}</div><div style="font-size:11px;color:var(--gray-5)">${d.entity_b.email||d.entity_b.cell||''}</div></td>
+        <thead><tr><th>Donor A</th><th>Donor B</th><th>Reason</th><th>Status</th><th></th></tr></thead>
+        <tbody>${dups.map(d=>`<tr>
+          <td><div style="font-weight:600;font-size:13px">#${d.number_a||'?'} ${d.name_a}</div><div style="font-size:11px;color:var(--gray-5)">${d.email_a||d.cell_a||''}</div></td>
+          <td><div style="font-weight:600;font-size:13px">#${d.number_b||'?'} ${d.name_b}</div><div style="font-size:11px;color:var(--gray-5)">${d.email_b||d.cell_b||''}</div></td>
           <td style="font-size:11px;color:var(--gray-6)">${d.reason||'—'}</td>
+          <td><span class="pill" style="font-size:10px;background:#fef3c7;color:#b45309">${d.status}</span></td>
           <td><div class="actions">
-            <button class="btn btn-blue btn-sm" onclick="_openDupEntity(${argsA})">View A</button>
-            <button class="btn btn-blue btn-sm" onclick="_openDupEntity(${argsB})">View B</button>
-            ${!d.dismissed ? `
-              <button class="btn btn-green btn-sm" onclick="_dismissDup(${argsA},${argsB})">Keep Both</button>
-              ${both_donors ? `
-                <button class="btn btn-ghost btn-sm" onclick="_mergeDup('${d.entity_a.id}','${d.entity_b.id}')">Merge→A</button>
-                <button class="btn btn-ghost btn-sm" onclick="_mergeDup('${d.entity_b.id}','${d.entity_a.id}')">Merge→B</button>
-              ` : ''}
-            ` : `<button class="btn btn-ghost btn-sm" onclick="_undismissDup(${argsA},${argsB})">Un-dismiss</button>`}
+            <button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${d.donor_id_a}')">View A</button>
+            <button class="btn btn-blue btn-sm" onclick="DonorDetail.open('${d.donor_id_b}')">View B</button>
+            ${d.status==='pending' ? `
+              <button class="btn btn-green btn-sm" onclick="_resolveDup('${d.id}','keep_both')">Keep Both</button>
+              <button class="btn btn-ghost btn-sm" onclick="_resolveDup('${d.id}','merge_into_a')">Merge→A</button>
+              <button class="btn btn-ghost btn-sm" onclick="_resolveDup('${d.id}','merge_into_b')">Merge→B</button>
+            ` : ''}
           </div></td>
-        </tr>`;
-        }).join('')}</tbody>
+        </tr>`).join('')}</tbody>
       </table></div></div>`}`;
     pg.insertBefore(wrap, pg.firstChild);
   } catch {}
 }
 
-async function _dismissDup(aType, aId, bType, bId) {
+async function _resolveDup(dupId, action) {
   try {
-    await API.post(`/api/orgs/${API.orgId}/donors/duplicates/dismiss`, { entity_a_type: aType, entity_a_id: aId, entity_b_type: bType, entity_b_id: bId });
-    toast('Kept both ✓');
+    await API.post(`/api/orgs/${API.orgId}/donors/duplicates/${dupId}/resolve`, { action });
+    toast('Resolved ✓');
     _loadDuplicateFlags();
     loadBadges();
   } catch(e) { toast(e.message,'err'); }
-}
-async function _undismissDup(aType, aId, bType, bId) {
-  try {
-    await API.post(`/api/orgs/${API.orgId}/donors/duplicates/undismiss`, { entity_a_type: aType, entity_a_id: aId, entity_b_type: bType, entity_b_id: bId });
-    toast('Un-dismissed ✓');
-    _loadDuplicateFlags();
-  } catch(e) { toast(e.message,'err'); }
-}
-async function _mergeDup(keepId, dropId) {
-  confirmDlg('Merge these two donors? Donations and payment methods move to the kept donor, and the other donor is deleted. This cannot be undone.', async () => {
-    try {
-      await API.post(`/api/orgs/${API.orgId}/donors/duplicates/merge`, { keep_id: keepId, drop_id: dropId });
-      toast('Merged ✓');
-      _loadDuplicateFlags();
-      loadBadges();
-    } catch(e) { toast(e.message,'err'); }
-  });
 }
 
 
@@ -6455,26 +6307,48 @@ async function _leadsDoImport() {
 }
 
 function _leadsExport() {
-  _exportIncludeRemovedDlg('lead', () => API.dl(`/api/orgs/${API.orgId}/leads/export`, 'leads-export.xlsx').catch(e=>toast(e.message||'Unknown error','err')),
-    () => API.dl(`/api/orgs/${API.orgId}/leads/export?include_removed=1`, 'leads-export.xlsx').catch(e=>toast(e.message||'Unknown error','err')));
+  API.dl(`/api/orgs/${API.orgId}/leads/export`, 'leads-export.xlsx').catch(e=>toast(e.message||'Unknown error','err'));
 }
 
-// Ask whether an export should include recently-removed (soft-deleted) records before downloading.
-function _exportIncludeRemovedDlg(entityLabel, onActiveOnly, onIncludeRemoved) {
-  Modal.open('Export Options', `
-    <div style="font-size:13px;margin-bottom:14px">Include recently removed ${entityLabel}s (still in their 30-day restore window)?</div>
-    <div class="bg mt">
-      <button class="btn btn-primary" id="exp-active-only">Active Only</button>
-      <button class="btn btn-ghost" id="exp-include-removed">Include Removed</button>
-      <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
-    </div>`, {sm:true});
-  $('exp-active-only').onclick = () => { Modal.close(); onActiveOnly(); };
-  $('exp-include-removed').onclick = () => { Modal.close(); onIncludeRemoved(); };
+// ── Recently removed users (30-day restore window) ────────────────────────────
+async function _loadRemovedUsers() {
+  const wrap = $('removed-users-section'); if (!wrap) return;
+  try {
+    const removed = await API.get(`/api/orgs/${API.orgId}/users/removed`);
+    if (!removed.length) { wrap.innerHTML = ''; return; }
+    wrap.innerHTML = `
+      <div style="border-top:1px solid var(--gray-1);padding-top:12px">
+        <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">
+          Recently Removed <span style="font-weight:400;text-transform:none">(restorable for 30 days)</span>
+        </div>
+        ${removed.map(u => {
+          const daysLeft = 30 - Math.floor((Date.now() - new Date(u.removed_at).getTime()) / 86400000);
+          return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--gray-05);border-radius:6px;margin-bottom:6px">
+            <div>
+              <span style="font-size:13px;font-weight:600">${u.full_name||u.email}</span>
+              <span style="font-size:11px;color:var(--gray-5);margin-left:6px">Removed ${_timeAgo(u.removed_at)} · ${daysLeft} day${daysLeft!==1?'s':''} left to restore</span>
+            </div>
+            <button class="btn btn-ghost btn-sm" onclick="_restoreUser('${u.id}','${(u.full_name||u.email).replace(/'/g,"\\\\'")}')">↩ Restore</button>
+          </div>`;
+        }).join('')}
+      </div>`;
+  } catch { wrap.innerHTML = ''; }
+}
+
+async function _restoreUser(userId, name) {
+  try {
+    await API.post(`/api/orgs/${API.orgId}/users/${userId}/restore`, {});
+    toast(`${name} restored ✓`);
+    renderSettings($('page-settings'));
+  } catch(e) { toast(e.message||'Error','err'); }
 }
 
 // ── Adjust chrome when this page is loaded inside a super-admin access overlay ─
 function _applyEmbeddedOverlayChrome() {
   try {
+    // Hide the org switcher — this window is scoped to viewing one specific org
+    const orgSelect = $('org-select');
+    if (orgSelect) orgSelect.closest('.sb-org')?.style && (orgSelect.closest('.sb-org').style.display = 'none');
     // Add a small persistent banner so it's unmistakable this is super-admin view,
     // even if someone scrolls past the parent overlay's own header bar.
     const banner = document.createElement('div');

@@ -143,17 +143,7 @@ function createTables() {
       autopay_enabled INTEGER DEFAULT 0, autopay_paused INTEGER DEFAULT 0,
       autopay_day INTEGER DEFAULT 1, autopay_hour INTEGER DEFAULT 9, autopay_minute INTEGER DEFAULT 0,
       donation_emails_paused INTEGER DEFAULT 0, marketing_emails_paused INTEGER DEFAULT 0,
-      info_verified_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME, next_followup_date DATE
-    );
-    CREATE TABLE IF NOT EXISTS donor_followups (
-      id TEXT PRIMARY KEY, donor_id TEXT NOT NULL, org_id TEXT NOT NULL,
-      notes TEXT NOT NULL,
-      next_followup_date DATE,
-      done_by TEXT NOT NULL,
-      done_by_name TEXT,
-      notified INTEGER DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      info_verified_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS payment_methods (
       id TEXT PRIMARY KEY, donor_id TEXT NOT NULL, org_id TEXT NOT NULL,
@@ -183,8 +173,7 @@ function createTables() {
     CREATE TABLE IF NOT EXISTS scheduled_charges (
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL, donor_id TEXT NOT NULL,
       payment_method_id TEXT NOT NULL, amount REAL NOT NULL,
-      scheduled_for DATETIME NOT NULL, status TEXT DEFAULT 'pending',
-      processed_at DATETIME, failure_reason TEXT,
+      charge_date DATETIME NOT NULL, status TEXT DEFAULT 'pending',
       notes TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS charge_failures (
@@ -431,18 +420,11 @@ function runMigrations() {
   safe("ALTER TABLE donations ADD COLUMN labels TEXT DEFAULT '[]'");
   safe("ALTER TABLE org_label_lists ADD COLUMN lead_labels TEXT DEFAULT '[]'");
   safe("ALTER TABLE leads ADD COLUMN next_followup_date DATE");
-  safe("ALTER TABLE donors ADD COLUMN next_followup_date DATE");
   safe("ALTER TABLE email_settings ADD COLUMN brevo_api_key TEXT DEFAULT ''");
   // Invite permissions column
   safe("ALTER TABLE org_users ADD COLUMN permissions TEXT DEFAULT '{}'");
   safe("ALTER TABLE org_users ADD COLUMN invited_by TEXT");
   safe("ALTER TABLE org_users ADD COLUMN removed_at DATETIME");
-  safe("ALTER TABLE donors ADD COLUMN removed_at DATETIME");
-  // Every donor edit (and info-verify) sets updated_at — without this column present,
-  // PUT /donors/:id fails outright with "no such column: updated_at" on any DB that
-  // predates it, silently discarding the edit (this is what broke label add/remove).
-  safe("ALTER TABLE donors ADD COLUMN updated_at DATETIME");
-  safe("ALTER TABLE leads ADD COLUMN removed_at DATETIME");
   // Extra contact info fields
   safe("ALTER TABLE users ADD COLUMN hebrew_name TEXT");
   safe("ALTER TABLE users ADD COLUMN hebrew_title TEXT");
@@ -481,20 +463,6 @@ function runMigrations() {
     UNIQUE(donor_id_a, donor_id_b)
   )`); saveDb(); } catch(e) {}
   safe("ALTER TABLE donor_duplicates ADD COLUMN reason TEXT");
-  // scheduled_charges: backfill in case an existing table predates these columns
-  safe("ALTER TABLE scheduled_charges ADD COLUMN scheduled_for DATETIME");
-  safe("ALTER TABLE scheduled_charges ADD COLUMN processed_at DATETIME");
-  safe("ALTER TABLE scheduled_charges ADD COLUMN failure_reason TEXT");
-  // Duplicate detection is now computed in real time across donors + leads (see
-  // utils/duplicates.js) instead of stored at creation/import time — this table only
-  // records explicit "these are not duplicates" dismissals so they don't keep resurfacing.
-  try { db.run(`CREATE TABLE IF NOT EXISTS duplicate_dismissals (
-    id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
-    entity_a_type TEXT NOT NULL, entity_a_id TEXT NOT NULL,
-    entity_b_type TEXT NOT NULL, entity_b_id TEXT NOT NULL,
-    dismissed_by TEXT, dismissed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(entity_a_type, entity_a_id, entity_b_type, entity_b_id)
-  )`); saveDb(); } catch(e) {}
   try { db.run(`CREATE TABLE IF NOT EXISTS leads (
     id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
     title TEXT, first_name TEXT, last_name TEXT,
@@ -509,13 +477,6 @@ function runMigrations() {
   )`); saveDb(); } catch(e) {}
   try { db.run(`CREATE TABLE IF NOT EXISTS lead_followups (
     id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, org_id TEXT NOT NULL,
-    notes TEXT NOT NULL, next_followup_date DATE,
-    done_by TEXT NOT NULL, done_by_name TEXT,
-    notified INTEGER DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )`); saveDb(); } catch(e) {}
-  try { db.run(`CREATE TABLE IF NOT EXISTS donor_followups (
-    id TEXT PRIMARY KEY, donor_id TEXT NOT NULL, org_id TEXT NOT NULL,
     notes TEXT NOT NULL, next_followup_date DATE,
     done_by TEXT NOT NULL, done_by_name TEXT,
     notified INTEGER DEFAULT 0,
@@ -552,6 +513,8 @@ function runMigrations() {
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`); saveDb(); } catch(e) {}
   try { db.run(`ALTER TABLE access_requests ADD COLUMN granted_by TEXT`); saveDb(); } catch(e) {}
+  // Hebrew-calendar recurring schedules: "charge on the Nth day of every Hebrew month"
+  safe("ALTER TABLE recurring_schedules ADD COLUMN hebrew_day INTEGER");
   // Verify column exists
   try {
     const cols = db.exec("PRAGMA table_info(email_settings)");
