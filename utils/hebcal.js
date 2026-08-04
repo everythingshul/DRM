@@ -157,9 +157,34 @@ async function getRoshChodeshList({ start, end }) {
   return data;
 }
 
+// ── "Every Rosh Chodesh" / "Every Erev Rosh Chodesh" recurring schedules ───────
+// variant: 'rosh_chodesh' (fires on the 1st day of Rosh Chodesh) or
+// 'erev_rosh_chodesh' (fires the day before Rosh Chodesh begins).
+async function _nextRoshChodeshEvent(afterDateExclusive, variant) {
+  const field = variant === 'erev_rosh_chodesh' ? 'erevRoshChodesh' : 'roshChodeshStart';
+  // A Hebrew month is ~29.5 days, so 120 days comfortably covers the next occurrence;
+  // widen once in the rare case a search window lands exactly on a boundary.
+  for (const windowDays of [120, 400]) {
+    const list = await getRoshChodeshList({ start: _addDays(afterDateExclusive, 1), end: _addDays(afterDateExclusive, windowDays) });
+    const match = list.map(r => r[field]).filter(d => d > afterDateExclusive).sort()[0];
+    if (match) return match;
+  }
+  throw new Error(`Could not find next ${variant} occurrence after ${afterDateExclusive}`);
+}
+
+// First occurrence on or after startDate
+async function firstRoshChodeshRun(startDate, variant) {
+  return _nextRoshChodeshEvent(_addDays(startDate, -1), variant);
+}
+
+// First occurrence strictly after fromDate (advancing past a just-processed charge)
+async function nextRoshChodeshRun(fromDate, variant) {
+  return _nextRoshChodeshEvent(fromDate, variant);
+}
+
 module.exports = {
   isLeapYear, monthOrder,
   gregorianToHebrew, hebrewToGregorian, nextHebrewMonth, daysInHebrewMonth,
   advanceToNextHebrewMonthDate, firstHebrewMonthlyRun,
-  getRoshChodeshList
+  getRoshChodeshList, firstRoshChodeshRun, nextRoshChodeshRun
 };

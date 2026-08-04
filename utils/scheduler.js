@@ -537,6 +537,10 @@ async function calcNextRun(fromDate, frequency, hebrewDay) {
     const hebcal = require('./hebcal');
     return hebcal.advanceToNextHebrewMonthDate(fromDate, hebrewDay);
   }
+  if (frequency === 'rosh_chodesh' || frequency === 'erev_rosh_chodesh') {
+    const hebcal = require('./hebcal');
+    return hebcal.nextRoshChodeshRun(fromDate, frequency);
+  }
   const d = new Date(fromDate);
   switch (frequency) {
     case 'weekly':    d.setDate(d.getDate() + 7); break;

@@ -298,6 +298,8 @@ router.delete('/:id', (req, res) => {
   run('DELETE FROM payment_methods WHERE donor_id = ?', [req.params.id]);
   // Keep donations — set donor_id to null so financial records are preserved
   run('UPDATE donations SET donor_id = NULL WHERE donor_id = ?', [req.params.id]);
+  // Clear any pending duplicate flags pointing at this donor — resolved/merged history stays for audit
+  run("DELETE FROM donor_duplicates WHERE status='pending' AND (donor_id_a = ? OR donor_id_b = ?)", [req.params.id, req.params.id]);
   run('DELETE FROM donors WHERE id = ?', [req.params.id]);
   res.json({ success: true });
 });
@@ -321,6 +323,7 @@ router.post('/:id/move-to-lead', requireOrgAdmin, (req, res) => {
   run('DELETE FROM scheduled_charges WHERE donor_id=?', [req.params.id]);
   run('DELETE FROM recurring_schedules WHERE donor_id=?', [req.params.id]);
   run('DELETE FROM payment_methods WHERE donor_id=?', [req.params.id]);
+  run("DELETE FROM donor_duplicates WHERE status='pending' AND (donor_id_a = ? OR donor_id_b = ?)", [req.params.id, req.params.id]);
   run('DELETE FROM donors WHERE id=?', [req.params.id]);
 
   res.json({ success: true, lead_id: leadId });
@@ -361,12 +364,16 @@ router.post('/duplicates/:id/resolve', requireOrgAdmin, (req, res) => {
       run('DELETE FROM donors WHERE id=?', [dup.donor_id_b]);
       run('UPDATE donor_duplicates SET status=?,resolved_by=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?',
         ['merged', req.user.id, req.params.id]);
+      // Other pending pairs that also pointed at the now-deleted donor B are stale — clear them
+      run("DELETE FROM donor_duplicates WHERE status='pending' AND (donor_id_a = ? OR donor_id_b = ?)", [dup.donor_id_b, dup.donor_id_b]);
     } else if (action === 'merge_into_b') {
       run('UPDATE donations SET donor_id=? WHERE donor_id=?', [dup.donor_id_b, dup.donor_id_a]);
       run('UPDATE payment_methods SET donor_id=? WHERE donor_id=?', [dup.donor_id_b, dup.donor_id_a]);
       run('DELETE FROM donors WHERE id=?', [dup.donor_id_a]);
       run('UPDATE donor_duplicates SET status=?,resolved_by=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?',
         ['merged', req.user.id, req.params.id]);
+      // Other pending pairs that also pointed at the now-deleted donor A are stale — clear them
+      run("DELETE FROM donor_duplicates WHERE status='pending' AND (donor_id_a = ? OR donor_id_b = ?)", [dup.donor_id_a, dup.donor_id_a]);
     }
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -554,6 +561,9 @@ router.post('/:id/recurring', async (req, res) => {
       }
       const hebcal = require('../utils/hebcal');
       nextRun = await hebcal.firstHebrewMonthlyRun(start_date, hebrewDay);
+    } else if (frequency === 'rosh_chodesh' || frequency === 'erev_rosh_chodesh') {
+      const hebcal = require('../utils/hebcal');
+      nextRun = await hebcal.firstRoshChodeshRun(start_date, frequency);
     }
     const id = uuidv4();
     run(`INSERT INTO recurring_schedules
@@ -592,6 +602,9 @@ router.put('/:id/recurring/:sid', async (req, res) => {
       } else if (resolvedFreq === 'hebrew_monthly') {
         const hebcal = require('../utils/hebcal');
         resolvedNextRun = await hebcal.firstHebrewMonthlyRun(now.toISOString().slice(0,10), resolvedHebrewDay);
+      } else if (resolvedFreq === 'rosh_chodesh' || resolvedFreq === 'erev_rosh_chodesh') {
+        const hebcal = require('../utils/hebcal');
+        resolvedNextRun = await hebcal.firstRoshChodeshRun(now.toISOString().slice(0,10), resolvedFreq);
       } else {
         const next = new Date(now);
         switch(resolvedFreq) {

@@ -515,6 +515,18 @@ function runMigrations() {
   try { db.run(`ALTER TABLE access_requests ADD COLUMN granted_by TEXT`); saveDb(); } catch(e) {}
   // Hebrew-calendar recurring schedules: "charge on the Nth day of every Hebrew month"
   safe("ALTER TABLE recurring_schedules ADD COLUMN hebrew_day INTEGER");
+
+  // One-time cleanup: pending duplicate flags left dangling by donor deletes/merges
+  // that predate this fix (deleting a donor didn't used to clear flags pointing at it).
+  try {
+    const before = all("SELECT id FROM donor_duplicates WHERE status='pending'", []).length;
+    db.run(`DELETE FROM donor_duplicates WHERE status='pending' AND (
+      donor_id_a NOT IN (SELECT id FROM donors) OR donor_id_b NOT IN (SELECT id FROM donors)
+    )`);
+    saveDb();
+    const after = all("SELECT id FROM donor_duplicates WHERE status='pending'", []).length;
+    if (before !== after) console.log(`[db] Cleaned up ${before - after} stale duplicate flag(s) pointing at deleted donors`);
+  } catch(e) { console.error('[db] Stale duplicate flag cleanup error:', e.message); }
   // Verify column exists
   try {
     const cols = db.exec("PRAGMA table_info(email_settings)");

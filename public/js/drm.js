@@ -175,7 +175,7 @@ function fmtDT(d) {
 }
 function age(m) { if (!m && m !== 0) return '—'; const mo = parseInt(m); if (mo < 12) return mo + 'mo'; const y = Math.floor(mo / 12), r = mo % 12; return r ? `${y}y ${r}mo` : `${y}y`; }
 function fmtMethod(m) { return { credit_card: 'Credit Card', daf: 'DAF', check: 'Check', cash: 'Cash', wire: 'Wire', other: 'Other' }[m] || m; }
-function fmtFreq(f) { return { weekly: 'Weekly', biweekly: 'Bi-Weekly', monthly: 'Monthly', quarterly: 'Quarterly', yearly: 'Yearly', once: 'One-Time', hebrew_monthly: 'Hebrew Monthly' }[f] || f; }
+function fmtFreq(f) { return { weekly: 'Weekly', biweekly: 'Bi-Weekly', monthly: 'Monthly', quarterly: 'Quarterly', yearly: 'Yearly', once: 'One-Time', hebrew_monthly: 'Hebrew Monthly', rosh_chodesh: 'Every Rosh Chodesh', erev_rosh_chodesh: 'Every Erev Rosh Chodesh' }[f] || f; }
 function toLocalDT(d) {
   if (!d) return '';
   try {
@@ -1459,7 +1459,7 @@ const DonorDetail = {
       <label>Payment Method</label>
       <select id="rec-pm">${pms.map(p=>`<option value="${p.id}">${p.type==='credit_card'?((p.card_brand||'Card')+' ••'+(p.last_four||'??')):fmtMethod(p.type)} ${p.label?'('+p.label+')':''}</option>`).join('')}</select>
       <div class="r2"><div><label>Amount ($) *</label><input type="number" id="rec-amt" step="0.01" placeholder="0.00"></div><div><label>Frequency *</label>
-        <select id="rec-freq" onchange="document.getElementById('rec-hday-wrap').style.display=this.value==='hebrew_monthly'?'block':'none'"><option value="weekly">Weekly</option><option value="biweekly">Bi-Weekly</option><option value="monthly" selected>Monthly</option><option value="quarterly">Quarterly</option><option value="yearly">Yearly</option><option value="hebrew_monthly">Hebrew Monthly</option><option value="once">One-Time</option></select></div></div>
+        <select id="rec-freq" onchange="document.getElementById('rec-hday-wrap').style.display=this.value==='hebrew_monthly'?'block':'none'"><option value="weekly">Weekly</option><option value="biweekly">Bi-Weekly</option><option value="monthly" selected>Monthly</option><option value="quarterly">Quarterly</option><option value="yearly">Yearly</option><option value="hebrew_monthly">Hebrew Monthly</option><option value="rosh_chodesh">Every Rosh Chodesh</option><option value="erev_rosh_chodesh">Every Erev Rosh Chodesh</option><option value="once">One-Time</option></select></div></div>
       <div id="rec-hday-wrap" style="display:none">
         <label>Hebrew Day of Month (1-30) *</label>
         <input type="number" id="rec-hday" min="1" max="30" placeholder="e.g. 15">
@@ -1500,7 +1500,7 @@ const DonorDetail = {
   editRec(did, sid, amt, freq, nextRun, hebrewDay) {
     Modal.open('Edit Schedule', `<label>Amount ($)</label><input type="number" id="er-amt" value="${amt}" step="0.01">
       <label>Frequency</label>
-      <select id="er-freq" onchange="document.getElementById('er-hday-wrap').style.display=this.value==='hebrew_monthly'?'block':'none'">${['weekly','biweekly','monthly','quarterly','yearly','hebrew_monthly','once'].map(f=>`<option value="${f}" ${f===freq?'selected':''}>${fmtFreq(f)}</option>`).join('')}</select>
+      <select id="er-freq" onchange="document.getElementById('er-hday-wrap').style.display=this.value==='hebrew_monthly'?'block':'none'">${['weekly','biweekly','monthly','quarterly','yearly','hebrew_monthly','rosh_chodesh','erev_rosh_chodesh','once'].map(f=>`<option value="${f}" ${f===freq?'selected':''}>${fmtFreq(f)}</option>`).join('')}</select>
       <div id="er-hday-wrap" style="display:${freq==='hebrew_monthly'?'block':'none'}">
         <label>Hebrew Day of Month (1-30)</label>
         <input type="number" id="er-hday" min="1" max="30" value="${hebrewDay||''}">
@@ -6315,13 +6315,12 @@ async function _loadRemovedUsers() {
   const wrap = $('removed-users-section'); if (!wrap) return;
   try {
     const removed = await API.get(`/api/orgs/${API.orgId}/users/removed`);
-    if (!removed.length) { wrap.innerHTML = ''; return; }
     wrap.innerHTML = `
       <div style="border-top:1px solid var(--gray-1);padding-top:12px">
         <div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">
           Recently Removed <span style="font-weight:400;text-transform:none">(restorable for 30 days)</span>
         </div>
-        ${removed.map(u => {
+        ${!removed.length ? `<p style="font-size:12px;color:var(--gray-5)">No recently removed users.</p>` : removed.map(u => {
           const daysLeft = 30 - Math.floor((Date.now() - new Date(u.removed_at).getTime()) / 86400000);
           return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--gray-05);border-radius:6px;margin-bottom:6px">
             <div>
@@ -6332,7 +6331,7 @@ async function _loadRemovedUsers() {
           </div>`;
         }).join('')}
       </div>`;
-  } catch { wrap.innerHTML = ''; }
+  } catch(e) { wrap.innerHTML = `<div style="border-top:1px solid var(--gray-1);padding-top:12px"><div style="font-size:11px;font-weight:700;color:var(--gray-5);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Recently Removed</div><p style="font-size:12px;color:var(--red)">Couldn't load: ${e.message||'Unknown error'}</p></div>`; }
 }
 
 async function _restoreUser(userId, name) {
