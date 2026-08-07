@@ -675,6 +675,33 @@ async function processFollowupNotifications() {
         console.error(`[followup] Notification error: ${e.message}`);
       }
     }
+
+    // Donor-owned follow-ups — donors have no assignee, so notify all org admins
+    const dueDonor = all(`
+      SELECT lf.*, d.first_name, d.last_name, d.org_id
+      FROM lead_followups lf
+      JOIN donors d ON d.id = lf.donor_id
+      WHERE d.org_id = ? AND lf.next_followup_date = ? AND lf.notified = 0
+        AND d.next_followup_date = lf.next_followup_date
+    `, [org.id, today]);
+
+    for (const fu of dueDonor) {
+      try {
+        const admins = all(`SELECT u.id FROM users u JOIN org_users ou ON ou.user_id=u.id
+          WHERE ou.org_id=? AND ou.role='admin'`, [fu.org_id]);
+        for (const admin of admins) {
+          run(`INSERT INTO notifications (id, org_id, user_id, type, title, body, link) VALUES (?, ?, ?, 'followup_due', ?, ?, ?)`,
+            [require('uuid').v4(), fu.org_id, admin.id,
+             `Follow-up due: ${fu.first_name||''} ${fu.last_name||''}`,
+             `Logged by ${fu.done_by_name||'staff'}. Follow-up scheduled today.`,
+             `#donors/${fu.donor_id}`]);
+        }
+        run('UPDATE lead_followups SET notified=1 WHERE id=?', [fu.id]);
+        console.log(`[followup] Notified for donor ${fu.donor_id} (org tz: ${tz}, org-local date: ${today})`);
+      } catch(e) {
+        console.error(`[followup] Donor notification error: ${e.message}`);
+      }
+    }
   }
 }
 

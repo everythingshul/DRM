@@ -173,7 +173,7 @@ function createTables() {
     CREATE TABLE IF NOT EXISTS scheduled_charges (
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL, donor_id TEXT NOT NULL,
       payment_method_id TEXT NOT NULL, amount REAL NOT NULL,
-      charge_date DATETIME NOT NULL, status TEXT DEFAULT 'pending',
+      scheduled_for DATETIME NOT NULL, status TEXT DEFAULT 'pending',
       notes TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS charge_failures (
@@ -331,9 +331,11 @@ function createTables() {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
-    -- Lead follow-ups
+    -- Follow-ups: attached to a lead (lead_id) OR a donor (donor_id), never both.
+    -- Donor follow-ups also surface here when a lead converts (lead_id stays set,
+    -- looked up via leads.converted_donor_id) so history isn't lost on conversion.
     CREATE TABLE IF NOT EXISTS lead_followups (
-      id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, org_id TEXT NOT NULL,
+      id TEXT PRIMARY KEY, lead_id TEXT, donor_id TEXT, org_id TEXT NOT NULL,
       notes TEXT NOT NULL,
       next_followup_date DATE,
       done_by TEXT NOT NULL,
@@ -515,6 +517,60 @@ function runMigrations() {
   try { db.run(`ALTER TABLE access_requests ADD COLUMN granted_by TEXT`); saveDb(); } catch(e) {}
   // Hebrew-calendar recurring schedules: "charge on the Nth day of every Hebrew month"
   safe("ALTER TABLE recurring_schedules ADD COLUMN hebrew_day INTEGER");
+
+  // scheduled_charges was created with a column named charge_date, but every query
+  // and insert throughout the app (routes/donors.js, routes/org.js, scheduler.js)
+  // uses scheduled_for — a schema typo that made GET /donors/:id (and one-time
+  // charge scheduling) throw "no such column" on any DB the CREATE TABLE above
+  // actually ran on. Rename in place if a DB is still on the broken name.
+  try {
+    const col = db.exec("PRAGMA table_info(scheduled_charges)");
+    const cols = col[0]?.values || [];
+    const hasChargeDate = cols.some(c => c[1] === 'charge_date');
+    const hasScheduledFor = cols.some(c => c[1] === 'scheduled_for');
+    if (hasChargeDate && !hasScheduledFor) {
+      db.run('ALTER TABLE scheduled_charges RENAME COLUMN charge_date TO scheduled_for');
+      saveDb();
+      console.log('[db] Migration: scheduled_charges.charge_date renamed to scheduled_for');
+    }
+  } catch(e) { console.error('[db] Migration error (scheduled_charges column rename):', e.message); }
+
+  // Donor follow-ups: reuse lead_followups (donor_id column, lead_id made nullable)
+  // so a converted lead's follow-up history keeps showing under the resulting donor.
+  safe("ALTER TABLE donors ADD COLUMN next_followup_date DATE");
+  try {
+    const col = db.exec("PRAGMA table_info(lead_followups)");
+    const cols = col[0]?.values || [];
+    const leadIdCol = cols.find(c => c[1] === 'lead_id');
+    const hasDonorId = cols.some(c => c[1] === 'donor_id');
+    if ((leadIdCol && leadIdCol[3] === 1) || !hasDonorId) {
+      db.run(`CREATE TABLE IF NOT EXISTS lead_followups_new (
+        id TEXT PRIMARY KEY, lead_id TEXT, donor_id TEXT, org_id TEXT NOT NULL,
+        notes TEXT NOT NULL, next_followup_date DATE,
+        done_by TEXT NOT NULL, done_by_name TEXT,
+        notified INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`);
+      const donorIdSelect = hasDonorId ? 'donor_id' : 'NULL';
+      db.run(`INSERT INTO lead_followups_new (id, lead_id, donor_id, org_id, notes, next_followup_date, done_by, done_by_name, notified, created_at)
+              SELECT id, lead_id, ${donorIdSelect}, org_id, notes, next_followup_date, done_by, done_by_name, notified, created_at FROM lead_followups`);
+      db.run('DROP TABLE lead_followups');
+      db.run('ALTER TABLE lead_followups_new RENAME TO lead_followups');
+      saveDb();
+      console.log('[db] Migration: lead_followups.lead_id is now nullable, added donor_id column');
+    }
+  } catch(e) { console.error('[db] Migration error (lead_followups donor support):', e.message); }
+  // Backfill donors.next_followup_date from any already-converted lead's latest follow-up,
+  // so history that predates this feature surfaces immediately instead of waiting for a new entry.
+  try {
+    const converted = all(`
+      SELECT l.converted_donor_id as donor_id,
+        (SELECT lf.next_followup_date FROM lead_followups lf WHERE lf.lead_id=l.id ORDER BY lf.created_at DESC LIMIT 1) as nfd
+      FROM leads l WHERE l.converted_donor_id IS NOT NULL
+    `, []);
+    for (const c of converted) {
+      if (c.nfd) run('UPDATE donors SET next_followup_date=? WHERE id=? AND next_followup_date IS NULL', [c.nfd, c.donor_id]);
+    }
+  } catch(e) { console.error('[db] donors.next_followup_date backfill error:', e.message); }
 
   // One-time cleanup: pending duplicate flags left dangling by donor deletes/merges
   // that predate this fix (deleting a donor didn't used to clear flags pointing at it).

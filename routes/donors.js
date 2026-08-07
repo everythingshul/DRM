@@ -300,6 +300,7 @@ router.delete('/:id', (req, res) => {
   run('UPDATE donations SET donor_id = NULL WHERE donor_id = ?', [req.params.id]);
   // Clear any pending duplicate flags pointing at this donor — resolved/merged history stays for audit
   run("DELETE FROM donor_duplicates WHERE status='pending' AND (donor_id_a = ? OR donor_id_b = ?)", [req.params.id, req.params.id]);
+  run('DELETE FROM lead_followups WHERE donor_id = ?', [req.params.id]);
   run('DELETE FROM donors WHERE id = ?', [req.params.id]);
   res.json({ success: true });
 });
@@ -324,6 +325,12 @@ router.post('/:id/move-to-lead', requireOrgAdmin, (req, res) => {
   run('DELETE FROM recurring_schedules WHERE donor_id=?', [req.params.id]);
   run('DELETE FROM payment_methods WHERE donor_id=?', [req.params.id]);
   run("DELETE FROM donor_duplicates WHERE status='pending' AND (donor_id_a = ? OR donor_id_b = ?)", [req.params.id, req.params.id]);
+  // Re-parent follow-up history to the new lead instead of losing it — both entries
+  // logged directly on this donor, and any inherited from an earlier lead conversion
+  // (donor round-tripping lead -> donor -> lead again)
+  run('UPDATE lead_followups SET lead_id=?, donor_id=NULL WHERE donor_id=?', [leadId, req.params.id]);
+  run('UPDATE lead_followups SET lead_id=? WHERE lead_id IN (SELECT id FROM leads WHERE converted_donor_id=?)', [leadId, req.params.id]);
+  if (donor.next_followup_date) run('UPDATE leads SET next_followup_date=? WHERE id=?', [donor.next_followup_date, leadId]);
   run('DELETE FROM donors WHERE id=?', [req.params.id]);
 
   res.json({ success: true, lead_id: leadId });
@@ -637,6 +644,39 @@ router.delete('/:id/recurring/:sid', (req, res) => {
     [req.params.sid, req.params.id, req.orgId]);
   res.json({ success: true });
 });
+
+// --- FOLLOW-UPS ---
+// Combines follow-ups logged directly against this donor with any logged while they
+// were still a lead (before conversion) — nothing gets lost when a lead converts.
+router.get('/:id/followups', (req, res) => {
+  const donor = get('SELECT id FROM donors WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
+  if (!donor) return res.status(404).json({ error: 'Donor not found' });
+  const followups = all(`
+    SELECT lf.* FROM lead_followups lf
+    WHERE lf.org_id = ? AND (
+      lf.donor_id = ?
+      OR lf.lead_id IN (SELECT id FROM leads WHERE converted_donor_id = ?)
+    )
+    ORDER BY lf.created_at DESC
+  `, [req.orgId, req.params.id, req.params.id]);
+  res.json(followups);
+});
+
+router.post('/:id/followup', (req, res) => {
+  const donor = get('SELECT id FROM donors WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
+  if (!donor) return res.status(404).json({ error: 'Donor not found' });
+  const { notes, next_followup_date } = req.body;
+  if (!notes) return res.status(400).json({ error: 'Notes required' });
+  const id = uuidv4();
+  run(`INSERT INTO lead_followups (id, donor_id, org_id, notes, next_followup_date, done_by, done_by_name)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [id, req.params.id, req.orgId, notes, next_followup_date || null, req.user.id, req.user.full_name]);
+  run('UPDATE donors SET next_followup_date = ? WHERE id = ?', [next_followup_date || null, req.params.id]);
+  res.json({ success: true, followup: get('SELECT * FROM lead_followups WHERE id = ?', [id]) });
+});
+
+// Editing an existing follow-up (donor- or lead-owned) is handled by the shared
+// PUT /api/orgs/:orgId/leads/followups/:id endpoint in routes/leads.js.
 
 // --- DONATION NOTES ---
 router.post('/:donorId/donations/:donId/notes', (req, res) => {

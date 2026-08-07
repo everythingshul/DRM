@@ -294,19 +294,22 @@ router.post('/:id/followup', (req, res) => {
   res.json({ success: true, followup: get('SELECT * FROM lead_followups WHERE id=?', [id]) });
 });
 
-// ── Edit a follow-up (all fields) ─────────────────────────────────────────────
+// ── Edit a follow-up (all fields) — works for both lead- and donor-owned entries ──
 router.put('/followups/:id', (req, res) => {
   const fu = get('SELECT * FROM lead_followups WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
   if (!fu) return res.status(404).json({ error: 'Follow-up not found' });
   const { notes, next_followup_date } = req.body;
+  const resolvedDate = next_followup_date !== undefined ? (next_followup_date || null) : fu.next_followup_date;
   run('UPDATE lead_followups SET notes=?,next_followup_date=? WHERE id=?',
-    [notes!==undefined?notes:fu.notes, next_followup_date!==undefined?(next_followup_date||null):fu.next_followup_date, req.params.id]);
+    [notes!==undefined?notes:fu.notes, resolvedDate, req.params.id]);
 
-  // If this is the most recent follow-up for the lead, keep the lead's active date in sync
-  const latest = get('SELECT id FROM lead_followups WHERE lead_id=? ORDER BY created_at DESC LIMIT 1', [fu.lead_id]);
-  if (latest && latest.id === req.params.id) {
-    run('UPDATE leads SET next_followup_date=? WHERE id=?',
-      [next_followup_date!==undefined?(next_followup_date||null):fu.next_followup_date, fu.lead_id]);
+  // If this is the most recent follow-up for its owner, keep the owner's active date in sync
+  if (fu.lead_id) {
+    const latest = get('SELECT id FROM lead_followups WHERE lead_id=? ORDER BY created_at DESC LIMIT 1', [fu.lead_id]);
+    if (latest && latest.id === req.params.id) run('UPDATE leads SET next_followup_date=? WHERE id=?', [resolvedDate, fu.lead_id]);
+  } else if (fu.donor_id) {
+    const latest = get('SELECT id FROM lead_followups WHERE donor_id=? ORDER BY created_at DESC LIMIT 1', [fu.donor_id]);
+    if (latest && latest.id === req.params.id) run('UPDATE donors SET next_followup_date=? WHERE id=?', [resolvedDate, fu.donor_id]);
   }
   res.json({ success: true });
 });
@@ -358,12 +361,12 @@ router.get('/staff/list', (req, res) => {
   res.json(staff);
 });
 
-// ── List all scheduled follow-ups for this org ────────────────────────────────
+// ── List all scheduled follow-ups for this org (leads + donors) ────────────────
 router.get('/followups/scheduled', (req, res) => {
   const followups = all(`
-    SELECT l.id as lead_id, l.next_followup_date, l.assigned_to,
-      l.first_name||' '||COALESCE(l.last_name,'') as lead_name,
-      l.cell as lead_cell, la.full_name as lead_assigned_name,
+    SELECT 'lead' as type, l.id as lead_id, NULL as donor_id, l.next_followup_date, l.assigned_to,
+      l.first_name||' '||COALESCE(l.last_name,'') as person_name,
+      l.cell as person_cell, la.full_name as assigned_name,
       (SELECT lf.notes FROM lead_followups lf WHERE lf.lead_id=l.id ORDER BY lf.created_at DESC LIMIT 1) as notes,
       (SELECT lf.id FROM lead_followups lf WHERE lf.lead_id=l.id ORDER BY lf.created_at DESC LIMIT 1) as id,
       (SELECT lf.done_by_name FROM lead_followups lf WHERE lf.lead_id=l.id ORDER BY lf.created_at DESC LIMIT 1) as done_by_name
@@ -371,8 +374,20 @@ router.get('/followups/scheduled', (req, res) => {
     LEFT JOIN users la ON la.id = l.assigned_to
     WHERE l.org_id=? AND l.next_followup_date IS NOT NULL
       AND l.status != 'converted'
-    ORDER BY l.next_followup_date ASC
-  `, [req.orgId]);
+
+    UNION ALL
+
+    SELECT 'donor' as type, NULL as lead_id, d.id as donor_id, d.next_followup_date, NULL as assigned_to,
+      d.first_name||' '||COALESCE(d.last_name,'') as person_name,
+      d.cell as person_cell, NULL as assigned_name,
+      (SELECT lf.notes FROM lead_followups lf WHERE lf.donor_id=d.id OR lf.lead_id IN (SELECT id FROM leads WHERE converted_donor_id=d.id) ORDER BY lf.created_at DESC LIMIT 1) as notes,
+      (SELECT lf.id FROM lead_followups lf WHERE lf.donor_id=d.id OR lf.lead_id IN (SELECT id FROM leads WHERE converted_donor_id=d.id) ORDER BY lf.created_at DESC LIMIT 1) as id,
+      (SELECT lf.done_by_name FROM lead_followups lf WHERE lf.donor_id=d.id OR lf.lead_id IN (SELECT id FROM leads WHERE converted_donor_id=d.id) ORDER BY lf.created_at DESC LIMIT 1) as done_by_name
+    FROM donors d
+    WHERE d.org_id=? AND d.next_followup_date IS NOT NULL
+
+    ORDER BY next_followup_date ASC
+  `, [req.orgId, req.orgId]);
   res.json(followups);
 });
 
