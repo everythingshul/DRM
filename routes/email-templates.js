@@ -237,6 +237,17 @@ router.delete('/:id', requireOrgAdmin, (req, res) => {
   res.json({ success: true });
 });
 
+// ── Duplicate a template ──────────────────────────────────────────────────────
+router.post('/:id/duplicate', requireOrgAdmin, (req, res) => {
+  const t = get('SELECT * FROM email_templates WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
+  if (!t) return res.status(404).json({ error: 'Template not found' });
+  const id = uuidv4();
+  run(`INSERT INTO email_templates (id,org_id,name,description,subject,blocks,is_default_receipt)
+       VALUES (?,?,?,?,?,?,0)`,
+    [id, req.orgId, `${t.name} (Copy)`, t.description, t.subject, t.blocks]);
+  res.json({ success: true, template: get('SELECT * FROM email_templates WHERE id=?', [id]) });
+});
+
 // ── Set as default receipt template ───────────────────────────────────────────
 router.post('/:id/set-default-receipt', requireOrgAdmin, (req, res) => {
   run('UPDATE email_templates SET is_default_receipt=0 WHERE org_id=?', [req.orgId]);

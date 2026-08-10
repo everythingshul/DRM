@@ -1529,7 +1529,9 @@ const DonorDetail = {
         <label>Hebrew Day of Month (1-30)</label>
         <input type="number" id="er-hday" min="1" max="30" value="${hebrewDay||''}">
       </div>
-      <label>Next Run</label><input type="date" id="er-next" value="${nextRun?nextRun.slice(0,10):''}">
+      <label>Next Charge Date${['hebrew_monthly','rosh_chodesh','erev_rosh_chodesh'].includes(freq)?' (override)':''}</label>
+      <input type="date" id="er-next" value="${nextRun?nextRun.slice(0,10):''}">
+      ${['hebrew_monthly','rosh_chodesh','erev_rosh_chodesh'].includes(freq)?`<p style="font-size:11px;color:var(--gray-5);margin:2px 0 0">Overrides just the next charge to this date. After it processes, future charges go back to the normal ${fmtFreq(freq)} schedule.</p>`:''}
       <div class="bg mt"><button class="btn btn-primary" onclick="DonorDetail._saveEditRec('${did}','${sid}')">Save</button><button class="btn btn-ghost" onclick="Modal.close()">Cancel</button></div>`,{sm:true});
   },
   async _saveEditRec(did, sid) {
@@ -2073,6 +2075,7 @@ async function renderEmails(el) {
                   <button class="btn btn-primary btn-sm" onclick="_emailEdit('${t.id}')">&#9998; Edit</button>
                   <button class="btn btn-ghost btn-sm" onclick="_emailPreview('${t.id}')">&#128065; Preview</button>
                   <button class="btn btn-ghost btn-sm" onclick="_emailTestSend('${t.id}')">&#9993; Test</button>
+                  <button class="btn btn-ghost btn-sm" onclick="_emailDuplicate('${t.id}')">&#10063; Duplicate</button>
                   ${!t.is_default_receipt?`<button class="btn btn-ghost btn-sm" onclick="_emailSetDefault('${t.id}')">&#9733; Set Default</button>`:`<button class="btn btn-ghost btn-sm" onclick="_emailClearDefault()">&#9734; Unset</button>`}
                   <button class="btn btn-icon" style="color:var(--red)" onclick="_emailDelete('${t.id}','${t.name.replace(/'/g,"\\'")}')">&#10005;</button>
                 </div>
@@ -2293,6 +2296,12 @@ async function _emailSetDefault(id) {
 async function _emailClearDefault() {
   await API.post(`/api/orgs/${API.orgId}/email-templates/clear-default-receipt`, {}).catch(e=>toast(e.message||'Error','err'));
   toast('Default cleared'); renderEmails($('page-emails'));
+}
+async function _emailDuplicate(id) {
+  try {
+    await API.post(`/api/orgs/${API.orgId}/email-templates/${id}/duplicate`, {});
+    toast('Duplicated ✓'); renderEmails($('page-emails'));
+  } catch(e) { toast(e.message||'Error','err'); }
 }
 async function _emailDelete(id, name) {
   confirmDlg(`Delete template "${name}"?`, async () => {

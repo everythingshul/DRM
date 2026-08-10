@@ -119,6 +119,27 @@ async function firstHebrewMonthlyRun(startDate, hebrewDay) {
 // ── Rosh Chodesh / Erev Rosh Chodesh listing ────────────────────────────────────
 let _rcCache = null; // { key, expiresAt, data }
 
+// Rosh Hashana (1-2 Tishrei) isn't technically Rosh Chodesh — Tishrei's "New Moon"
+// is superseded by the Yom Tov — but Erev Rosh Hashana (29 Elul) is the natural
+// equivalent of Erev Rosh Chodesh for that month, and a common giving occasion.
+// Computed directly via the h2g converter (always exactly 2 days, everywhere),
+// not the holidays feed, to stay consistent with this module's approach of never
+// depending on Hebcal's holiday-title spelling.
+async function _roshHashanaEntries(start, end) {
+  const { hy: hyStart } = await gregorianToHebrew(start);
+  const { hy: hyEnd } = await gregorianToHebrew(end);
+  const entries = [];
+  for (let hy = hyStart; hy <= hyEnd + 1; hy++) {
+    const firstDate = await hebrewToGregorian(hy, 'Tishrei', 1);
+    if (firstDate < start || firstDate > end) continue;
+    entries.push({
+      title: 'Rosh Hashana', hebrew: '', firstDate, lastDate: _addDays(firstDate, 1),
+      days: 2, isRoshHashana: true
+    });
+  }
+  return entries;
+}
+
 async function getRoshChodeshList({ start, end }) {
   const key = `${start}|${end}`;
   if (_rcCache && _rcCache.key === key && _rcCache.expiresAt > Date.now()) return _rcCache.data;
@@ -143,14 +164,18 @@ async function getRoshChodeshList({ start, end }) {
     }
   }
 
+  grouped.push(...await _roshHashanaEntries(start, end));
+  grouped.sort((a, b) => a.firstDate.localeCompare(b.firstDate));
+
   const data = grouped.map(g => ({
-    month: g.title.replace(/^Rosh Chodesh\s+/, ''),
+    month: g.isRoshHashana ? 'Tishrei — Rosh Hashana' : g.title.replace(/^Rosh Chodesh\s+/, ''),
     title: g.title,
     hebrew: g.hebrew,
     days: g.days,
     roshChodeshStart: g.firstDate,
     roshChodeshEnd: g.lastDate,
-    erevRoshChodesh: _addDays(g.firstDate, -1)
+    erevRoshChodesh: _addDays(g.firstDate, -1),
+    isRoshHashana: !!g.isRoshHashana
   }));
 
   _rcCache = { key, expiresAt: Date.now() + 24 * 60 * 60 * 1000, data };
@@ -159,14 +184,17 @@ async function getRoshChodeshList({ start, end }) {
 
 // ── "Every Rosh Chodesh" / "Every Erev Rosh Chodesh" recurring schedules ───────
 // variant: 'rosh_chodesh' (fires on the 1st day of Rosh Chodesh) or
-// 'erev_rosh_chodesh' (fires the day before Rosh Chodesh begins).
+// 'erev_rosh_chodesh' (fires the day before Rosh Chodesh begins — also includes
+// Erev Rosh Hashana, since Rosh Hashana itself is a Yom Tov, not Rosh Chodesh,
+// and charges shouldn't fire ON it).
 async function _nextRoshChodeshEvent(afterDateExclusive, variant) {
   const field = variant === 'erev_rosh_chodesh' ? 'erevRoshChodesh' : 'roshChodeshStart';
   // A Hebrew month is ~29.5 days, so 120 days comfortably covers the next occurrence;
   // widen once in the rare case a search window lands exactly on a boundary.
   for (const windowDays of [120, 400]) {
     const list = await getRoshChodeshList({ start: _addDays(afterDateExclusive, 1), end: _addDays(afterDateExclusive, windowDays) });
-    const match = list.map(r => r[field]).filter(d => d > afterDateExclusive).sort()[0];
+    const candidates = variant === 'rosh_chodesh' ? list.filter(r => !r.isRoshHashana) : list;
+    const match = candidates.map(r => r[field]).filter(d => d > afterDateExclusive).sort()[0];
     if (match) return match;
   }
   throw new Error(`Could not find next ${variant} occurrence after ${afterDateExclusive}`);
