@@ -168,7 +168,7 @@ router.get('/export', (req, res) => {
 // ── List leads ────────────────────────────────────────────────────────────────
 router.get('/', (req, res) => {
   const { status, assigned_to, category, q } = req.query;
-  let where = 'l.org_id=?', params = [req.orgId];
+  let where = 'l.org_id=? AND l.removed_at IS NULL', params = [req.orgId];
   if (status)      { where += ' AND l.status=?';      params.push(status); }
   if (assigned_to) { where += ' AND l.assigned_to=?'; params.push(assigned_to); }
   if (category)    { where += ' AND l.category=?';    params.push(category); }
@@ -188,6 +188,26 @@ router.get('/', (req, res) => {
     ORDER BY l.created_at DESC
   `, params);
   res.json(leads);
+});
+
+// ── Recently removed leads (30-day restore window) — must be before /:id ──────
+router.get('/removed', requireOrgAdmin, (req, res) => {
+  const removed = all(`
+    SELECT * FROM leads WHERE org_id=? AND removed_at IS NOT NULL
+      AND julianday('now') - julianday(removed_at) <= 30
+    ORDER BY removed_at DESC
+  `, [req.orgId]);
+  res.json(removed);
+});
+
+router.post('/:id/restore', requireOrgAdmin, (req, res) => {
+  const lead = get('SELECT * FROM leads WHERE id=? AND org_id=? AND removed_at IS NOT NULL', [req.params.id, req.orgId]);
+  if (!lead) return res.status(404).json({ error: 'Removed lead not found' });
+  if ((Date.now() - new Date(lead.removed_at).getTime()) > 30 * 24 * 60 * 60 * 1000) {
+    return res.status(400).json({ error: 'Restore window (30 days) has expired' });
+  }
+  run('UPDATE leads SET removed_at=NULL WHERE id=?', [req.params.id]);
+  res.json({ success: true, lead: get('SELECT * FROM leads WHERE id=?', [req.params.id]) });
 });
 
 // ── Get single lead ───────────────────────────────────────────────────────────
@@ -264,10 +284,10 @@ router.put('/:id', (req, res) => {
   res.json({ success: true, lead: get('SELECT * FROM leads WHERE id=?', [req.params.id]) });
 });
 
-// ── Delete lead ───────────────────────────────────────────────────────────────
+// ── Remove lead — soft delete, restorable for 30 days (see GET /removed, POST /:id/restore).
+// Follow-up history stays intact so a restore brings the lead back exactly as it was.
 router.delete('/:id', requireOrgAdmin, (req, res) => {
-  run('DELETE FROM lead_followups WHERE lead_id=?', [req.params.id]);
-  run('DELETE FROM leads WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
+  run('UPDATE leads SET removed_at=CURRENT_TIMESTAMP WHERE id=? AND org_id=?', [req.params.id, req.orgId]);
   res.json({ success: true });
 });
 

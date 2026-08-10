@@ -253,6 +253,7 @@ router.get('/reports/donations', (req, res) => {
     SELECT don.id, don.donation_date, don.amount, don.method, don.status,
            don.transaction_id, don.notes, don.label, don.labels, don.donation_notes,
            don.is_manual, don.is_autopay, don.donor_id,
+           don.receipt_sent, don.receipt_skip_reason,
            d.first_name, d.last_name, d.email, d.cell,
            n.name_he as neighborhood,
            pm.label as payment_label, pm.last_four,

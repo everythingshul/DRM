@@ -128,7 +128,7 @@ function createTables() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS neighborhoods (
-      id TEXT PRIMARY KEY, org_id TEXT NOT NULL, name_he TEXT, name TEXT,
+      id TEXT PRIMARY KEY, org_id TEXT NOT NULL, name_he TEXT, name TEXT, name_en TEXT,
       sort_order INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS donors (
@@ -143,7 +143,8 @@ function createTables() {
       autopay_enabled INTEGER DEFAULT 0, autopay_paused INTEGER DEFAULT 0,
       autopay_day INTEGER DEFAULT 1, autopay_hour INTEGER DEFAULT 9, autopay_minute INTEGER DEFAULT 0,
       donation_emails_paused INTEGER DEFAULT 0, marketing_emails_paused INTEGER DEFAULT 0,
-      info_verified_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      info_verified_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME
     );
     CREATE TABLE IF NOT EXISTS payment_methods (
       id TEXT PRIMARY KEY, donor_id TEXT NOT NULL, org_id TEXT NOT NULL,
@@ -174,12 +175,13 @@ function createTables() {
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL, donor_id TEXT NOT NULL,
       payment_method_id TEXT NOT NULL, amount REAL NOT NULL,
       scheduled_for DATETIME NOT NULL, status TEXT DEFAULT 'pending',
-      notes TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      notes TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      processed_at DATETIME, failure_reason TEXT
     );
     CREATE TABLE IF NOT EXISTS charge_failures (
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL, donor_id TEXT NOT NULL,
-      amount REAL, failure_reason TEXT, payment_method_id TEXT,
-      acknowledged INTEGER DEFAULT 0, acknowledged_at DATETIME,
+      scheduled_charge_id TEXT, amount REAL, failure_reason TEXT, payment_method_id TEXT,
+      acknowledged INTEGER DEFAULT 0, acknowledged_at DATETIME, acknowledged_by TEXT,
       occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS email_settings (
@@ -191,15 +193,16 @@ function createTables() {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS scheduled_emails (
-      id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
+      id TEXT PRIMARY KEY, org_id TEXT NOT NULL, donor_id TEXT,
       subject TEXT NOT NULL, html_body TEXT, template_id TEXT,
       scheduled_for DATETIME NOT NULL, status TEXT DEFAULT 'pending',
-      sent_at DATETIME, recipient_group TEXT,
+      sent_at DATETIME, recipient_group TEXT, failure_reason TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS sola_settings (
       id TEXT PRIMARY KEY, org_id TEXT UNIQUE NOT NULL,
-      api_key TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      api_key TEXT, merchant_id TEXT, is_active INTEGER DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS kvitel_settings (
       id TEXT PRIMARY KEY, org_id TEXT UNIQUE NOT NULL,
@@ -238,7 +241,8 @@ function createTables() {
     );
     CREATE TABLE IF NOT EXISTS bank_connections (
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
-      provider TEXT, api_key TEXT, api_secret TEXT,
+      provider TEXT, bank_name TEXT, api_key TEXT, api_secret TEXT,
+      account_ids TEXT DEFAULT '[]', is_active INTEGER DEFAULT 1, last_sync DATETIME,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS bank_transactions (
@@ -571,6 +575,36 @@ function runMigrations() {
       if (c.nfd) run('UPDATE donors SET next_followup_date=? WHERE id=? AND next_followup_date IS NULL', [c.nfd, c.donor_id]);
     }
   } catch(e) { console.error('[db] donors.next_followup_date backfill error:', e.message); }
+
+  // routes/donors.js PUT /:id has always set updated_at on every donor edit, but the
+  // column never existed — every donor edit crashed with "no such column: updated_at".
+  safe("ALTER TABLE donors ADD COLUMN updated_at DATETIME");
+
+  // Same class of bug, found by auditing every UPDATE statement against the schema:
+  // each of these columns is written by real code paths but was never defined, so
+  // that code has always crashed with "no such column" (silently, in scheduled jobs).
+  safe("ALTER TABLE scheduled_charges ADD COLUMN processed_at DATETIME");   // one-time charge processing (utils/scheduler.js)
+  safe("ALTER TABLE scheduled_charges ADD COLUMN failure_reason TEXT");    // same
+  safe("ALTER TABLE charge_failures ADD COLUMN acknowledged_by TEXT");      // Settings > Failed Charges acknowledge button
+  safe("ALTER TABLE scheduled_emails ADD COLUMN failure_reason TEXT");     // scheduled/broadcast email failure tracking
+  safe("ALTER TABLE sola_settings ADD COLUMN merchant_id TEXT");           // Settings > Sola Payments
+  safe("ALTER TABLE sola_settings ADD COLUMN is_active INTEGER DEFAULT 1"); // same
+  safe("ALTER TABLE bank_connections ADD COLUMN last_sync DATETIME");      // Bank > Sync Now
+  safe("ALTER TABLE bank_connections ADD COLUMN bank_name TEXT");          // Bank connection creation
+  safe("ALTER TABLE bank_connections ADD COLUMN is_active INTEGER DEFAULT 1");
+  safe("ALTER TABLE bank_connections ADD COLUMN account_ids TEXT DEFAULT '[]'");
+  safe("ALTER TABLE neighborhoods ADD COLUMN name_en TEXT");               // Add Neighborhood (English name)
+  safe("ALTER TABLE scheduled_emails ADD COLUMN donor_id TEXT");           // Scheduling an email to one donor
+  safe("ALTER TABLE charge_failures ADD COLUMN scheduled_charge_id TEXT"); // Links a failure back to its schedule
+
+  // Records why a donation's receipt email wasn't sent (paused, no provider, no
+  // donor email, send failure...) so it's visible in the UI instead of only ever
+  // appearing in server console logs nobody running on Render can see.
+  safe("ALTER TABLE donations ADD COLUMN receipt_skip_reason TEXT");
+
+  // Soft-delete donors and leads (30-day restore window, same pattern as org_users)
+  safe("ALTER TABLE donors ADD COLUMN removed_at DATETIME");
+  safe("ALTER TABLE leads ADD COLUMN removed_at DATETIME");
 
   // One-time cleanup: pending duplicate flags left dangling by donor deletes/merges
   // that predate this fix (deleting a donor didn't used to clear flags pointing at it).

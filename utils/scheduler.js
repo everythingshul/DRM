@@ -33,37 +33,35 @@ function interpolateTemplate(template, vars) {
 }
 
 async function sendReceiptEmail(donor, donation, org) {
+  // Every skip/failure reason is written onto the donation row (receipt_skip_reason)
+  // so it's visible in the UI — previously these only went to server console logs,
+  // which nobody running on Render ever sees, making "why didn't X get a receipt"
+  // unanswerable without direct DB access.
+  const skip = (reason) => {
+    console.log(`[receipt] Skipping — ${reason}`);
+    if (donation?.id) run('UPDATE donations SET receipt_skip_reason = ? WHERE id = ?', [reason, donation.id]);
+  };
   try {
-    if (donor.donation_emails_paused) {
-      console.log(`[receipt] Skipping — donation emails paused for donor ${donor.id}`);
-      return;
-    }
-
+    if (donor.donation_emails_paused) { skip(`Donor has donation receipt emails paused`); return; }
 
     const settings = get('SELECT * FROM email_settings WHERE org_id = ?', [org.id]);
     if (!settings?.brevo_api_key && !settings?.smtp_email) {
-      console.log(`[receipt] Skipping — no email provider configured for org ${org.id}. Add Brevo API key or Gmail SMTP in Email Settings.`);
+      skip('No email provider configured for this organization — add a Brevo API key or Gmail SMTP in Email Settings');
       return;
     }
     if (!settings?.brevo_api_key && !settings?.smtp_email && !settings?.smtp_password) {
-      console.log(`[receipt] Skipping — no email credentials for org ${org.id}.`);
+      skip('Email provider is missing credentials');
       return;
     }
-    if (settings.donation_emails_paused) {
-      console.log(`[receipt] Skipping — donation emails paused for org ${org.id}`);
-      return;
-    }
-    if (!donor.email) {
-      console.log(`[receipt] Skipping — donor ${donor.id} (${donor.first_name} ${donor.last_name}) has no email address`);
-      return;
-    }
+    if (settings.donation_emails_paused) { skip('Organization has donation receipt emails paused (Email Settings)'); return; }
+    if (!donor.email) { skip('Donor has no email address on file'); return; }
     const provider = settings.brevo_api_key ? 'api.brevo.com (Brevo API)' : `${settings.smtp_host||'smtp.gmail.com'}:${settings.smtp_port||587}`;
     console.log(`[receipt] Attempting to send to ${donor.email} via ${provider}`);
 
     const useBrevoApi = !!settings.brevo_api_key;
     const transporter = useBrevoApi ? null : mailer.buildTransporter(settings);
     if (!useBrevoApi && !transporter) {
-      console.log('[receipt] No email provider configured — add Brevo API key or Gmail SMTP in Email Settings');
+      skip('Email provider configuration is invalid — check SMTP settings');
       return;
     }
 
@@ -127,9 +125,10 @@ async function sendReceiptEmail(donor, donation, org) {
       type: 'receipt',
       donorId: donor.id, donationId: donation.id
     });
-    run('UPDATE donations SET receipt_sent = 1 WHERE id = ?', [donation.id]);
+    run('UPDATE donations SET receipt_sent = 1, receipt_skip_reason = NULL WHERE id = ?', [donation.id]);
   } catch (e) {
     console.error(`[receipt] ✗ FAILED to ${donor?.email} — ${e.message}`);
+    if (donation?.id) run('UPDATE donations SET receipt_skip_reason = ? WHERE id = ?', [`Send failed: ${e.message}`.slice(0, 500), donation.id]);
   }
 }
 
@@ -190,7 +189,7 @@ async function processScheduledCharge(charge) {
   const donor = get('SELECT * FROM donors WHERE id = ?', [charge.donor_id]);
   const pm = get('SELECT * FROM payment_methods WHERE id = ?', [charge.payment_method_id]);
   const org = get('SELECT * FROM organizations WHERE id = ?', [charge.org_id]);
-  if (!donor || !pm || !org) return;
+  if (!donor || !pm || !org || donor.removed_at) return;
 
   try {
     let txResult;
@@ -254,7 +253,7 @@ async function processAutopay() {
   const donors = all(`
     SELECT d.*, o.settings as org_settings FROM donors d
     JOIN organizations o ON o.id = d.org_id
-    WHERE d.autopay_enabled = 1 AND d.autopay_paused = 0
+    WHERE d.autopay_enabled = 1 AND d.autopay_paused = 0 AND d.removed_at IS NULL
   `, []);
 
   const matching = donors.filter(donor => {
@@ -456,6 +455,7 @@ async function processRecurringSchedules() {
     FROM recurring_schedules rs
     JOIN donors d ON rs.donor_id = d.id
     WHERE rs.status = 'active'
+      AND d.removed_at IS NULL
       AND rs.next_run <= datetime('now')
       AND (rs.end_date IS NULL OR rs.next_run <= rs.end_date)
       AND (rs.occurrences_limit IS NULL OR rs.occurrences_count < rs.occurrences_limit)
@@ -682,7 +682,7 @@ async function processFollowupNotifications() {
       FROM lead_followups lf
       JOIN donors d ON d.id = lf.donor_id
       WHERE d.org_id = ? AND lf.next_followup_date = ? AND lf.notified = 0
-        AND d.next_followup_date = lf.next_followup_date
+        AND d.next_followup_date = lf.next_followup_date AND d.removed_at IS NULL
     `, [org.id, today]);
 
     for (const fu of dueDonor) {

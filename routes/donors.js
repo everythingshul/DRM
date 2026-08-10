@@ -24,7 +24,7 @@ router.get('/', (req, res) => {
       (SELECT CASE WHEN dd.donor_id_a=d.id THEN dd.donor_id_b ELSE dd.donor_id_a END FROM donor_duplicates dd WHERE dd.status='pending' AND (dd.donor_id_a=d.id OR dd.donor_id_b=d.id) LIMIT 1) as dup_other_id
     FROM donors d
     LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
-    WHERE d.org_id = ?
+    WHERE d.org_id = ? AND d.removed_at IS NULL
   `;
   const params = [req.orgId];
 
@@ -66,7 +66,7 @@ router.get('/needs-verification', (req, res) => {
       CAST((julianday('now') - julianday(d.created_at)) / 30.44 AS INTEGER) as months_old
     FROM donors d
     LEFT JOIN neighborhoods n ON d.neighborhood_id = n.id
-    WHERE d.org_id = ?
+    WHERE d.org_id = ? AND d.removed_at IS NULL
     AND (d.info_verified_at IS NULL OR julianday('now') - julianday(d.info_verified_at) > 180)
     ORDER BY d.info_verified_at ASC, d.created_at ASC
   `, [req.orgId]);
@@ -79,11 +79,31 @@ router.get('/search', (req, res) => {
   const q = '%' + (req.query.q || '') + '%';
   const donors = all(`
     SELECT id, first_name, last_name, hebrew_full_name, email, cell
-    FROM donors WHERE org_id=?
+    FROM donors WHERE org_id=? AND removed_at IS NULL
       AND (first_name LIKE ? OR last_name LIKE ? OR email LIKE ? OR cell LIKE ? OR hebrew_full_name LIKE ?)
     ORDER BY last_name, first_name LIMIT 20`,
     [req.orgId, q, q, q, q, q]);
   res.json(donors);
+});
+
+// ── Recently removed donors (30-day restore window) ─────────────────────────────
+router.get('/removed', requireOrgAdmin, (req, res) => {
+  const removed = all(`
+    SELECT * FROM donors WHERE org_id=? AND removed_at IS NOT NULL
+      AND julianday('now') - julianday(removed_at) <= 30
+    ORDER BY removed_at DESC
+  `, [req.orgId]);
+  res.json(removed);
+});
+
+router.post('/:id/restore', requireOrgAdmin, (req, res) => {
+  const donor = get('SELECT * FROM donors WHERE id=? AND org_id=? AND removed_at IS NOT NULL', [req.params.id, req.orgId]);
+  if (!donor) return res.status(404).json({ error: 'Removed donor not found' });
+  if ((Date.now() - new Date(donor.removed_at).getTime()) > 30 * 24 * 60 * 60 * 1000) {
+    return res.status(400).json({ error: 'Restore window (30 days) has expired' });
+  }
+  run('UPDATE donors SET removed_at=NULL WHERE id=?', [req.params.id]);
+  res.json({ success: true, donor: get('SELECT * FROM donors WHERE id=?', [req.params.id]) });
 });
 
 router.get('/:id', (req, res) => {
@@ -289,19 +309,17 @@ router.post('/:id/verify', (req, res) => {
   res.json({ success: true });
 });
 
-// Delete donor — preserve donations for financial tracking
+// Remove donor — soft delete, restorable for 30 days (see GET /removed, POST /:id/restore).
+// Donations, payment methods, and follow-ups all stay intact so a restore brings the
+// donor back exactly as they were. Active recurring schedules are paused so a removed
+// donor doesn't keep getting charged while archived.
 router.delete('/:id', (req, res) => {
   const existing = get('SELECT id FROM donors WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
   if (!existing) return res.status(404).json({ error: 'Donor not found' });
-  run('DELETE FROM scheduled_charges WHERE donor_id = ?', [req.params.id]);
-  run('DELETE FROM recurring_schedules WHERE donor_id = ?', [req.params.id]);
-  run('DELETE FROM payment_methods WHERE donor_id = ?', [req.params.id]);
-  // Keep donations — set donor_id to null so financial records are preserved
-  run('UPDATE donations SET donor_id = NULL WHERE donor_id = ?', [req.params.id]);
+  run("UPDATE recurring_schedules SET status='paused' WHERE donor_id=? AND status='active'", [req.params.id]);
   // Clear any pending duplicate flags pointing at this donor — resolved/merged history stays for audit
   run("DELETE FROM donor_duplicates WHERE status='pending' AND (donor_id_a = ? OR donor_id_b = ?)", [req.params.id, req.params.id]);
-  run('DELETE FROM lead_followups WHERE donor_id = ?', [req.params.id]);
-  run('DELETE FROM donors WHERE id = ?', [req.params.id]);
+  run('UPDATE donors SET removed_at = CURRENT_TIMESTAMP WHERE id = ?', [req.params.id]);
   res.json({ success: true });
 });
 
@@ -466,21 +484,19 @@ router.post('/:id/donations', async (req, res) => {
     const donation = get('SELECT * FROM donations WHERE id = ?', [id]);
     const org = get('SELECT * FROM organizations WHERE id = ?', [req.orgId]);
 
-    // Send receipt — default ON, only skip if explicitly set to false
-    let receiptSent = false;
+    // Send receipt — default ON, only skip if explicitly set to false. sendReceiptEmail
+    // never throws for the "didn't actually send" cases (paused, no provider, no donor
+    // email, etc.) — it records why on the donation row instead — so the real answer
+    // has to come from re-reading the row, not from whether this call threw.
     if (send_receipt !== false && send_receipt !== 'false') {
       const { sendReceiptEmail } = require('../utils/scheduler');
-      try {
-        await sendReceiptEmail(donor, donation, org);
-        receiptSent = true;
-      } catch(e) {
-        console.error('[receipt] Failed:', e.message);
-      }
+      await sendReceiptEmail(donor, donation, org);
     } else {
-      console.log(`[receipt] Skipped by user choice for donation ${id}`);
+      run('UPDATE donations SET receipt_skip_reason = ? WHERE id = ?', ['Receipt sending was turned off for this donation', id]);
     }
 
-    res.json({ success: true, donation, receipt_sent: receiptSent });
+    const finalDonation = get('SELECT * FROM donations WHERE id = ?', [id]);
+    res.json({ success: true, donation: finalDonation, receipt_sent: !!finalDonation.receipt_sent });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message || 'Server error' });

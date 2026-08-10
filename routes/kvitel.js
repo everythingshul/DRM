@@ -321,13 +321,14 @@ router.post('/generate-docx', async (req, res) => {
           size: hPt,
           bold: h.bold !== false,
           font: h.font || 'Frank Ruhl Libre',
-          color: '1a3a6b'
+          color: '1a3a6b',
+          rightToLeft: true
         })]
       }));
     }
     // Blank line after headers
     if (headers.length) {
-      children.push(new Paragraph({ bidirectional:true, children:[new TextRun({text:''})] }));
+      children.push(new Paragraph({ bidirectional:true, children:[new TextRun({text:'', rightToLeft:true})] }));
     }
 
     // ── Donors grouped by neighborhood ────────────────────────────────────────
@@ -349,7 +350,8 @@ router.post('/generate-docx', async (req, res) => {
             size: nhPt,
             bold: nhBold,
             font: nhFont,
-            color: '1a3a6b'
+            color: '1a3a6b',
+            rightToLeft: true
           })]
         }));
       }
@@ -365,14 +367,18 @@ router.post('/generate-docx', async (req, res) => {
             children: [new TextRun({
               text: line,
               size: bodyPt,
-              font: bodyFont
+              font: bodyFont,
+              // Marks this run itself (not just the paragraph) as right-to-left, which is
+              // what makes Word's bidi algorithm mirror paired characters like ( ) [ ] { }
+              // correctly for Hebrew text — bidirectional on the paragraph alone isn't enough.
+              rightToLeft: true
             })]
           }));
         }
         // Small separator between donors
         children.push(new Paragraph({
           bidirectional: true,
-          children: [new TextRun({ text: '', size: bodyPt })],
+          children: [new TextRun({ text: '', size: bodyPt, rightToLeft: true })],
           spacing: { after: 60 }
         }));
       }

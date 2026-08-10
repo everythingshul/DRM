@@ -96,7 +96,7 @@ router.post('/charge', async (req, res) => {
 
     const donation = get('SELECT * FROM donations WHERE id=?', [donId]);
     await sendReceiptEmail(donor, donation, org).catch(e => console.error('[receipt] Failed:', e.message));
-    res.json({ success: true, donation, transaction_id: result.refNum, auth_code: result.authCode });
+    res.json({ success: true, donation: get('SELECT * FROM donations WHERE id=?', [donId]), transaction_id: result.refNum, auth_code: result.authCode });
   } catch(e) {
     const { donor_id, payment_method_id, amount } = req.body;
     if (donor_id) run(`INSERT INTO charge_failures (id,org_id,donor_id,amount,failure_reason,payment_method_id) VALUES (?,?,?,?,?,?)`,
@@ -143,7 +143,7 @@ router.post('/charge-daf', async (req, res) => {
 
     const donation = get('SELECT * FROM donations WHERE id=?', [donId]);
     await sendReceiptEmail(donor, donation, org).catch(e => console.error('[receipt] Failed:', e.message));
-    res.json({ success: true, donation, transaction_id: result.refNum });
+    res.json({ success: true, donation: get('SELECT * FROM donations WHERE id=?', [donId]), transaction_id: result.refNum });
   } catch(e) {
     console.error('charge-daf:', e.message);
     res.status(500).json({ error: e.message });

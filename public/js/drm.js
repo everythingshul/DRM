@@ -586,6 +586,7 @@ const Donors = {
     <div class="ph">
       <div><div class="ph-title">Donors</div><div class="ph-sub" id="d-count"></div></div>
       <div class="bg">
+        <button class="btn btn-ghost btn-sm" onclick="Donors.showRemoved()">&#128465; Recently Removed</button>
         <button class="btn btn-ghost btn-sm" onclick="Donors.importXlsx()">&#8679; Import</button>
         <button class="btn btn-ghost btn-sm" onclick="Donors.exportXlsx()">&#8681; Export</button>
         <button class="btn btn-primary btn-sm" onclick="Donors.openAdd()">+ Add Donor</button>
@@ -746,6 +747,30 @@ const Donors = {
   openAdd() { this.form(null); },
   async openEdit(id) { try { const d = await API.get(API.o.donor(id)); this.form(d.donor); } catch(e) { toast(e.message||'Unknown error','err'); } },
   del(id, name) { confirmDlg(`Delete "${name}"?`, async () => { await API.del(API.o.donor(id)); toast('Deleted'); Donors.load(); }); },
+  async showRemoved() {
+    Modal.open('Recently Removed Donors', '<div class="spinner"></div>', {lg:true});
+    try {
+      const removed = await API.get(`/api/orgs/${API.orgId}/donors/removed`);
+      Modal.body(!removed.length ? '<p style="color:var(--gray-5);font-size:13px">No recently removed donors. Removed donors are restorable for 30 days.</p>' : `
+        <p style="font-size:12px;color:var(--gray-5);margin-bottom:10px">Restorable for 30 days after removal.</p>
+        ${removed.map(d=>{
+          const daysLeft = 30 - Math.floor((Date.now()-new Date(d.removed_at).getTime())/86400000);
+          return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--gray-05);border-radius:6px;margin-bottom:6px">
+            <div>
+              <span style="font-size:13px;font-weight:600">${d.title?d.title+' ':''}${d.first_name} ${d.last_name}</span>
+              <span style="font-size:11px;color:var(--gray-5);margin-left:6px">Removed ${_timeAgo(d.removed_at)} · ${daysLeft} day${daysLeft!==1?'s':''} left</span>
+            </div>
+            <button class="btn btn-ghost btn-sm" onclick="Donors.restore('${d.id}')">&#8617; Restore</button>
+          </div>`;
+        }).join('')}`);
+    } catch(e) { Modal.body(`<div class="alert alert-err">${e.message}</div>`); }
+  },
+  async restore(id) {
+    try {
+      await API.post(`/api/orgs/${API.orgId}/donors/${id}/restore`, {});
+      toast('Donor restored ✓'); Modal.close(); Donors.load();
+    } catch(e) { toast(e.message||'Error','err'); }
+  },
   exportXlsx() { API.dl(`/api/orgs/${API.orgId}/reports/donors?format=xlsx`, 'donors.xlsx').catch(e=>toast(e.message||'Unknown error','err')); },
   importXlsx() {
     Modal.open('Import Donors', `
@@ -974,7 +999,7 @@ const DonorDetail = {
           </div>
         </div>
         <div class="scroll-box"><table>
-          <thead><tr><th>Date</th><th>Amount</th><th>Method</th><th>Trans ID</th><th>Status</th><th>Notes</th><th></th></tr></thead>
+          <thead><tr><th>Date</th><th>Amount</th><th>Method</th><th>Trans ID</th><th>Status</th><th>Receipt</th><th></th></tr></thead>
           <tbody>${donations.length ? donations.map(d=>this.donRow(d,donor.id)).join('') : '<tr><td colspan="7"><div class="empty">No donations yet</div></td></tr>'}</tbody>
         </table></div>
       </div>
@@ -1056,6 +1081,7 @@ const DonorDetail = {
           ${jsonParse(d.labels||'[]').map(l=>`<span class="pill pill-blue" style="font-size:10px">${l}</span>`).join('')}
         </span>
       </td>
+      <td>${_receiptBadge(d)}</td>
       <td><div class="actions">
         <button class="btn btn-icon" title="Expand" onclick="DonorDetail._togDPR('${d.id}')">&#8964;</button>
         <button class="btn btn-icon" title="Edit" onclick="DonorDetail._editDon('${did}','${d.id}')">&#9998;</button>
@@ -1066,9 +1092,10 @@ const DonorDetail = {
       </div></td>
     </tr>
     <tr id="${rid}" style="display:none;background:var(--gray-05)">
-      <td colspan="6" style="padding:10px 14px;font-size:12px">
+      <td colspan="7" style="padding:10px 14px;font-size:12px">
         <strong style="color:var(--navy)">Full Details</strong><br>
         Date &amp; Time: ${fmtDT(d.donation_date)} | Trans ID: ${d.transaction_id||'—'} | Status: ${d.status}<br>
+        ${d.receipt_sent ? '<span style="color:var(--green)">✓ Receipt sent</span><br>' : d.receipt_skip_reason ? `<span style="color:var(--amber)">⚠ Receipt not sent: ${d.receipt_skip_reason}</span><br>` : ''}
         ${d.refund_amount>0?'Refunded: '+fmt$(d.refund_amount)+(d.refund_notes?' — '+d.refund_notes:'')+'<br>':''}
         ${d.notes?`<span style="color:var(--gray-5)">${d.notes}</span><br>`:''}
         <div style="margin-top:8px;font-weight:600">Notes (${dn.length})</div>
@@ -1624,6 +1651,7 @@ async function renderDonations(el) {
             <th>Trans ID</th>
             <th>Labels</th>
             <th class="sort" onclick="_sortDon('status')">Status</th>
+            <th>Receipt</th>
             <th></th>
           </tr></thead>
           <tbody id="don-tb">${_donRows(rows)}</tbody>
@@ -1632,7 +1660,7 @@ async function renderDonations(el) {
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
 }
 function _donRows(rows) {
-  if (!rows.length) return '<tr><td colspan="8"><div class="empty">No donations</div></td></tr>';
+  if (!rows.length) return '<tr><td colspan="9"><div class="empty">No donations</div></td></tr>';
   return rows.map(d => {
     const dn = (() => { try{return JSON.parse(d.donation_notes||'[]');}catch{return[];} })();
     const rid = 'dlr-'+d.id;
@@ -1646,6 +1674,7 @@ function _donRows(rows) {
           ${jsonParse(d.labels||'[]').map(l=>`<span class="pill pill-blue" style="font-size:10px">${l}</span>`).join('') || '<span style="color:var(--gray-4);font-size:11px">—</span>'}
         </div></td>
       <td>${sbadge(d.status)}</td>
+      <td>${_receiptBadge(d)}</td>
       <td><div class="actions">
         <button class="btn btn-icon" title="Expand" onclick="_togDlr('${d.id}')">&#8964;</button>
         <button class="btn btn-icon" title="Add note" onclick="_addDonationNote('${d.donor_id}','${d.id}')">&#9997;</button>
@@ -1658,7 +1687,7 @@ function _donRows(rows) {
       </div></td>
     </tr>
     <tr id="${rid}" style="display:none;background:var(--gray-05)">
-      <td colspan="8" style="padding:12px 16px">
+      <td colspan="9" style="padding:12px 16px">
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
           <div style="font-size:12px;line-height:1.9">
             <strong>Full Details</strong><br>
@@ -1679,6 +1708,14 @@ function _donRows(rows) {
       </td>
     </tr>`;
   }).join('');
+}
+function _receiptBadge(d) {
+  if (d.receipt_sent) return `<span class="pill pill-green" style="font-size:10px">&#10003; Sent</span>`;
+  if (d.receipt_skip_reason) {
+    const reason = d.receipt_skip_reason.replace(/'/g,"\\'").replace(/"/g,'&quot;');
+    return `<span class="pill pill-amber" style="font-size:10px;cursor:pointer" title="${reason}" onclick="toast('${reason}','warn')">&#9888; Not sent</span>`;
+  }
+  return `<span style="color:var(--gray-4);font-size:11px">—</span>`;
 }
 function _togDlr(id){const r=$('dlr-'+id);if(r)r.style.display=r.style.display==='none'?'table-row':'none';}
 async function _editDonList(donId){
@@ -4861,6 +4898,7 @@ async function renderLeads(el) {
         <div class="bg">
           <button class="btn btn-ghost btn-sm" onclick="_leadCategories_manage()">⚙ Categories</button>
           <button class="btn btn-ghost btn-sm" onclick="_showScheduledFollowups()">📅 Follow-up Schedule</button>
+          <button class="btn btn-ghost btn-sm" onclick="_showRemovedLeads()">&#128465; Recently Removed</button>
           <button class="btn btn-ghost btn-sm" onclick="_leadsImportModal()">&#8593; Import</button>
           <button class="btn btn-ghost btn-sm" onclick="_leadsExport()">&#8595; Export</button>
           <button class="btn btn-ghost btn-sm" id="leads-mass-btn" style="display:none" onclick="_leadsMassAction()">⚡ Mass Action</button>
@@ -4894,6 +4932,31 @@ async function renderLeads(el) {
       <div id="leads-list"></div>`;
     await _loadLeads();
   } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+
+async function _showRemovedLeads() {
+  Modal.open('Recently Removed Leads', '<div class="spinner"></div>', {lg:true});
+  try {
+    const removed = await API.get(`/api/orgs/${API.orgId}/leads/removed`);
+    Modal.body(!removed.length ? '<p style="color:var(--gray-5);font-size:13px">No recently removed leads. Removed leads are restorable for 30 days.</p>' : `
+      <p style="font-size:12px;color:var(--gray-5);margin-bottom:10px">Restorable for 30 days after removal.</p>
+      ${removed.map(l=>{
+        const daysLeft = 30 - Math.floor((Date.now()-new Date(l.removed_at).getTime())/86400000);
+        return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--gray-05);border-radius:6px;margin-bottom:6px">
+          <div>
+            <span style="font-size:13px;font-weight:600">${l.title?l.title+' ':''}${l.first_name} ${l.last_name}</span>
+            <span style="font-size:11px;color:var(--gray-5);margin-left:6px">Removed ${_timeAgo(l.removed_at)} · ${daysLeft} day${daysLeft!==1?'s':''} left</span>
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="_restoreLead('${l.id}')">&#8617; Restore</button>
+        </div>`;
+      }).join('')}`);
+  } catch(e) { Modal.body(`<div class="alert alert-err">${e.message}</div>`); }
+}
+async function _restoreLead(id) {
+  try {
+    await API.post(`/api/orgs/${API.orgId}/leads/${id}/restore`, {});
+    toast('Lead restored ✓'); Modal.close(); _loadLeads();
+  } catch(e) { toast(e.message||'Error','err'); }
 }
 
 async function _loadLeads() {
