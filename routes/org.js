@@ -807,6 +807,61 @@ router.put('/timezone', requireOrgAdmin, (req, res) => {
   res.json({ success: true });
 });
 
+// ── Recurring charge batch mode ─────────────────────────────────────────────────
+// When on, recurring donations due today aren't auto-charged — they wait on the
+// Recurring Charges page for an admin to review and charge as a batch. An admin
+// still gets notified daily (see processRecurringBatchNotifications) so nothing
+// silently sits unpaid.
+router.get('/recurring-batch/settings', (req, res) => {
+  const s = get('SELECT settings FROM organizations WHERE id=?', [req.orgId]);
+  const parsed = (() => { try { return JSON.parse(s?.settings || '{}'); } catch { return {}; } })();
+  res.json({ enabled: !!parsed.recurringBatchMode });
+});
+
+router.put('/recurring-batch/settings', requireOrgAdmin, (req, res) => {
+  const { enabled } = req.body;
+  const org = get('SELECT settings FROM organizations WHERE id=?', [req.orgId]);
+  const current = (() => { try { return JSON.parse(org?.settings || '{}'); } catch { return {}; } })();
+  current.recurringBatchMode = !!enabled;
+  run('UPDATE organizations SET settings=? WHERE id=?', [JSON.stringify(current), req.orgId]);
+  res.json({ success: true });
+});
+
+// Every currently-due active recurring schedule for this org — the "batch."
+// Nothing here is auto-excluded; picking which to charge happens client-side via
+// checkboxes, so anything left unchecked simply stays due and keeps showing here.
+router.get('/recurring-batch/due', (req, res) => {
+  const due = all(`
+    SELECT rs.*, d.first_name, d.last_name, d.email,
+      pm.label as pm_label, pm.last_four, pm.card_brand, pm.type as pm_type
+    FROM recurring_schedules rs
+    JOIN donors d ON d.id = rs.donor_id
+    LEFT JOIN payment_methods pm ON pm.id = rs.payment_method_id
+    WHERE rs.org_id = ? AND rs.status = 'active' AND d.removed_at IS NULL
+      AND rs.next_run <= datetime('now')
+    ORDER BY rs.next_run ASC
+  `, [req.orgId]);
+  res.json(due);
+});
+
+router.post('/recurring-batch/charge', requireOrgAdmin, async (req, res) => {
+  try {
+    const { schedule_ids, template_id } = req.body;
+    if (!Array.isArray(schedule_ids) || !schedule_ids.length) {
+      return res.status(400).json({ error: 'schedule_ids required' });
+    }
+    const { chargeRecurringSchedule } = require('../utils/scheduler');
+    const results = [];
+    for (const sid of schedule_ids) {
+      const sched = get(`SELECT * FROM recurring_schedules WHERE id=? AND org_id=? AND status='active'`, [sid, req.orgId]);
+      if (!sched) { results.push({ id: sid, ok: false, error: 'Not found or not currently active' }); continue; }
+      const r = await chargeRecurringSchedule(sched, template_id || null);
+      results.push({ id: sid, ok: r.ok, error: r.error });
+    }
+    res.json({ success: true, results });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Rosh Chodesh / Erev Rosh Chodesh dates (next N years, via Hebcal) ──────────
 router.get('/rosh-chodesh', async (req, res) => {
   try {

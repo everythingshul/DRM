@@ -32,7 +32,7 @@ function interpolateTemplate(template, vars) {
     .replace(/\{(\w+)\}/g,     (_, key) => vars[key] || ''); // {var} legacy format
 }
 
-async function sendReceiptEmail(donor, donation, org) {
+async function sendReceiptEmail(donor, donation, org, templateId) {
   // Every skip/failure reason is written onto the donation row (receipt_skip_reason)
   // so it's visible in the UI — previously these only went to server console logs,
   // which nobody running on Render ever sees, making "why didn't X get a receipt"
@@ -65,8 +65,11 @@ async function sendReceiptEmail(donor, donation, org) {
       return;
     }
 
-    // Use default receipt template from designer if set, else fall back to plain
-    const defaultTpl = get('SELECT * FROM email_templates WHERE org_id=? AND is_default_receipt=1', [org.id]);
+    // Use the explicitly requested template (e.g. chosen for a recurring-charge batch)
+    // if given, else the default receipt template from the designer, else fall back to plain
+    const defaultTpl = templateId
+      ? get('SELECT * FROM email_templates WHERE id=? AND org_id=?', [templateId, org.id])
+      : get('SELECT * FROM email_templates WHERE org_id=? AND is_default_receipt=1', [org.id]);
     const pm = donation.payment_method_id ? get('SELECT * FROM payment_methods WHERE id = ?', [donation.payment_method_id]) : null;
 
     const vars = {
@@ -462,73 +465,153 @@ async function processRecurringSchedules() {
   `, []);
 
   for (const sched of due) {
-    const pm = get('SELECT * FROM payment_methods WHERE id = ?', [sched.payment_method_id]);
     const org = get('SELECT * FROM organizations WHERE id = ?', [sched.org_id]);
-    const donor = get('SELECT * FROM donors WHERE id = ?', [sched.donor_id]);
-    if (!pm || !org || !donor) continue;
+    if (!org) continue;
+    let batchMode = false;
+    try { batchMode = !!JSON.parse(org.settings || '{}').recurringBatchMode; } catch {}
+    // Batch mode: leave this due — an admin charges it manually from the Recurring
+    // Charges page instead of it firing automatically. Notified once/day separately.
+    if (batchMode) continue;
+    await chargeRecurringSchedule(sched);
+  }
+}
 
-    try {
-      let txId = null;
+// Charges a single due recurring schedule — shared by the automatic cron above and
+// the manual "Recurring Charges" batch-approval page. templateId optionally forces
+// a specific email template for the receipt instead of the org's default.
+async function chargeRecurringSchedule(sched, templateId) {
+  const pm = get('SELECT * FROM payment_methods WHERE id = ?', [sched.payment_method_id]);
+  const org = get('SELECT * FROM organizations WHERE id = ?', [sched.org_id]);
+  const donor = get('SELECT * FROM donors WHERE id = ?', [sched.donor_id]);
+  if (!pm || !org || !donor) return { ok: false, error: 'Missing payment method, organization, or donor' };
 
-      if (pm.type === 'credit_card' && pm.sola_token) {
-        const result = await chargeToken(sched.org_id, {
-          token: pm.sola_token,
-          amount: sched.amount,
-          name: `${donor.first_name} ${donor.last_name}`,
-          zip: donor.zip || '',
-          email: donor.email || '',
-          invoiceNum: sched.id.slice(0, 16),
-          customNote: `Recurring ${sched.frequency} charge`
-        });
-        txId = result.refNum;
-      }
+  try {
+    let txId = null;
 
-      // Fix #12: If this was a CC charge, txId MUST exist (Sola confirmed)
-      // For other methods (check, cash, wire), donation is recorded without txId (manual collection needed)
-      if (pm.type === 'credit_card' && !txId) {
-        throw new Error('Sola did not confirm charge — no transaction ID returned');
-      }
-
-      const donId = uuidv4();
-      run(`INSERT INTO donations (id, org_id, donor_id, amount, method, payment_method_id, transaction_id, donation_date, status, is_recurring, notes, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'completed', 1, ?, 'system')`,
-        [donId, sched.org_id, sched.donor_id, sched.amount, pm.type, pm.id, txId,
-         `Recurring ${sched.frequency} — ${sched.notes || ''}`]);
-
-      // Calculate next run
-      const nextRun = await calcNextRun(sched.next_run, sched.frequency, sched.hebrew_day);
-      const newCount = (sched.occurrences_count || 0) + 1;
-      const limitHit = sched.occurrences_limit && newCount >= sched.occurrences_limit;
-      const endHit = sched.end_date && new Date(nextRun) > new Date(sched.end_date);
-
-      run(`UPDATE recurring_schedules SET
-           next_run = ?, occurrences_count = ?, last_run = CURRENT_TIMESTAMP, last_failure = NULL,
-           status = ?
-           WHERE id = ?`,
-        [nextRun, newCount, (limitHit || endHit) ? 'completed' : 'active', sched.id]);
-
-      const donation = get('SELECT * FROM donations WHERE id = ?', [donId]);
-      await sendReceiptEmail(donor, donation, org);
-      await sendChargeNotificationToOwner(org, donor, donation, true, null);
-
-    } catch (e) {
-      // Advance next_run to the NEXT occurrence date — this failed occurrence is skipped,
-      // not retried. Status stays 'active' so future scheduled dates still run.
-      // One failure email is sent now; the next occurrence will try again fresh.
-      const nextRun = await calcNextRun(sched.next_run, sched.frequency, sched.hebrew_day);
-      const limitHit = sched.occurrences_limit && (sched.occurrences_count || 0) >= sched.occurrences_limit;
-      const endHit   = sched.end_date && new Date(nextRun) > new Date(sched.end_date);
-
-      run(`UPDATE recurring_schedules SET last_failure = ?, next_run = ?, status = ? WHERE id = ?`,
-        [e.message, nextRun, (limitHit || endHit) ? 'completed' : 'active', sched.id]);
-
-      run(`INSERT INTO charge_failures (id, org_id, donor_id, amount, failure_reason, payment_method_id)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-        [uuidv4(), sched.org_id, sched.donor_id, sched.amount, e.message, sched.payment_method_id]);
-
-      // Send exactly one notification for this failed occurrence
-      await sendChargeNotificationToOwner(org, donor, { amount: sched.amount }, false, e.message).catch(()=>{});
+    if (pm.type === 'credit_card' && pm.sola_token) {
+      const result = await chargeToken(sched.org_id, {
+        token: pm.sola_token,
+        amount: sched.amount,
+        name: `${donor.first_name} ${donor.last_name}`,
+        zip: donor.zip || '',
+        email: donor.email || '',
+        invoiceNum: sched.id.slice(0, 16),
+        customNote: `Recurring ${sched.frequency} charge`
+      });
+      txId = result.refNum;
     }
+
+    // Fix #12: If this was a CC charge, txId MUST exist (Sola confirmed)
+    // For other methods (check, cash, wire), donation is recorded without txId (manual collection needed)
+    if (pm.type === 'credit_card' && !txId) {
+      throw new Error('Sola did not confirm charge — no transaction ID returned');
+    }
+
+    const donId = uuidv4();
+    run(`INSERT INTO donations (id, org_id, donor_id, amount, method, payment_method_id, transaction_id, donation_date, status, is_recurring, notes, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'completed', 1, ?, 'system')`,
+      [donId, sched.org_id, sched.donor_id, sched.amount, pm.type, pm.id, txId,
+       `Recurring ${sched.frequency} — ${sched.notes || ''}`]);
+
+    // Calculate next run
+    const nextRun = await calcNextRun(sched.next_run, sched.frequency, sched.hebrew_day);
+    const newCount = (sched.occurrences_count || 0) + 1;
+    const limitHit = sched.occurrences_limit && newCount >= sched.occurrences_limit;
+    const endHit = sched.end_date && new Date(nextRun) > new Date(sched.end_date);
+
+    run(`UPDATE recurring_schedules SET
+         next_run = ?, occurrences_count = ?, last_run = CURRENT_TIMESTAMP, last_failure = NULL,
+         status = ?
+         WHERE id = ?`,
+      [nextRun, newCount, (limitHit || endHit) ? 'completed' : 'active', sched.id]);
+
+    const donation = get('SELECT * FROM donations WHERE id = ?', [donId]);
+    await sendReceiptEmail(donor, donation, org, templateId);
+    await sendChargeNotificationToOwner(org, donor, donation, true, null);
+    return { ok: true, donationId: donId };
+
+  } catch (e) {
+    // Advance next_run to the NEXT occurrence date — this failed occurrence is skipped,
+    // not retried. Status stays 'active' so future scheduled dates still run.
+    // One failure email is sent now; the next occurrence will try again fresh.
+    const nextRun = await calcNextRun(sched.next_run, sched.frequency, sched.hebrew_day);
+    const limitHit = sched.occurrences_limit && (sched.occurrences_count || 0) >= sched.occurrences_limit;
+    const endHit   = sched.end_date && new Date(nextRun) > new Date(sched.end_date);
+
+    run(`UPDATE recurring_schedules SET last_failure = ?, next_run = ?, status = ? WHERE id = ?`,
+      [e.message, nextRun, (limitHit || endHit) ? 'completed' : 'active', sched.id]);
+
+    run(`INSERT INTO charge_failures (id, org_id, donor_id, amount, failure_reason, payment_method_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      [uuidv4(), sched.org_id, sched.donor_id, sched.amount, e.message, sched.payment_method_id]);
+
+    // Send exactly one notification for this failed occurrence
+    await sendChargeNotificationToOwner(org, donor, { amount: sched.amount }, false, e.message).catch(()=>{});
+    return { ok: false, error: e.message };
+  }
+}
+
+// Once a day (8am org-local), email admins if there are recurring charges waiting
+// for manual batch approval — the automatic cron above skips charging them entirely
+// when recurringBatchMode is on, so without this nobody would know they're due.
+async function processRecurringBatchNotifications() {
+  const orgs = all('SELECT * FROM organizations', []);
+  for (const org of orgs) {
+    let settings = {};
+    try { settings = JSON.parse(org.settings || '{}'); } catch {}
+    if (!settings.recurringBatchMode) continue;
+
+    const tz = settings.timezone || 'America/New_York';
+    let localHour, today;
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', hour12: false })
+        .formatToParts(new Date()).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+      localHour = parseInt(parts.hour) % 24;
+      today = _todayInTz(tz);
+    } catch { continue; }
+
+    if (localHour !== 8) continue; // only check at the 8am org-local tick
+    if (settings.recurringBatchLastNotifiedDate === today) continue; // already notified today
+
+    const due = all(`
+      SELECT rs.* FROM recurring_schedules rs JOIN donors d ON d.id = rs.donor_id
+      WHERE rs.org_id = ? AND rs.status = 'active' AND d.removed_at IS NULL AND rs.next_run <= datetime('now')
+    `, [org.id]);
+
+    if (due.length) {
+      const totalAmount = due.reduce((s, d) => s + parseFloat(d.amount || 0), 0);
+      const emailSettings = get('SELECT * FROM email_settings WHERE org_id = ?', [org.id]);
+      const admins = all(`SELECT u.id, u.email FROM users u JOIN org_users ou ON ou.user_id = u.id WHERE ou.org_id = ? AND ou.role = 'admin'`, [org.id]);
+
+      if (admins.length && (emailSettings?.brevo_api_key || emailSettings?.smtp_email)) {
+        const html = `<div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto">
+          <h2 style="color:#1a3a6b">${due.length} Recurring Donation${due.length > 1 ? 's' : ''} Ready to Charge</h2>
+          <p>You have <strong>${due.length}</strong> recurring donation${due.length > 1 ? 's' : ''} scheduled today, totaling <strong>$${totalAmount.toFixed(2)}</strong>.</p>
+          <p>Log in to DRM and go to <strong>Recurring Charges</strong> to review and charge the batch.</p>
+        </div>`;
+        for (const admin of admins) {
+          try {
+            await mailer.sendMail({
+              settings: emailSettings, orgId: org.id,
+              to: admin.email,
+              from: `"${emailSettings.from_name || org.name}" <${emailSettings.smtp_email || 'noreply@everythingshul.com'}>`,
+              subject: `${due.length} Recurring Donation${due.length > 1 ? 's' : ''} Ready to Charge — ${org.name}`,
+              html, type: 'recurring_batch_notice'
+            });
+          } catch (e) { console.error('[recurring-batch] notify email error:', e.message); }
+        }
+      }
+      for (const admin of admins) {
+        run(`INSERT INTO notifications (id, org_id, user_id, type, title, body, link) VALUES (?, ?, ?, 'recurring_batch', ?, ?, ?)`,
+          [uuidv4(), org.id, admin.id,
+           `${due.length} recurring charge${due.length > 1 ? 's' : ''} ready`,
+           `Totaling $${totalAmount.toFixed(2)} — review and charge the batch`,
+           '#recurbatch']);
+      }
+    }
+
+    settings.recurringBatchLastNotifiedDate = today;
+    run('UPDATE organizations SET settings = ? WHERE id = ?', [JSON.stringify(settings), org.id]);
   }
 }
 
@@ -731,6 +814,13 @@ function startScheduler() {
     catch(e) { console.error('Follow-up notification error:', e.message); }
   });
 
+  // Recurring-charge batch-mode "ready to charge" notification (checks hourly,
+  // only actually sends once per org per day at 8am org-local — see function)
+  cron.schedule('0 * * * *', async () => {
+    try { await processRecurringBatchNotifications(); }
+    catch(e) { console.error('Recurring batch notification error:', e.message); }
+  });
+
   // Daily backup at 2am
   cron.schedule('0 2 * * *', async () => {
     try { await runDailyBackup(); }
@@ -743,4 +833,4 @@ function startScheduler() {
   console.log('✅ Scheduler started');
 }
 
-module.exports = { startScheduler, sendReceiptEmail, sendChargeNotificationToOwner, runDailyBackup };
+module.exports = { startScheduler, sendReceiptEmail, sendChargeNotificationToOwner, runDailyBackup, chargeRecurringSchedule, processRecurringBatchNotifications };

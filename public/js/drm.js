@@ -450,7 +450,7 @@ function showApp() {
   }
   // Navigate to hash if present, else dashboard
   const initPage = location.hash.replace('#','') || 'dashboard';
-  const validPages = ['dashboard','donors','leads','followups','accounts','notifications','donations','verification','failures','bank','emails','kvitel','reports','settings'];
+  const validPages = ['dashboard','donors','leads','followups','accounts','notifications','donations','verification','failures','recurbatch','bank','emails','kvitel','reports','settings'];
   navigateTo(validPages.includes(initPage) ? initPage : 'dashboard');
   loadBadges();
   setInterval(loadBadges, 60000);
@@ -486,7 +486,7 @@ function navigateTo(page) {
 function reloadPage() { const el = $('page-' + _currentPage); if(el) renderPage(_currentPage, el); }
 window.addEventListener('popstate', () => {
   const page = location.hash.replace('#','') || 'dashboard';
-  const valid = ['dashboard','donors','leads','followups','accounts','notifications','donations','verification','failures','bank','emails','kvitel','reports','settings','whatsapp','recovery'];
+  const valid = ['dashboard','donors','leads','followups','accounts','notifications','donations','verification','failures','recurbatch','bank','emails','kvitel','reports','settings','whatsapp','recovery'];
   if (valid.includes(page)) { const el=$('page-'+page); if(el) el.innerHTML=''; navigateTo(page); }
 });
 
@@ -501,6 +501,7 @@ function renderPage(page, el) {
     donations:    renderDonations,
     verification: renderVerification,
     failures:     renderFailures,
+    recurbatch:   renderRecurringBatch,
     bank:         renderBank,
     emails:       renderEmails,
     kvitel:       renderKvitel,
@@ -520,6 +521,16 @@ async function loadBadges() {
     if (vb) { vb.textContent = s.needsVerification; vb.style.display = s.needsVerification > 0 ? 'inline' : 'none'; }
     const fb = $('fail-badge');
     if (fb) { fb.textContent = s.failedCharges; fb.style.display = s.failedCharges > 0 ? 'inline' : 'none'; }
+    const rb = $('recurbatch-badge');
+    if (rb) {
+      try {
+        const batchSettings = await API.get(`/api/orgs/${API.orgId}/recurring-batch/settings`);
+        if (batchSettings.enabled) {
+          const due = await API.get(`/api/orgs/${API.orgId}/recurring-batch/due`);
+          rb.textContent = due.length; rb.style.display = due.length > 0 ? 'inline' : 'none';
+        } else rb.style.display = 'none';
+      } catch { rb.style.display = 'none'; }
+    }
   } catch {}
 }
 
@@ -1869,6 +1880,119 @@ function _filterVer() {
 }
 async function _verifyOne(id) { await API.post(`/api/orgs/${API.orgId}/donors/${id}/verify`,{}); const row=$(`vr-${id}`); if(row){row.style.opacity=0;row.style.transition='opacity .3s';setTimeout(()=>row.remove(),320);} toast('Verified'); loadBadges(); }
 function _verifyAll() { confirmDlg(`Verify all ${(window._verDonors||[]).length} donors?`, async()=>{ for(const d of window._verDonors||[])await API.post(`/api/orgs/${API.orgId}/donors/${d.id}/verify`,{}).catch(()=>{}); toast('All verified'); renderVerification($('page-verification')); loadBadges(); }); }
+
+// ── Recurring Charges (manual batch approval) ──────────────────────────────────
+async function renderRecurringBatch(el) {
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const [batchSettings, due, templates] = await Promise.all([
+      API.get(`/api/orgs/${API.orgId}/recurring-batch/settings`),
+      API.get(`/api/orgs/${API.orgId}/recurring-batch/due`),
+      API.get(`/api/orgs/${API.orgId}/email-templates`).catch(()=>[])
+    ]);
+    window._rbDue = due;
+    window._rbEnabled = batchSettings.enabled;
+    const defaultTpl = templates.find(t=>t.is_default_receipt);
+
+    el.innerHTML = `
+      <div class="ph">
+        <div><div class="ph-title">Recurring Charges</div><div class="ph-sub">${due.length} due now</div></div>
+      </div>
+      <div class="card" style="margin-bottom:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+          <div>
+            <strong>Manual Batch Approval</strong>
+            <p style="font-size:12px;color:var(--gray-5);margin-top:2px">
+              ${batchSettings.enabled
+                ? 'On — recurring charges wait here for you to review and charge, instead of firing automatically. You get an email each day (8am) when charges are waiting.'
+                : 'Off — recurring charges fire automatically as scheduled. Turn this on to review and approve them as a batch instead.'}
+            </p>
+          </div>
+          <label class="tgl"><input type="checkbox" ${batchSettings.enabled?'checked':''} onchange="_rbToggleMode(this.checked)"><span class="tgl-s"></span></label>
+        </div>
+      </div>
+      ${!due.length ? `<div class="card"><div class="empty"><h3>No recurring charges due right now</h3><p>Anything scheduled for today will show up here once it's due.</p></div></div>` : `
+      <div class="card" style="margin-bottom:12px">
+        <div class="r2">
+          <div>
+            <label>Receipt Template for this batch</label>
+            <select id="rb-template">
+              <option value="">Default receipt template${defaultTpl?` (${defaultTpl.name})`:' (plain fallback)'}</option>
+              ${templates.map(t=>`<option value="${t.id}">${t.name}</option>`).join('')}
+            </select>
+          </div>
+          <div style="display:flex;align-items:flex-end">
+            <button class="btn btn-primary" id="rb-charge-btn" onclick="_rbCharge()">Charge Selected</button>
+          </div>
+        </div>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden">
+        <div class="tw"><table>
+          <thead><tr>
+            <th style="width:28px"><input type="checkbox" id="rb-sel-all" checked onchange="_rbToggleAll(this.checked)"></th>
+            <th>Donor</th><th>Amount</th><th>Frequency</th><th>Due</th><th>Payment Method</th>
+          </tr></thead>
+          <tbody id="rb-tbody">${_rbRows(due)}</tbody>
+        </table></div>
+      </div>`}`;
+    _rbUpdateSummary();
+  } catch(e) { el.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+function _rbRows(due) {
+  return due.map(s => {
+    const pmLabel = s.pm_label || (s.pm_type==='credit_card' ? `${s.card_brand||'Card'} ••${s.last_four||''}` : fmtMethod(s.pm_type||''));
+    return `<tr>
+      <td><input type="checkbox" class="rb-check" data-id="${s.id}" data-amount="${s.amount}" checked onchange="_rbUpdateSummary()"></td>
+      <td><a href="#" onclick="event.preventDefault();DonorDetail.open('${s.donor_id}')" style="font-weight:600;color:var(--navy);text-decoration:none">${s.first_name||''} ${s.last_name||''}</a></td>
+      <td style="font-weight:600">${fmt$(s.amount)}</td>
+      <td style="font-size:12px">${fmtFreq(s.frequency)}</td>
+      <td style="font-size:12px">${fmtD(s.next_run)}</td>
+      <td style="font-size:12px">${pmLabel}</td>
+    </tr>`;
+  }).join('');
+}
+function _rbUpdateSummary() {
+  const checks = [...document.querySelectorAll('.rb-check')];
+  const selected = checks.filter(c=>c.checked);
+  const total = selected.reduce((s,c)=>s+parseFloat(c.dataset.amount||0),0);
+  const btn = $('rb-charge-btn');
+  if (btn) {
+    btn.textContent = selected.length ? `Charge Selected (${selected.length} · ${fmt$(total)})` : 'Charge Selected';
+    btn.disabled = !selected.length;
+  }
+  const selAll = $('rb-sel-all');
+  if (selAll) selAll.checked = checks.length>0 && selected.length===checks.length;
+}
+function _rbToggleAll(checked) {
+  document.querySelectorAll('.rb-check').forEach(c=>c.checked=checked);
+  _rbUpdateSummary();
+}
+async function _rbToggleMode(enabled) {
+  try {
+    await API.put(`/api/orgs/${API.orgId}/recurring-batch/settings`, { enabled });
+    toast(enabled ? 'Manual batch approval turned on' : 'Manual batch approval turned off');
+    renderRecurringBatch($('page-recurbatch'));
+    loadBadges();
+  } catch(e) { toast(e.message||'Error','err'); renderRecurringBatch($('page-recurbatch')); }
+}
+async function _rbCharge() {
+  const ids = [...document.querySelectorAll('.rb-check')].filter(c=>c.checked).map(c=>c.dataset.id);
+  if (!ids.length) return;
+  const templateId = val('rb-template') || null;
+  const btn = $('rb-charge-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Charging…'; }
+  try {
+    const r = await API.post(`/api/orgs/${API.orgId}/recurring-batch/charge`, { schedule_ids: ids, template_id: templateId });
+    const okCount = r.results.filter(x=>x.ok).length;
+    const failCount = r.results.length - okCount;
+    toast(failCount ? `${okCount} charged, ${failCount} failed — check Failed Charges` : `${okCount} charged ✓`, failCount ? 'warn' : 'ok');
+    renderRecurringBatch($('page-recurbatch'));
+    loadBadges();
+  } catch(e) {
+    toast(e.message||'Error','err');
+    if (btn) { btn.disabled = false; btn.textContent = 'Charge Selected'; }
+  }
+}
 
 async function renderFailures(el) {
   el.innerHTML = '<div class="spinner"></div>';
