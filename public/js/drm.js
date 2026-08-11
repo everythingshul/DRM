@@ -1086,6 +1086,7 @@ const DonorDetail = {
         <button class="btn btn-icon" title="Expand" onclick="DonorDetail._togDPR('${d.id}')">&#8964;</button>
         <button class="btn btn-icon" title="Edit" onclick="DonorDetail._editDon('${did}','${d.id}')">&#9998;</button>
         <button class="btn btn-icon" title="Add note" onclick="DonorDetail.addDonNote('${did}','${d.id}')">&#9997;</button>
+        <button class="btn btn-icon" title="${d.receipt_sent?'Resend Receipt Email':'Send Receipt Email'}" onclick="_sendReceipt('${d.id}',this)">&#9993;</button>
         ${(d.status==='completed'||d.status==='partial_refund')?`<button class="btn btn-icon" title="Refund" onclick="DonorDetail.refund('${did}','${d.id}','${d.amount}','${d.transaction_id||''}')">&#8617;</button>`:''}
         <button class="btn btn-icon" title="Labels" onclick="_donationLabels('${d.id}','${(d.labels||'[]').replace(/'/g,"\\'")}')">&#9990;</button>
         <button class="btn btn-icon" style="color:var(--red)" title="Delete" onclick="DonorDetail._delDon('${did}','${d.id}')">&#10005;</button>
@@ -1680,6 +1681,7 @@ function _donRows(rows) {
         <button class="btn btn-icon" title="Add note" onclick="_addDonationNote('${d.donor_id}','${d.id}')">&#9997;</button>
         <button class="btn btn-icon" title="Edit" onclick="_editDonList('${d.id}')">&#9998;</button>
         <a class="btn btn-ghost btn-sm" href="/api/orgs/${API.orgId}/payments/receipt/${d.id}" download="receipt.pdf" title="Receipt">&#8681;</a>
+        ${d.donor_id&&d.donor_id!='null'?`<button class="btn btn-icon" title="${d.receipt_sent?'Resend Receipt Email':'Send Receipt Email'}" onclick="_sendReceipt('${d.id}',this)">&#9993;</button>`:''}
         ${(d.status==='completed'||d.status==='partial_refund')?`<button class="btn btn-icon" title="Refund" onclick="_refundFromList('${d.donor_id}','${d.id}','${d.amount}','${d.transaction_id||''}')">&#8617;</button>`:''}
         <button class="btn btn-icon" title="Labels" onclick="_donationLabels('${d.id}','${(d.labels||'[]').replace(/'/g,"\\'")}')">&#9990;</button>
         ${d.donor_id&&d.donor_id!='null'?`<button class="btn btn-icon" title="Unlink" onclick="_unlinkDonation('${d.id}')">&#8854;</button>`:`<button class="btn btn-icon" title="Link" onclick="_linkDonation('${d.id}')">&#8853;</button>`}
@@ -1716,6 +1718,19 @@ function _receiptBadge(d) {
     return `<span class="pill pill-amber" style="font-size:10px;cursor:pointer" title="${reason}" onclick="toast('${reason}','warn')">&#9888; Not sent</span>`;
   }
   return `<span style="color:var(--gray-4);font-size:11px">—</span>`;
+}
+async function _sendReceipt(donId, btn) {
+  const orig = btn?.innerHTML;
+  if (btn) { btn.disabled = true; btn.innerHTML = '&#8987;'; }
+  try {
+    const r = await API.post(`/api/orgs/${API.orgId}/donations/${donId}/send-receipt`, {});
+    toast(r.sent ? 'Receipt sent ✓' : (r.error||'Not sent'), r.sent ? 'ok' : 'warn');
+  } catch(e) {
+    toast(e.message || 'Receipt could not be sent', 'err');
+  }
+  if ($('page-donations')?.classList.contains('active')) renderDonations($('page-donations'));
+  else if (window._donorDetailId) DonorDetail.open(window._donorDetailId);
+  else if (btn) { btn.disabled = false; btn.innerHTML = orig; }
 }
 function _togDlr(id){const r=$('dlr-'+id);if(r)r.style.display=r.style.display==='none'?'table-row':'none';}
 async function _editDonList(donId){
@@ -4617,21 +4632,6 @@ function _vcSelectDonor(id, name) {
   const res=$('vc-results'); if(res)res.style.display='none';
   const sel=$('vc-selected'); if(sel){sel.textContent='✓ '+name;sel.style.display='block';}
   const btn=$('vc-assign-btn'); if(btn)btn.disabled=false;
-}
-
-// ── Duplicate template ────────────────────────────────────────────────────────
-async function _emailDuplicate(id, name) {
-  try {
-    const t = await API.get(`/api/orgs/${API.orgId}/email-templates/${id}`);
-    await API.post(`/api/orgs/${API.orgId}/email-templates`, {
-      name:    `${t.name} (copy)`,
-      subject: t.subject,
-      blocks:  t.blocks,
-      description: t.description || ''
-    });
-    toast('Template duplicated ✓');
-    renderEmails($('page-emails'));
-  } catch(e) { toast(e.message||'Error','err'); }
 }
 
 // ── View raw HTML of a logged email ──────────────────────────────────────────

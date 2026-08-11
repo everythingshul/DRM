@@ -1011,6 +1011,27 @@ router.put('/donations/:donationId/edit', (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── (Re)send a donation's receipt — works regardless of whether one already
+// went out, so a donor who lost the email (or was fixed up after a skip
+// reason like "no email on file") can get it sent after the fact.
+router.post('/donations/:donationId/send-receipt', async (req, res) => {
+  try {
+    const donation = get('SELECT * FROM donations WHERE id=? AND org_id=?', [req.params.donationId, req.orgId]);
+    if (!donation) return res.status(404).json({ error: 'Donation not found' });
+    if (!donation.donor_id) return res.status(400).json({ error: 'This donation isn\'t linked to a donor — link it first' });
+    const donor = get('SELECT * FROM donors WHERE id=?', [donation.donor_id]);
+    if (!donor) return res.status(404).json({ error: 'Donor not found' });
+    const org = get('SELECT * FROM organizations WHERE id=?', [req.orgId]);
+
+    const { sendReceiptEmail } = require('../utils/scheduler');
+    await sendReceiptEmail(donor, donation, org);
+
+    const updated = get('SELECT * FROM donations WHERE id=?', [req.params.donationId]);
+    if (updated.receipt_sent) res.json({ success: true, sent: true, donation: updated });
+    else res.status(400).json({ success: false, sent: false, error: updated.receipt_skip_reason || 'Receipt could not be sent', donation: updated });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Delete donation ────────────────────────────────────────────────────────────
 router.delete('/donations/:donationId', (req, res) => {
   const don = get('SELECT id FROM donations WHERE id=? AND org_id=?', [req.params.donationId, req.orgId]);
