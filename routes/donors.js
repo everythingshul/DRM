@@ -615,7 +615,7 @@ router.put('/:id/recurring/:sid', async (req, res) => {
     }
 
     // When resuming, recalculate next_run from today's date using frequency
-    let resolvedNextRun = next_run ?? existing.next_run;
+    let resolvedNextRun = (next_run !== undefined && next_run !== null && next_run !== '') ? next_run : existing.next_run;
     if (status === 'active' && existing.status === 'paused') {
       const now = new Date();
       const existingNext = existing.next_run ? new Date(existing.next_run) : null;
