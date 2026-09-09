@@ -551,6 +551,25 @@ async function chargeRecurringSchedule(sched, templateId) {
   }
 }
 
+// Skips this occurrence of a due recurring schedule without charging it — used by
+// the "Ignore" action on the Recurring Charges batch page. Advances next_run to the
+// following cycle exactly like a failed charge does, but with no charge attempt, no
+// charge_failures entry, and no failure notification — this isn't an error, just a
+// deliberate no-charge-this-time. occurrences_count is NOT incremented, since no
+// charge happened.
+async function skipRecurringSchedule(sched) {
+  try {
+    const nextRun = await calcNextRun(sched.next_run, sched.frequency, sched.hebrew_day);
+    const limitHit = sched.occurrences_limit && (sched.occurrences_count || 0) >= sched.occurrences_limit;
+    const endHit = sched.end_date && nextRun && new Date(nextRun) > new Date(sched.end_date);
+    run(`UPDATE recurring_schedules SET next_run = ?, status = ? WHERE id = ?`,
+      [nextRun, (limitHit || endHit) ? 'completed' : 'active', sched.id]);
+    return { ok: true, nextRun };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 // Once a day (8am org-local), email admins if there are recurring charges waiting
 // for manual batch approval — the automatic cron above skips charging them entirely
 // when recurringBatchMode is on, so without this nobody would know they're due.
@@ -833,4 +852,4 @@ function startScheduler() {
   console.log('✅ Scheduler started');
 }
 
-module.exports = { startScheduler, sendReceiptEmail, sendChargeNotificationToOwner, runDailyBackup, chargeRecurringSchedule, processRecurringBatchNotifications };
+module.exports = { startScheduler, sendReceiptEmail, sendChargeNotificationToOwner, runDailyBackup, chargeRecurringSchedule, skipRecurringSchedule, processRecurringBatchNotifications };

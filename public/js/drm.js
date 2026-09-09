@@ -1930,7 +1930,7 @@ async function renderRecurringBatch(el) {
         <div class="tw"><table>
           <thead><tr>
             <th style="width:28px"><input type="checkbox" id="rb-sel-all" checked onchange="_rbToggleAll(this.checked)"></th>
-            <th>Donor</th><th>Amount</th><th>Frequency</th><th>Due</th><th>Payment Method</th>
+            <th>Donor</th><th>Amount</th><th>Frequency</th><th>Due</th><th>Payment Method</th><th></th>
           </tr></thead>
           <tbody id="rb-tbody">${_rbRows(due)}</tbody>
         </table></div>
@@ -1948,6 +1948,7 @@ function _rbRows(due) {
       <td style="font-size:12px">${fmtFreq(s.frequency)}</td>
       <td style="font-size:12px">${fmtD(s.next_run)}</td>
       <td style="font-size:12px">${pmLabel}</td>
+      <td><button class="btn btn-ghost btn-sm" title="Skip this charge, wait for the next cycle" onclick="_rbIgnore('${s.id}',this)">Ignore</button></td>
     </tr>`;
   }).join('');
 }
@@ -1991,6 +1992,19 @@ async function _rbCharge() {
   } catch(e) {
     toast(e.message||'Error','err');
     if (btn) { btn.disabled = false; btn.textContent = 'Charge Selected'; }
+  }
+}
+async function _rbIgnore(id, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Skipping…'; }
+  try {
+    const r = await API.post(`/api/orgs/${API.orgId}/recurring-batch/ignore`, { schedule_ids: [id] });
+    if (r.results[0]?.ok) toast('Skipped — will wait for the next cycle ✓');
+    else toast(r.results[0]?.error || 'Could not skip', 'err');
+    renderRecurringBatch($('page-recurbatch'));
+    loadBadges();
+  } catch(e) {
+    toast(e.message||'Error','err');
+    if (btn) { btn.disabled = false; btn.textContent = 'Ignore'; }
   }
 }
 
