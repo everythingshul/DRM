@@ -862,6 +862,26 @@ router.post('/recurring-batch/charge', requireOrgAdmin, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// "Ignore" — skip this occurrence without charging it. Advances next_run to the
+// following cycle so it drops off the due list until it's actually due again.
+router.post('/recurring-batch/ignore', requireOrgAdmin, async (req, res) => {
+  try {
+    const { schedule_ids } = req.body;
+    if (!Array.isArray(schedule_ids) || !schedule_ids.length) {
+      return res.status(400).json({ error: 'schedule_ids required' });
+    }
+    const { skipRecurringSchedule } = require('../utils/scheduler');
+    const results = [];
+    for (const sid of schedule_ids) {
+      const sched = get(`SELECT * FROM recurring_schedules WHERE id=? AND org_id=? AND status='active'`, [sid, req.orgId]);
+      if (!sched) { results.push({ id: sid, ok: false, error: 'Not found or not currently active' }); continue; }
+      const r = await skipRecurringSchedule(sched);
+      results.push({ id: sid, ok: r.ok, error: r.error });
+    }
+    res.json({ success: true, results });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Rosh Chodesh / Erev Rosh Chodesh dates (next N years, via Hebcal) ──────────
 router.get('/rosh-chodesh', async (req, res) => {
   try {
