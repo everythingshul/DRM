@@ -635,6 +635,9 @@ async function processRecurringBatchNotifications() {
 }
 
 async function calcNextRun(fromDate, frequency, hebrewDay) {
+  if (!fromDate || isNaN(new Date(fromDate).getTime())) {
+    fromDate = new Date().toISOString().slice(0, 10);
+  }
   if (frequency === 'hebrew_monthly') {
     const hebcal = require('./hebcal');
     return hebcal.advanceToNextHebrewMonthDate(fromDate, hebrewDay);
