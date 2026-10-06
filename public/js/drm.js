@@ -318,10 +318,15 @@ function layoutNavOverflow() {
   hidden.forEach(item => { item.style.display = 'none'; nav.insertBefore(item, more); });
   items.forEach(item => { item.style.display = ''; nav.insertBefore(item, more); });
   dd.innerHTML = '';
+  // Measure the "More" button's own width while it's still visible — reading
+  // offsetWidth after hiding it always returns 0, which under-counts the
+  // space it needs and lets items spill past the header's edge.
+  more.style.display = '';
+  const moreWidth = more.offsetWidth;
   more.style.display = 'none';
   // Mobile shows the full flat list (no width-based grouping needed there).
   if (window.innerWidth <= 900) return;
-  const avail = nav.clientWidth - more.offsetWidth - 8;
+  const avail = nav.clientWidth - moreWidth - 8;
   let used = 0, overflow = [];
   for (const item of items) {
     used += item.offsetWidth + 2;
@@ -468,6 +473,11 @@ function showApp() {
     item.onclick = () => { closeMobileNav(); $('nav-more-dropdown')?.classList.remove('open'); navigateTo(item.dataset.page); };
   });
   layoutNavOverflow();
+  // Nav item widths shift once web fonts finish swapping in — recompute
+  // the overflow grouping then, or measurements taken against the
+  // fallback font leave items overlapping the header's right-hand side.
+  document.fonts?.ready?.then(layoutNavOverflow).catch(() => {});
+  setTimeout(layoutNavOverflow, 400);
   $('logout-btn').onclick = async () => { try { await API.post('/auth/logout', {}); } catch {} localStorage.removeItem('drm_token'); showLogin(); };
   // Poll notifications every 15 seconds for liveness
   setInterval(_loadNotifications, 15000);
