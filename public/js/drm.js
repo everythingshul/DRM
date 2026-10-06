@@ -98,8 +98,8 @@ function toast(msg, type='ok') {
   const t = document.createElement('div');
   const text = String(msg || 'An error occurred');
   // Inline all styles — guaranteed to show regardless of CSS issues
-  const bg = type==='err' ? '#d63031' : type==='warn' ? '#f0a500' : '#22a06b';
-  const color = type==='warn' ? '#1a1a2e' : '#ffffff';
+  const bg = type==='err' ? '#c9432e' : type==='warn' ? '#b3823a' : '#1e8a63';
+  const color = '#ffffff';
   t.setAttribute('style',
     `background:${bg};color:${color};padding:11px 16px;border-radius:6px;` +
     `font-size:13px;font-family:Arial,sans-serif;font-weight:500;` +
@@ -256,7 +256,7 @@ function renderPie(el, data) {
   if (!data?.length) { el.innerHTML = '<div class="empty">No data</div>'; return; }
   const total = data.reduce((s, d) => s + (d.v || 0), 0);
   if (!total) { el.innerHTML = '<div class="empty">No data</div>'; return; }
-  const cols = ['#1a3a6b','#2d8dc4','#22a06b','#f0a500','#d63031','#9333ea','#0891b2','#16a34a'];
+  const cols = ['#1e3766','#25a9ea','#1e8a63','#b3823a','#c9432e','#9333ea','#0891b2','#16a34a'];
   let paths = '', angle = -90;
   data.forEach((d, i) => {
     const v = d.v || 0, sweep = (v/total)*360; if (!sweep) return;
@@ -275,28 +275,64 @@ function renderBar(el, data, lk, vk) {
   let bars='', lbls='';
   items.forEach((d, i) => {
     const v=d[vk]||0, bh=Math.max(2,(v/max)*(h-pad*1.4)), x=pad+i*((w-pad*2)/items.length)+2, y=h-pad-bh;
-    bars += `<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="#2d8dc4" rx="2" opacity=".85"><title>${d[lk]}: ${fmt$(v)}</title></rect>`;
+    bars += `<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="#25a9ea" rx="2" opacity=".85"><title>${d[lk]}: ${fmt$(v)}</title></rect>`;
     if (i % Math.ceil(items.length/7) === 0) lbls += `<text x="${x+bw/2}" y="${h-3}" text-anchor="middle" font-size="9" fill="#6b7280">${String(d[lk]||'').slice(-7)}</text>`;
   });
   el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" style="width:100%;max-height:200px">${bars}${lbls}</svg>`;
 }
 
-// ── Sidebar ───────────────────────────────────────────────────────────────────
-function toggleSidebar() {
-  const sb = $('sidebar'), mc = $('main-content'), mobile = window.innerWidth <= 768;
-  if (mobile) {
-    sb.classList.toggle('mob-open');
-    $('sidebar-overlay').classList.toggle('show');
-  } else {
-    const c = sb.classList.toggle('collapsed');
-    mc.style.marginLeft = c ? 'var(--sb-cw)' : 'var(--sb-w)';
-    localStorage.setItem('sb-c', c ? '1' : '0');
+// ── Top nav ───────────────────────────────────────────────────────────────────
+function toggleMobileNav() {
+  const nav = $('top-nav'), ov = $('mobile-nav-overlay');
+  nav?.classList.toggle('mob-open');
+  ov?.classList.toggle('show');
+}
+function closeMobileNav() {
+  $('top-nav')?.classList.remove('mob-open');
+  $('mobile-nav-overlay')?.classList.remove('show');
+}
+function _toggleNavMore() {
+  const dd = $('nav-more-dropdown'), btn = $('nav-more-btn');
+  const open = dd.classList.toggle('open');
+  btn.classList.toggle('active', open);
+  if (open) {
+    setTimeout(() => {
+      document.addEventListener('click', function _closeMore(e) {
+        if (!e.target.closest('#nav-more')) {
+          dd.classList.remove('open'); btn.classList.remove('active');
+          document.removeEventListener('click', _closeMore);
+        }
+      });
+    }, 0);
   }
 }
-function closeSidebar() {
-  $('sidebar')?.classList.remove('mob-open');
-  $('sidebar-overlay')?.classList.remove('show');
+// Items that don't fit the header's width move from #top-nav into the
+// #nav-more dropdown instead of letting the bar scroll or wrap.
+function layoutNavOverflow() {
+  const nav = $('top-nav'), more = $('nav-more'), dd = $('nav-more-dropdown');
+  if (!nav) return;
+  const all = Array.from(nav.querySelectorAll('.nav-item'));
+  const isSuperAdmin = !!DRM.user?.is_super_admin;
+  const hidden = all.filter(item => item.classList.contains('nav-super-admin') && !isSuperAdmin);
+  const items = all.filter(item => !hidden.includes(item));
+  hidden.forEach(item => { item.style.display = 'none'; nav.insertBefore(item, more); });
+  items.forEach(item => { item.style.display = ''; nav.insertBefore(item, more); });
+  dd.innerHTML = '';
+  more.style.display = 'none';
+  // Mobile shows the full flat list (no width-based grouping needed there).
+  if (window.innerWidth <= 900) return;
+  const avail = nav.clientWidth - more.offsetWidth - 8;
+  let used = 0, overflow = [];
+  for (const item of items) {
+    used += item.offsetWidth + 2;
+    if (used > avail) overflow.push(item);
+  }
+  if (overflow.length) {
+    more.style.display = '';
+    overflow.forEach(item => { item.style.display = 'none'; dd.appendChild(item); item.style.display = 'flex'; });
+  }
 }
+window.addEventListener('resize', () => { clearTimeout(window._navRaf); window._navRaf = setTimeout(layoutNavOverflow, 120); });
 
 // ── App boot ──────────────────────────────────────────────────────────────────
 async function init() {
@@ -427,16 +463,11 @@ async function setOrg(org) {
 function showApp() {
   _show('app'); _hide('login-screen'); _hide('setup-screen'); _hide('newacct-screen');
   const sbUser = $('sb-user'); if (sbUser) sbUser.textContent = DRM.user?.full_name || '';
-  // Restore sidebar state
-  const sb = $('sidebar');
-  if (sb && localStorage.getItem('sb-c') === '1' && window.innerWidth > 768) {
-    sb.classList.add('collapsed');
-    const mc = $('main-content'); if (mc) mc.style.marginLeft = 'var(--sb-cw)';
-  }
   // Nav clicks
   document.querySelectorAll('.nav-item').forEach(item => {
-    item.onclick = () => { if (window.innerWidth <= 768) closeSidebar(); navigateTo(item.dataset.page); };
+    item.onclick = () => { closeMobileNav(); $('nav-more-dropdown')?.classList.remove('open'); navigateTo(item.dataset.page); };
   });
+  layoutNavOverflow();
   $('logout-btn').onclick = async () => { try { await API.post('/auth/logout', {}); } catch {} localStorage.removeItem('drm_token'); showLogin(); };
   // Poll notifications every 15 seconds for liveness
   setInterval(_loadNotifications, 15000);
@@ -468,7 +499,9 @@ function navigateTo(page) {
   _currentPage = page;
   if (location.hash !== '#' + page) history.pushState(null, '', '#' + page);
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
+  const activeItem = document.querySelector(`.nav-item[data-page="${page}"]`);
+  activeItem?.classList.add('active');
+  $('nav-more-btn')?.classList.toggle('active', !!activeItem && $('nav-more-dropdown')?.contains(activeItem));
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   const el = $('page-' + page);
   if (!el) return;
