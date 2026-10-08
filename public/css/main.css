@@ -77,7 +77,7 @@ body{
   box-shadow:0 1px 0 rgba(255,255,255,.08) inset, 0 8px 24px -8px rgba(8,16,32,.35);
 }
 .app-header .brand{display:flex;align-items:center;gap:10px;flex-shrink:0;padding:10px 0}
-.app-header .brand img{height:30px;width:auto;border-radius:8px}
+.app-header .brand img{height:30px;width:auto;filter:brightness(0) invert(1);opacity:.95}
 .brand-name{font-family:var(--font-head);font-weight:700;font-size:16px;color:#fff;line-height:1.15;white-space:nowrap}
 .brand-name span{display:block;font-family:var(--font);font-size:10px;font-weight:500;color:var(--blue-l);letter-spacing:.2px}
 
