@@ -306,6 +306,17 @@ function _toggleNavMore() {
     }, 0);
   }
 }
+function _toggleUserMenu() {
+  const m = $('user-menu'); if (!m) return;
+  const open = m.classList.toggle('open');
+  if (open) {
+    setTimeout(() => {
+      document.addEventListener('click', function _closeUser(e) {
+        if (!e.target.closest('.user-wrap')) { m.classList.remove('open'); document.removeEventListener('click', _closeUser); }
+      });
+    }, 0);
+  }
+}
 // Items that don't fit the header's width move from #top-nav into the
 // #nav-more dropdown instead of letting the bar scroll or wrap.
 function layoutNavOverflow() {
@@ -327,11 +338,16 @@ function layoutNavOverflow() {
   // Mobile shows the full flat list (no width-based grouping needed there).
   if (window.innerWidth <= 900) return;
   const avail = nav.clientWidth - moreWidth - 8;
+  // Super-admin pages (Accounts, WhatsApp, Recovery) always live under "More" so the
+  // everyday pages get the bar; everything else keeps its place until it stops fitting.
+  const pinned = items.filter(item => item.classList.contains('nav-super-admin'));
   let used = 0, overflow = [];
   for (const item of items) {
+    if (pinned.includes(item)) continue;
     used += item.offsetWidth + 2;
     if (used > avail) overflow.push(item);
   }
+  overflow.push(...pinned);
   if (overflow.length) {
     more.style.display = '';
     overflow.forEach(item => { item.style.display = 'none'; dd.appendChild(item); item.style.display = 'flex'; });
@@ -459,6 +475,8 @@ async function setOrg(org) {
   const sel = $('org-select');
   if (!sel) return;
   sel.innerHTML = _allOrgs.map(o => `<option value="${o.id}" ${o.id===org.id?'selected':''}>${o.name}</option>`).join('');
+  sel.classList.toggle('single', _allOrgs.length <= 1);
+  const uo = $('user-org'); if (uo) uo.textContent = org.name || '';
   sel.onchange = async () => {
     const found = _allOrgs.find(x => x.id === sel.value);
     if (found) { await setOrg(found); navigateTo(_currentPage); }
@@ -468,6 +486,9 @@ async function setOrg(org) {
 function showApp() {
   _show('app'); _hide('login-screen'); _hide('setup-screen'); _hide('newacct-screen');
   const sbUser = $('sb-user'); if (sbUser) sbUser.textContent = DRM.user?.full_name || '';
+  const ue = $('user-email'); if (ue) ue.textContent = DRM.user?.email || '';
+  const av = $('user-avatar');
+  if (av) av.textContent = ((DRM.user?.full_name || DRM.user?.email || '?').split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join('') || '?').toUpperCase();
   // Nav clicks
   document.querySelectorAll('.nav-item').forEach(item => {
     item.onclick = () => { closeMobileNav(); $('nav-more-dropdown')?.classList.remove('open'); navigateTo(item.dataset.page); };
