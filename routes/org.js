@@ -493,6 +493,36 @@ router.put('/sola', requireOrgAdmin, (req, res) => {
   res.json({ success: true });
 });
 
+// --- MATBIA (direct DAF charging) ---
+router.get('/matbia', requireOrgAdmin, (req, res) => {
+  const c = require('../utils/matbia').getConfig(req.orgId);
+  res.json({
+    configured: !!(c.token && c.handle),
+    source: c.source,                       // 'org' | 'env' | 'none'
+    environment: c.env,
+    org_user_handle: c.handle || '',
+    token_hint: c.token ? '••••' + c.token.slice(-4) : ''   // never return the token itself
+  });
+});
+
+router.put('/matbia', requireOrgAdmin, (req, res) => {
+  const { GUID_RE } = require('../utils/matbia');
+  const { api_token, org_user_handle, environment } = req.body;
+  const env = environment === 'sandbox' ? 'sandbox' : 'production';
+  const existing = get('SELECT id, api_token FROM matbia_settings WHERE org_id = ?', [req.orgId]);
+  const token = (api_token || '').trim() || existing?.api_token || '';   // blank = keep the saved token
+  if (!token) return res.status(400).json({ error: 'Matbia API token is required' });
+  if (!GUID_RE.test(token)) return res.status(400).json({ error: 'That does not look like a Matbia API token (expected a GUID like 8a1f…-…-…).' });
+  const handle = (org_user_handle || '').trim();
+  if (!handle) return res.status(400).json({ error: 'Organization handle (the API key on your Matbia organization profile page) is required' });
+  if (existing) {
+    run('UPDATE matbia_settings SET api_token=?, org_user_handle=?, environment=?, is_active=1, updated_at=CURRENT_TIMESTAMP WHERE org_id=?', [token, handle, env, req.orgId]);
+  } else {
+    run('INSERT INTO matbia_settings (id, org_id, api_token, org_user_handle, environment, is_active) VALUES (?, ?, ?, ?, ?, 1)', [uuidv4(), req.orgId, token, handle, env]);
+  }
+  res.json({ success: true });
+});
+
 // --- DAF ACCOUNTS ---
 router.get('/daf', (req, res) => {
   res.json(all('SELECT * FROM daf_accounts WHERE org_id = ? AND is_active = 1 ORDER BY name', [req.orgId]));

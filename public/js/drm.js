@@ -318,10 +318,15 @@ function layoutNavOverflow() {
   hidden.forEach(item => { item.style.display = 'none'; nav.insertBefore(item, more); });
   items.forEach(item => { item.style.display = ''; nav.insertBefore(item, more); });
   dd.innerHTML = '';
+  // Measure the "More" button's own width while it's still visible — reading
+  // offsetWidth after hiding it always returns 0, which under-counts the
+  // space it needs and lets items spill past the header's edge.
+  more.style.display = '';
+  const moreWidth = more.offsetWidth;
   more.style.display = 'none';
   // Mobile shows the full flat list (no width-based grouping needed there).
   if (window.innerWidth <= 900) return;
-  const avail = nav.clientWidth - more.offsetWidth - 8;
+  const avail = nav.clientWidth - moreWidth - 8;
   let used = 0, overflow = [];
   for (const item of items) {
     used += item.offsetWidth + 2;
@@ -468,6 +473,11 @@ function showApp() {
     item.onclick = () => { closeMobileNav(); $('nav-more-dropdown')?.classList.remove('open'); navigateTo(item.dataset.page); };
   });
   layoutNavOverflow();
+  // Nav item widths shift once web fonts finish swapping in — recompute
+  // the overflow grouping then, or measurements taken against the
+  // fallback font leave items overlapping the header's right-hand side.
+  document.fonts?.ready?.then(layoutNavOverflow).catch(() => {});
+  setTimeout(layoutNavOverflow, 400);
   $('logout-btn').onclick = async () => { try { await API.post('/auth/logout', {}); } catch {} localStorage.removeItem('drm_token'); showLogin(); };
   // Poll notifications every 15 seconds for liveness
   setInterval(_loadNotifications, 15000);
@@ -1245,13 +1255,13 @@ const DonorDetail = {
         <div class="bg" style="align-items:center"><select id="pm-brand" style="flex:1"><option value="">— Auto —</option><option>Visa</option><option>Mastercard</option><option>Amex</option><option>Discover</option></select><span id="pm-brand-icon" style="font-size:12px;font-weight:700;padding:0 8px;color:var(--blue);min-width:36px"></span></div>
       </div>
       <div id="daf-f" style="display:none">
-        <div class="alert alert-info" style="font-size:12px;margin-top:8px">DAF donations are processed via Sola using the donor's DAF card. Sola auto-routes to the correct DAF provider (Matbia, OJC, Pledger, DonorsFund, iMasser).</div>
+        <div class="alert alert-info" style="font-size:12px;margin-top:8px">Matbia cards are charged directly through Matbia and verified when saved. Other DAF providers (OJC, Pledger, DonorsFund, iMasser) are processed via Sola.</div>
         <label>DAF Provider</label>
-        <select id="pm-dafprov"><option value="Matbia">Matbia</option><option value="OJC">OJC</option><option value="Pledger">Pledger</option><option value="DonorsFund">DonorsFund</option><option value="iMasser">iMasser</option><option value="Other">Other</option></select>
+        <select id="pm-dafprov" onchange="DonorDetail._dafProvChange()"><option value="Matbia">Matbia</option><option value="OJC">OJC</option><option value="Pledger">Pledger</option><option value="DonorsFund">DonorsFund</option><option value="iMasser">iMasser</option><option value="Other">Other</option></select>
         <label>DAF Card Number *</label>
         <input id="pm-daf" placeholder="Enter DAF card number" autocomplete="off">
-        <label>Expiry (MMYY, or leave 1299 for no expiry)</label>
-        <input id="pm-dafexp" value="1299" maxlength="4">
+        <label id="pm-dafexp-lbl">Expiry (MMYY) — the date printed on the card *</label>
+        <input id="pm-dafexp" value="" placeholder="MMYY" maxlength="4">
       </div>
       <div id="oth-f" style="display:none"><label>Description</label><input id="pm-oth" placeholder="Check, Cash, Wire…"></div>
       <label>Nickname (optional)</label><input id="pm-lbl" autocomplete="off">
@@ -1260,6 +1270,12 @@ const DonorDetail = {
         <button class="btn btn-primary" id="pm-btn" onclick="DonorDetail.saveCard('${did}')">Save & Tokenize</button>
         <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
       </div>`, { sm: true });
+  },
+  _dafProvChange() {
+    const matbia = val('pm-dafprov') === 'Matbia';
+    const exp = $('pm-dafexp'), lbl = $('pm-dafexp-lbl');
+    if (lbl) lbl.textContent = matbia ? 'Expiry (MMYY) — the date printed on the card *' : 'Expiry (MMYY, or leave 1299 for no expiry)';
+    if (exp && (exp.value === '' || exp.value === '1299')) exp.value = matbia ? '' : '1299';
   },
   _pmTypeChange() {
     const t = val('pm-type');
@@ -1308,7 +1324,7 @@ const DonorDetail = {
     Modal.open('Process DAF Grant', `
       <div class="alert alert-info" style="font-size:13px;margin-bottom:12px">
         <strong>${pm.daf_name||'DAF'}</strong> ••${cardNum.slice(-4)}<br>
-        Sola will route to the correct DAF provider automatically.
+        ${/matbia/i.test(pm.daf_name||'') || cardNum.startsWith('862824') ? 'Charged directly through Matbia.' : 'Processed via Sola, which routes to the correct DAF provider.'}
       </div>
       <label>Amount ($) *</label>
       <input type="number" id="daf-amt" step="0.01" min="0.01" placeholder="0.00">
@@ -1420,8 +1436,10 @@ const DonorDetail = {
       <div id="daf-row" style="display:none">
         <label>DAF Provider</label>
         <select id="md-dafprov"><option value="Matbia">Matbia</option><option value="OJC">OJC</option><option value="Pledger">Pledger</option><option value="DonorsFund">DonorsFund</option><option value="iMasser">iMasser</option><option value="Other">Other</option></select>
-        <label>DAF Card Number (optional — charges via Sola)</label>
-        <input id="md-dafcard" placeholder="Enter card number to charge via Sola, or leave blank to record manually" autocomplete="off">
+        <label>DAF Card Number (optional — charges the card now: Matbia directly, other providers via Sola)</label>
+        <input id="md-dafcard" placeholder="Enter card number to charge it, or leave blank to record manually" autocomplete="off">
+        <label>Card Expiry (MMYY — required for Matbia; the date printed on the card)</label>
+        <input id="md-dafexp" placeholder="MMYY" maxlength="4">
       </div>
       <div class="r2">
         <div><label>Date *</label><input type="datetime-local" id="md-date" value="${now}"></div>
@@ -1463,7 +1481,7 @@ const DonorDetail = {
     if (method === 'daf' && val('md-dafcard').trim()) {
       try {
         const r = await API.post(`/api/orgs/${API.orgId}/payments/daf-grant`, {
-          donor_id: did, daf_card_num: val('md-dafcard'), daf_provider: val('md-dafprov'),
+          donor_id: did, daf_card_num: val('md-dafcard'), daf_exp: val('md-dafexp'), daf_provider: val('md-dafprov'),
           amount: amt, notes: val('md-notes')
         });
         if (label && r.donation?.id) await API.put(`/api/orgs/${API.orgId}/donations/${r.donation.id}/label`, {label}).catch(()=>{});
@@ -1505,7 +1523,7 @@ const DonorDetail = {
       <input type="number" id="rf-amt" step="0.01" min="0.01" max="${parseFloat(amt).toFixed(2)}" value="${parseFloat(amt).toFixed(2)}">
       <label>Reason (optional)</label>
       <input id="rf-rsn" autocomplete="off" placeholder="Reason for refund">
-      ${txId && !txId.startsWith('ES') ? `<div class="alert alert-info" style="margin-top:10px;font-size:12px">Sola Trans ID: <strong>${txId}</strong> — will attempt gateway refund/void.</div>` : '<div class="alert alert-warn" style="margin-top:10px;font-size:12px">Manual payment — will mark as refunded in system only.</div>'}
+      ${txId && !txId.startsWith('ES') ? `<div class="alert alert-info" style="margin-top:10px;font-size:12px">Gateway Trans ID: <strong>${txId}</strong> — will attempt gateway refund/void. (Matbia donations can only be reversed in full.)</div>` : '<div class="alert alert-warn" style="margin-top:10px;font-size:12px">Manual payment — will mark as refunded in system only.</div>'}
       <div id="rf-err" style="display:none" class="alert alert-err mt"></div>
       <div class="bg mt">
         <button class="btn btn-red" id="rf-btn" onclick="DonorDetail._doRefund('${did}','${donId}','${txId||''}')">Process Refund</button>
@@ -3346,7 +3364,7 @@ async function renderSettings(el) {
     
     el.innerHTML = `
       <div class="ph"><div class="ph-title">Settings</div></div>
-      <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-labels">Labels</div><div class="tab" data-tc="st-tz">Timezone</div><div class="tab" data-tc="st-hebrew">Hebrew Calendar</div><div class="tab" data-tc="st-log">Login Log</div><div class="tab" data-tc="st-backup">Backup</div><div class="tab" data-tc="st-imports">Import History</div>${DRM.user?.is_super_admin?'<div class="tab" data-tc="st-all-orgs">All Orgs</div>':''}</div>
+      <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-labels">Labels</div><div class="tab" data-tc="st-tz">Timezone</div><div class="tab" data-tc="st-hebrew">Hebrew Calendar</div><div class="tab" data-tc="st-matbia">Matbia</div><div class="tab" data-tc="st-log">Login Log</div><div class="tab" data-tc="st-backup">Backup</div><div class="tab" data-tc="st-imports">Import History</div>${DRM.user?.is_super_admin?'<div class="tab" data-tc="st-all-orgs">All Orgs</div>':''}</div>
       <div id="st-users" class="tc on">
         <div class="card" style="margin-bottom:12px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -3410,6 +3428,9 @@ async function renderSettings(el) {
       <div id="st-hebrew" class="tc">
         <div class="card" id="st-hebrew-card"><div class="spinner"></div></div>
       </div>
+      <div id="st-matbia" class="tc">
+        <div class="card" id="st-matbia-card"><div class="spinner"></div></div>
+      </div>
       <div id="st-backup" class="tc">
         <div class="card" id="st-backup-card"><div class="spinner"></div></div>
       </div>
@@ -3427,6 +3448,7 @@ async function renderSettings(el) {
       </div></div>`;
     tabsInit('#page-settings');
     document.querySelector('#page-settings .tab[data-tc="st-hebrew"]')?.addEventListener('click', _loadRoshChodesh);
+    document.querySelector('#page-settings .tab[data-tc="st-matbia"]')?.addEventListener('click', _loadMatbiaSettings);
     document.querySelector('#page-settings .tab[data-tc="st-backup"]')?.addEventListener('click', _loadBackupStatus);
     document.querySelector('#page-settings .tab[data-tc="st-imports"]')?.addEventListener('click', _loadImportHistory);
     document.querySelector('#page-settings .tab[data-tc="st-all-orgs"]')?.addEventListener('click', _loadAllOrgs);
@@ -3623,6 +3645,40 @@ function _renderRoshChodeshTable() {
     <td>${fmtD(r.erevRoshChodesh)}</td>
     <td>${r.days}</td>
   </tr>`).join('');
+}
+
+async function _loadMatbiaSettings() {
+  const c = $('st-matbia-card'); if (!c) return;
+  c.innerHTML = '<div class="spinner"></div>';
+  try {
+    const s = await API.get(`/api/orgs/${API.orgId}/matbia`);
+    c.innerHTML = `
+      <div class="card-title">Matbia (DAF cards, charged directly)</div>
+      <p style="font-size:12px;color:var(--gray-5);margin-bottom:12px">
+        Donors' Matbia cards are charged straight through Matbia — not through Sola. Other DAF providers still use Sola.
+        Get your API token from Matbia (email the contact listed at developers.matbia.org); your organization handle is the API key on your Matbia organization profile page.
+      </p>
+      ${s.configured
+        ? `<div class="alert alert-ok" style="font-size:12px">✓ Connected — ${s.environment === 'sandbox' ? '<strong>SANDBOX</strong> (test mode, no real money)' : 'production'}${s.source === 'env' ? ' · using the server environment variables' : ''}</div>`
+        : `<div class="alert alert-warn" style="font-size:12px">Not configured — Matbia cards can't be charged yet.</div>`}
+      <label>API Token ${s.token_hint ? `<span style="font-size:11px;color:var(--gray-5)">(saved: ${s.token_hint} — leave blank to keep)</span>` : ''}</label>
+      <input id="mb-token" type="password" autocomplete="new-password" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+      <label>Organization Handle</label>
+      <input id="mb-handle" autocomplete="off" value="${(s.org_user_handle||'').replace(/"/g,'&quot;')}" placeholder="API key from your Matbia organization profile">
+      <label>Environment</label>
+      <select id="mb-env">
+        <option value="production" ${s.environment!=='sandbox'?'selected':''}>Production (real charges)</option>
+        <option value="sandbox" ${s.environment==='sandbox'?'selected':''}>Sandbox (testing only)</option>
+      </select>
+      <div class="bg mt"><button class="btn btn-primary" onclick="_saveMatbiaSettings()">Save</button></div>`;
+  } catch(e) { c.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+async function _saveMatbiaSettings() {
+  try {
+    await API.put(`/api/orgs/${API.orgId}/matbia`, { api_token: val('mb-token'), org_user_handle: val('mb-handle'), environment: val('mb-env') });
+    toast('Matbia settings saved ✓');
+    _loadMatbiaSettings();
+  } catch(e) { toast(e.message||'Could not save','err'); }
 }
 
 async function _loadBackupStatus() {
@@ -3955,7 +4011,7 @@ function _addUnlinkedDonation() {
       <div id="ul-pm-row" style="display:none;margin-top:8px">
         <label>Payment Method</label>
         <select id="ul-pm-sel"><option value="">— Loading… —</option></select>
-        <p style="font-size:11px;color:var(--gray-5);margin-top:2px">Selecting a saved card or DAF will charge it via Sola instead of recording manually.</p>
+        <p style="font-size:11px;color:var(--gray-5);margin-top:2px">Selecting a saved card or DAF will charge it now instead of recording manually.</p>
       </div>
     </div>
     <div id="ul-t-anon" class="tc">

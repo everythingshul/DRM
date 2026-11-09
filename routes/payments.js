@@ -1,10 +1,11 @@
-// routes/payments.js — Sola CC + DAF processing
+// routes/payments.js — Sola CC processing; Matbia DAF direct; other DAF providers via Sola
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const { v4: uuidv4 } = require('uuid');
 const { get, run, all } = require('../db/schema');
 const { requireAuth, requireOrg, requireOrgAdmin } = require('../middleware/auth');
 const { ccSave, ccSale, ccRefund, ccVoid, dafGrant } = require('../utils/sola');
+const matbia = require('../utils/matbia');
 const { sendReceiptEmail } = require('../utils/scheduler');
 const tzUtil = require('../utils/tz');
 
@@ -106,7 +107,9 @@ router.post('/charge', async (req, res) => {
   }
 });
 
-// ── Charge DAF card via Sola grant:Recommendation ────────────────────────────
+// ── Charge a DAF card ─────────────────────────────────────────────────────────
+// Matbia cards are charged directly through Matbia's API; every other DAF provider
+// still goes through Sola's grant:Recommendation.
 router.post('/charge-daf', async (req, res) => {
   try {
     const { donor_id, payment_method_id, amount, notes } = req.body;
@@ -120,32 +123,70 @@ router.post('/charge-daf', async (req, res) => {
     const pm = get('SELECT * FROM payment_methods WHERE id=? AND donor_id=?', [payment_method_id, donor_id]);
     if (!pm || pm.type !== 'daf') return res.status(400).json({ error: 'Not a DAF payment method' });
 
-    // Stored as "cardNum|exp" in other_description, or via /daf-grant with explicit fields
-    const parts = (pm.other_description || '').split('|');
-    const storedCardNum = parts[0] || '';
-    const storedExp = parts[1] || '1299';
+    // Stored as "cardNum|exp" in other_description (older rows: JSON)
+    const { cardNum: storedCardNum, exp: storedExp } = matbia.parseDafCard(pm);
     if (!storedCardNum) return res.status(400).json({ error: 'DAF card number not stored. Please re-add this payment method.' });
 
     const org = get('SELECT * FROM organizations WHERE id=?', [req.orgId]);
-    const result = await dafGrant(req.orgId, {
-      cardNum: storedCardNum,
-      exp: storedExp,
-      amount,
-      name: `${donor.first_name} ${donor.last_name}`,
-      note: notes || `DAF Grant – ${pm.daf_name || 'DAF'}`
-    });
-
     const donId = uuidv4();
-    run(`INSERT INTO donations (id,org_id,donor_id,amount,method,payment_method_id,transaction_id,donation_date,status,notes,is_manual,created_by)
-         VALUES (?,?,?,?,'daf',?,?,CURRENT_TIMESTAMP,'completed',?,1,?)`,
+    const viaMatbia = matbia.isMatbiaCard(pm);
+    const result = viaMatbia
+      ? await matbia.chargePaymentMethod(req.orgId, pm, { amount, externalId: donId, note: notes || 'DRM Donation' })
+      : await dafGrant(req.orgId, {
+          cardNum: storedCardNum,
+          exp: storedExp || '1299',
+          amount,
+          name: `${donor.first_name} ${donor.last_name}`,
+          note: notes || `DAF Grant – ${pm.daf_name || 'DAF'}`
+        });
+
+    run(`INSERT INTO donations (id,org_id,donor_id,amount,method,payment_method_id,transaction_id,donation_date,status,notes,is_manual,created_by,gateway)
+         VALUES (?,?,?,?,'daf',?,?,CURRENT_TIMESTAMP,'completed',?,1,?,?)`,
       [donId, req.orgId, donor_id, amount, pm.id, result.refNum,
-       `${pm.daf_name||'DAF'} grant${notes?' — '+notes:''}`, req.user.id]);
+       `${pm.daf_name||'DAF'} grant${notes?' — '+notes:''}`, req.user.id, viaMatbia ? 'matbia' : null]);
 
     const donation = get('SELECT * FROM donations WHERE id=?', [donId]);
     await sendReceiptEmail(donor, donation, org).catch(e => console.error('[receipt] Failed:', e.message));
     res.json({ success: true, donation: get('SELECT * FROM donations WHERE id=?', [donId]), transaction_id: result.refNum });
   } catch(e) {
     console.error('charge-daf:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── One-off DAF grant from a card number typed in the Manual Donation form ────
+router.post('/daf-grant', async (req, res) => {
+  try {
+    const { donor_id, daf_card_num, daf_exp, daf_provider, amount, notes } = req.body;
+    if (!donor_id || !daf_card_num || !amount) return res.status(400).json({ error: 'Required: donor_id, daf_card_num, amount' });
+
+    const donor = get('SELECT * FROM donors WHERE id=? AND org_id=?', [donor_id, req.orgId]);
+    if (!donor) return res.status(404).json({ error: 'Donor not found' });
+    const _dup = get(`SELECT id FROM donor_duplicates WHERE status='pending' AND (donor_id_a=? OR donor_id_b=?)`, [donor_id, donor_id]);
+    if (_dup) return res.status(400).json({ error: 'Unresolved duplicate flag on this donor. Resolve in Info Check before processing donations.' });
+
+    const cardNum = String(daf_card_num).replace(/\D/g, '');
+    const viaMatbia = matbia.isMatbiaProvider(daf_provider, cardNum);
+    const org = get('SELECT * FROM organizations WHERE id=?', [req.orgId]);
+    const donId = uuidv4();
+    const result = viaMatbia
+      ? await matbia.charge(req.orgId, { cardNum, exp: daf_exp, amount, externalId: donId, note: notes || 'DRM Donation' })
+      : await dafGrant(req.orgId, {
+          cardNum, exp: daf_exp || '1299', amount,
+          name: `${donor.first_name} ${donor.last_name}`,
+          note: notes || `DAF Grant – ${daf_provider || 'DAF'}`
+        });
+
+    run(`INSERT INTO donations (id,org_id,donor_id,amount,method,transaction_id,donation_date,status,notes,is_manual,created_by,gateway)
+         VALUES (?,?,?,?,'daf',?,CURRENT_TIMESTAMP,'completed',?,1,?,?)`,
+      [donId, req.orgId, donor_id, amount, result.refNum,
+       `${daf_provider||'DAF'} grant${notes?' — '+notes:''}`, req.user.id, viaMatbia ? 'matbia' : null]);
+
+    const donation = get('SELECT * FROM donations WHERE id=?', [donId]);
+    await sendReceiptEmail(donor, donation, org).catch(e => console.error('[receipt] Failed:', e.message));
+    res.json({ success: true, donation, transaction_id: result.refNum });
+  } catch(e) {
+    console.error('daf-grant:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -170,11 +211,20 @@ router.post('/refund', async (req, res) => {
     let solaRefNum = null;
     let method = 'manual';
 
-    const isRealSolaTx = (don.method === 'credit_card' || don.method === 'daf')
+    const isMatbiaTx = don.gateway === 'matbia' && !!don.transaction_id;
+    const isRealSolaTx = !isMatbiaTx && (don.method === 'credit_card' || don.method === 'daf')
       && don.transaction_id
       && !don.transaction_id.startsWith('ES');
 
-    if (isRealSolaTx) {
+    if (isMatbiaTx) {
+      // Matbia's void/refund calls reverse the whole transaction — no partial amounts.
+      if (prevRefunded > 0.001 || Math.abs(refAmt - parseFloat(don.amount)) > 0.001) {
+        return res.status(400).json({ error: `Matbia can only reverse the full $${parseFloat(don.amount).toFixed(2)}. For a partial refund, return the difference to the donor outside DRM and record it as a note.` });
+      }
+      const rv = await matbia.reverse(req.orgId, don.transaction_id);
+      solaRefNum = rv.refNum;
+      method = rv.method;
+    } else if (isRealSolaTx) {
       try {
         console.log(`[refund] Attempting void txId=${don.transaction_id}`);
         const v = await ccVoid(req.orgId, { refNum: don.transaction_id });
