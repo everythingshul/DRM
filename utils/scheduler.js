@@ -6,6 +6,7 @@ const { all, get, run } = require('../db/schema');
 const nodemailer = require('nodemailer');
 const mailer    = require('./mailer');
 const { ccSale: chargeToken } = require('./sola');
+const matbia = require('./matbia');
 const tzUtil = require('./tz');
 
 function getTransporter(settings) {
@@ -221,8 +222,24 @@ async function processScheduledCharge(charge) {
       await sendReceiptEmail(donor, donation, org);
       await sendChargeNotificationToOwner(org, donor, donation, true, null);
 
+    } else if (matbia.isMatbiaCard(pm)) {
+      // Matbia DAF — charged directly through Matbia's API
+      const donId = uuidv4();
+      txResult = await matbia.chargePaymentMethod(org.id, pm, {
+        amount: charge.amount, externalId: donId, note: charge.notes || 'DRM Scheduled Charge'
+      });
+      run(`INSERT INTO donations (id, org_id, donor_id, amount, method, payment_method_id, transaction_id, donation_date, status, is_autopay, gateway)
+           VALUES (?, ?, ?, ?, 'daf', ?, ?, CURRENT_TIMESTAMP, 'completed', ?, 'matbia')`,
+        [donId, charge.org_id, charge.donor_id, charge.amount, pm.id, txResult.refNum, charge.is_autopay ? 1 : 0]);
+
+      run('UPDATE scheduled_charges SET status = ?, processed_at = CURRENT_TIMESTAMP WHERE id = ?', ['completed', charge.id]);
+
+      const donation = get('SELECT * FROM donations WHERE id = ?', [donId]);
+      await sendReceiptEmail(donor, donation, org);
+      await sendChargeNotificationToOwner(org, donor, donation, true, null);
+
     } else {
-      // DAF or other non-card method — log as pending for manual processing
+      // Other DAF providers / non-card methods — log as pending for manual processing
       const donId = uuidv4();
       run(`INSERT INTO donations (id, org_id, donor_id, amount, method, payment_method_id, donation_date, status, is_autopay, notes)
            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'pending', ?, 'Scheduled charge — manual processing required')`,
@@ -487,6 +504,8 @@ async function chargeRecurringSchedule(sched, templateId) {
 
   try {
     let txId = null;
+    const donId = uuidv4();
+    const viaMatbia = matbia.isMatbiaCard(pm);
 
     if (pm.type === 'credit_card' && pm.sola_token) {
       const result = await chargeToken(sched.org_id, {
@@ -499,19 +518,24 @@ async function chargeRecurringSchedule(sched, templateId) {
         customNote: `Recurring ${sched.frequency} charge`
       });
       txId = result.refNum;
+    } else if (viaMatbia) {
+      // Matbia DAF — charged directly through Matbia's API (donation id = Matbia's duplicate guard)
+      const result = await matbia.chargePaymentMethod(sched.org_id, pm, {
+        amount: sched.amount, externalId: donId, note: `Recurring ${sched.frequency} charge`
+      });
+      txId = result.refNum;
     }
 
     // Fix #12: If this was a CC charge, txId MUST exist (Sola confirmed)
     // For other methods (check, cash, wire), donation is recorded without txId (manual collection needed)
-    if (pm.type === 'credit_card' && !txId) {
-      throw new Error('Sola did not confirm charge — no transaction ID returned');
+    if ((pm.type === 'credit_card' || viaMatbia) && !txId) {
+      throw new Error('The processor did not confirm the charge — no transaction ID returned');
     }
 
-    const donId = uuidv4();
-    run(`INSERT INTO donations (id, org_id, donor_id, amount, method, payment_method_id, transaction_id, donation_date, status, is_recurring, notes, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'completed', 1, ?, 'system')`,
+    run(`INSERT INTO donations (id, org_id, donor_id, amount, method, payment_method_id, transaction_id, donation_date, status, is_recurring, notes, created_by, gateway)
+         VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'completed', 1, ?, 'system', ?)`,
       [donId, sched.org_id, sched.donor_id, sched.amount, pm.type, pm.id, txId,
-       `Recurring ${sched.frequency} — ${sched.notes || ''}`]);
+       `Recurring ${sched.frequency} — ${sched.notes || ''}`, viaMatbia ? 'matbia' : null]);
 
     // Calculate next run
     const nextRun = await calcNextRun(sched.next_run, sched.frequency, sched.hebrew_day);

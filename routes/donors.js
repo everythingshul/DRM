@@ -4,6 +4,7 @@ const router = express.Router({ mergeParams: true });
 const { v4: uuidv4 } = require('uuid');
 const { all, get, run } = require('../db/schema');
 const { requireAuth, requireOrg, requireOrgAdmin } = require('../middleware/auth');
+const matbia = require('../utils/matbia');
 
 // Apply auth + org middleware
 router.use(requireAuth, requireOrg);
@@ -427,6 +428,24 @@ router.post('/:id/payment-methods', async (req, res) => {
 
     const donor = get('SELECT * FROM donors WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!donor) return res.status(404).json({ error: 'Donor not found' });
+
+    // Matbia cards are charged directly, so verify the number + expiry with Matbia now rather
+    // than at the first charge. Only a real Matbia rejection blocks saving; if Matbia isn't
+    // configured yet (or is unreachable) the card is still saved and checked when charged.
+    if (type === 'daf') {
+      const stub = { type, daf_name, other_description };
+      if (matbia.isMatbiaCard(stub)) {
+        const { cardNum, exp } = matbia.parseDafCard(stub);
+        if (!matbia.normalizeExp(exp)) {
+          return res.status(400).json({ error: 'Matbia cards need the real expiry shown on the card (MMYY).' });
+        }
+        try { await matbia.preauthorize(req.orgId, { cardNum, exp }); }
+        catch (err) {
+          if (err.code === 'MATBIA') return res.status(400).json({ error: err.message.replace(/^Matbia: /, 'Matbia rejected this card: ') });
+          console.warn('[matbia] card saved without verification:', err.message);
+        }
+      }
+    }
 
     if (is_default) {
       run('UPDATE payment_methods SET is_default = 0 WHERE donor_id = ?', [req.params.id]);

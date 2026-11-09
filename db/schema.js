@@ -602,6 +602,15 @@ function runMigrations() {
   // appearing in server console logs nobody running on Render can see.
   safe("ALTER TABLE donations ADD COLUMN receipt_skip_reason TEXT");
 
+  // Which processor moved the money ('matbia' for direct Matbia DAF charges), so a
+  // later refund/void goes back to the same processor.
+  safe("ALTER TABLE donations ADD COLUMN gateway TEXT");
+  safe(`CREATE TABLE IF NOT EXISTS matbia_settings (
+    id TEXT PRIMARY KEY, org_id TEXT UNIQUE NOT NULL,
+    api_token TEXT, org_user_handle TEXT, environment TEXT DEFAULT 'production',
+    is_active INTEGER DEFAULT 1, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+
   // Soft-delete donors and leads (30-day restore window, same pattern as org_users)
   safe("ALTER TABLE donors ADD COLUMN removed_at DATETIME");
   safe("ALTER TABLE leads ADD COLUMN removed_at DATETIME");
