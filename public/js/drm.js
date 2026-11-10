@@ -3689,7 +3689,7 @@ async function _loadMatbiaSettings() {
         : `<div class="alert alert-warn" style="font-size:12px">Not configured — Matbia cards can't be charged yet.</div>`}
       <label>API Token ${s.token_hint ? `<span style="font-size:11px;color:var(--gray-5)">(saved: ${s.token_hint} — leave blank to keep)</span>` : ''}</label>
       <input id="mb-token" type="password" autocomplete="new-password" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
-      <label>Organization Handle</label>
+      <label>Organization Handle <span style="font-size:11px;color:var(--gray-5)">(Matbia does not verify this — a wrong value still reports "Success" but never reaches your organization)</span></label>
       <input id="mb-handle" autocomplete="off" value="${(s.org_user_handle||'').replace(/"/g,'&quot;')}" placeholder="API key from your Matbia organization profile">
       <label>Environment</label>
       <select id="mb-env">
@@ -3701,8 +3701,9 @@ async function _loadMatbiaSettings() {
 }
 async function _saveMatbiaSettings() {
   try {
-    await API.put(`/api/orgs/${API.orgId}/matbia`, { api_token: val('mb-token'), org_user_handle: val('mb-handle'), environment: val('mb-env') });
+    const r = await API.put(`/api/orgs/${API.orgId}/matbia`, { api_token: val('mb-token'), org_user_handle: val('mb-handle'), environment: val('mb-env') });
     toast('Matbia settings saved ✓');
+    if (r?.warning) setTimeout(() => toast(r.warning, 'warn'), 400);
     _loadMatbiaSettings();
   } catch(e) { toast(e.message||'Could not save','err'); }
 }

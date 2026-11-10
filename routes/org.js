@@ -520,7 +520,11 @@ router.put('/matbia', requireOrgAdmin, (req, res) => {
   } else {
     run('INSERT INTO matbia_settings (id, org_id, api_token, org_user_handle, environment, is_active) VALUES (?, ?, ?, ?, ?, 1)', [uuidv4(), req.orgId, token, handle, env]);
   }
-  res.json({ success: true });
+  // Matbia accepts ANY handle and still answers "Success", so a typo here looks like a working
+  // charge that never lands. Warn (don't block — a handle may legitimately be another format).
+  const warning = require('../utils/matbia').HANDLE_RE.test(handle) ? null
+    : 'That handle does not look like the 32-character API key on your Matbia organization profile page. Matbia reports "Success" even for a wrong handle, so double-check it — charges to a wrong handle will not reach your organization.';
+  res.json({ success: true, warning });
 });
 
 // --- DAF ACCOUNTS ---
