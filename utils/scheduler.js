@@ -228,14 +228,17 @@ async function processScheduledCharge(charge) {
       txResult = await matbia.chargePaymentMethod(org.id, pm, {
         amount: charge.amount, externalId: donId, note: charge.notes || 'DRM Scheduled Charge'
       });
-      run(`INSERT INTO donations (id, org_id, donor_id, amount, method, payment_method_id, transaction_id, donation_date, status, is_autopay, gateway)
-           VALUES (?, ?, ?, ?, 'daf', ?, ?, CURRENT_TIMESTAMP, 'completed', ?, 'matbia')`,
-        [donId, charge.org_id, charge.donor_id, charge.amount, pm.id, txResult.refNum, charge.is_autopay ? 1 : 0]);
+      run(`INSERT INTO donations (id, org_id, donor_id, amount, method, payment_method_id, transaction_id, donation_date, status, is_autopay, gateway, notes)
+           VALUES (?, ?, ?, ?, 'daf', ?, ?, CURRENT_TIMESTAMP, 'completed', ?, 'matbia', ?)`,
+        [donId, charge.org_id, charge.donor_id, charge.amount, pm.id, txResult.refNum, charge.is_autopay ? 1 : 0,
+         txResult.sandbox ? matbia.SANDBOX_NOTE.trim() : null]);
 
       run('UPDATE scheduled_charges SET status = ?, processed_at = CURRENT_TIMESTAMP WHERE id = ?', ['completed', charge.id]);
 
       const donation = get('SELECT * FROM donations WHERE id = ?', [donId]);
-      await sendReceiptEmail(donor, donation, org);
+      // Sandbox charges move no real money — never email the donor a receipt for one.
+      if (txResult.sandbox) run('UPDATE donations SET receipt_skip_reason=? WHERE id=?', ['Matbia sandbox test — no real charge, receipt not sent', donId]);
+      else await sendReceiptEmail(donor, donation, org);
       await sendChargeNotificationToOwner(org, donor, donation, true, null);
 
     } else {
@@ -504,6 +507,7 @@ async function chargeRecurringSchedule(sched, templateId) {
 
   try {
     let txId = null;
+    let sandbox = false;
     const donId = uuidv4();
     const viaMatbia = matbia.isMatbiaCard(pm);
 
@@ -524,6 +528,7 @@ async function chargeRecurringSchedule(sched, templateId) {
         amount: sched.amount, externalId: donId, note: `Recurring ${sched.frequency} charge`
       });
       txId = result.refNum;
+      sandbox = !!result.sandbox;
     }
 
     // Fix #12: If this was a CC charge, txId MUST exist (Sola confirmed)
@@ -535,7 +540,7 @@ async function chargeRecurringSchedule(sched, templateId) {
     run(`INSERT INTO donations (id, org_id, donor_id, amount, method, payment_method_id, transaction_id, donation_date, status, is_recurring, notes, created_by, gateway)
          VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'completed', 1, ?, 'system', ?)`,
       [donId, sched.org_id, sched.donor_id, sched.amount, pm.type, pm.id, txId,
-       `Recurring ${sched.frequency} — ${sched.notes || ''}`, viaMatbia ? 'matbia' : null]);
+       (sandbox ? matbia.SANDBOX_NOTE : '') + `Recurring ${sched.frequency} — ${sched.notes || ''}`, viaMatbia ? 'matbia' : null]);
 
     // Calculate next run
     const nextRun = await calcNextRun(sched.next_run, sched.frequency, sched.hebrew_day);
@@ -550,7 +555,8 @@ async function chargeRecurringSchedule(sched, templateId) {
       [nextRun, newCount, (limitHit || endHit) ? 'completed' : 'active', sched.id]);
 
     const donation = get('SELECT * FROM donations WHERE id = ?', [donId]);
-    await sendReceiptEmail(donor, donation, org, templateId);
+    if (sandbox) run('UPDATE donations SET receipt_skip_reason=? WHERE id=?', ['Matbia sandbox test — no real charge, receipt not sent', donId]);
+    else await sendReceiptEmail(donor, donation, org, templateId);
     await sendChargeNotificationToOwner(org, donor, donation, true, null);
     return { ok: true, donationId: donId };
 

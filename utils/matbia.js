@@ -117,7 +117,7 @@ async function charge(orgId, { cardNum, exp, amount, externalId, note }) {
     allowDuplicates: false
   }));
   if (!r.referenceId) throw fail('MATBIA', 'Matbia did not return a transaction reference — check the Matbia dashboard before retrying');
-  return { refNum: r.referenceId, cardHolderName: r.cardHolderName || null };
+  return { refNum: r.referenceId, cardHolderName: r.cardHolderName || null, sandbox: cfg.env === 'sandbox' };
 }
 
 // Charges a stored DAF payment method (shared by the donor page, scheduled and recurring charges).
@@ -130,30 +130,32 @@ async function chargePaymentMethod(orgId, pm, { amount, externalId, note }) {
 async function voidPayment(orgId, referenceId) {
   const cfg = requireToken(orgId);
   assertSuccess(await post(cfg, '/v1/Matbia/VoidPayment', { referenceId }));
-  return { refNum: referenceId };
+  return { refNum: referenceId, sandbox: cfg.env === 'sandbox' };
 }
 
 async function refundPayment(orgId, referenceId) {
   const cfg = requireToken(orgId);
   assertSuccess(await post(cfg, '/v1/Matbia/RefundPayment', { referenceId }));
-  return { refNum: referenceId };
+  return { refNum: referenceId, sandbox: cfg.env === 'sandbox' };
 }
 
 // Void while the transaction is still pending (~24h), refund once it has batched.
 async function reverse(orgId, referenceId) {
   try {
-    await voidPayment(orgId, referenceId);
-    return { method: 'void', refNum: referenceId };
+    const v = await voidPayment(orgId, referenceId);
+    return { method: 'void', refNum: referenceId, sandbox: v.sandbox };
   } catch (err) {
     if (err.code === 'MATBIA' && /batched/i.test(err.message) && /refund/i.test(err.message)) {
-      await refundPayment(orgId, referenceId);
-      return { method: 'refund', refNum: referenceId };
+      const r = await refundPayment(orgId, referenceId);
+      return { method: 'refund', refNum: referenceId, sandbox: r.sandbox };
     }
     throw err;
   }
 }
 
+const SANDBOX_NOTE = '[SANDBOX TEST — no real money moved] ';
+
 module.exports = {
-  GUID_RE, MATBIA_BIN, getConfig, normalizeExp, parseDafCard, isMatbiaProvider, isMatbiaCard,
+  SANDBOX_NOTE, GUID_RE, MATBIA_BIN, getConfig, normalizeExp, parseDafCard, isMatbiaProvider, isMatbiaCard,
   preauthorize, charge, chargePaymentMethod, voidPayment, refundPayment, reverse
 };

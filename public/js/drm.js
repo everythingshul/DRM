@@ -91,6 +91,9 @@ const API = {
 const $ = (id) => document.getElementById(id);
 const val = (id) => $(id)?.value || '';
 
+// Matbia sandbox results move no real money — say so loudly instead of a plain success toast.
+const _sbxNote = ' — ⚠ SANDBOX TEST: no real money moved (Settings → Matbia → Environment)';
+function toastRes(msg, r) { toast(msg + (r?.sandbox ? _sbxNote : ''), r?.sandbox ? 'warn' : 'ok'); }
 function toast(msg, type='ok') {
   // Fully JS-driven — no CSS animation to conflict with
   const c = $('toast-wrap');
@@ -1368,7 +1371,7 @@ const DonorDetail = {
         donor_id: did, payment_method_id: pmId,
         amount: amt, notes: val('daf-notes')||null
       });
-      toast(`DAF grant processed · ${r.transaction_id}`);
+      toastRes(`DAF grant processed · ${r.transaction_id}`, r);
       Modal.close(); DonorDetail.open(did);
     } catch(e) {
       if (btn) { btn.textContent='Process Grant'; btn.disabled=false; }
@@ -1417,7 +1420,7 @@ const DonorDetail = {
         r = await API.post(`/api/orgs/${API.orgId}/payments/charge`,
           {donor_id:did, payment_method_id:pmId, amount:amt, notes});
       }
-      toast(`Charged ${fmt$(amt)} · ${r.transaction_id}`);
+      toastRes(`Charged ${fmt$(amt)} · ${r.transaction_id}`, r);
       Modal.close(); DonorDetail.open(did);
     } catch(e) {
       if (btn) { btn.textContent='Charge Now'; btn.disabled=false; }
@@ -1506,7 +1509,7 @@ const DonorDetail = {
           amount: amt, notes: val('md-notes')
         });
         if (label && r.donation?.id) await API.put(`/api/orgs/${API.orgId}/donations/${r.donation.id}/label`, {label}).catch(()=>{});
-        toast(`DAF grant submitted · Trans: ${r.transaction_id}`); Modal.close(); this.open(did);
+        toastRes(`DAF grant submitted · Trans: ${r.transaction_id}`, r); Modal.close(); this.open(did);
       } catch(e) { toast(e.message, 'err'); }
       return;
     }
@@ -1573,7 +1576,7 @@ const DonorDetail = {
         notes: notes || null
       });
       const label = r.method === 'void' ? 'Voided' : 'Refunded';
-      toast(`${label} ${fmt$(amt)} ✓`);
+      toastRes(`${label} ${fmt$(amt)} ✓`, r);
       Modal.close();
       DonorDetail.open(did);
       // Also refresh donations page if it's currently visible
@@ -3680,7 +3683,9 @@ async function _loadMatbiaSettings() {
         Get your API token from Matbia (email the contact listed at developers.matbia.org); your organization handle is the API key on your Matbia organization profile page.
       </p>
       ${s.configured
-        ? `<div class="alert alert-ok" style="font-size:12px">✓ Connected — ${s.environment === 'sandbox' ? '<strong>SANDBOX</strong> (test mode, no real money)' : 'production'}${s.source === 'env' ? ' · using the server environment variables' : ''}</div>`
+        ? (s.environment === 'sandbox'
+            ? `<div class="alert alert-warn" style="font-size:13px"><strong>⚠ SANDBOX / TEST MODE.</strong> Charges and voids here report success but <strong>no real money moves</strong> and donors get no receipts. Set Environment to <strong>Production</strong> (with your production token) to charge for real.${s.source === 'env' ? ' (Set by the MATBIA_ENV server variable.)' : ''}</div>`
+            : `<div class="alert alert-ok" style="font-size:12px">✓ Connected — production (real charges)${s.source === 'env' ? ' · using the server environment variables' : ''}</div>`)
         : `<div class="alert alert-warn" style="font-size:12px">Not configured — Matbia cards can't be charged yet.</div>`}
       <label>API Token ${s.token_hint ? `<span style="font-size:11px;color:var(--gray-5)">(saved: ${s.token_hint} — leave blank to keep)</span>` : ''}</label>
       <input id="mb-token" type="password" autocomplete="new-password" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
@@ -4146,7 +4151,7 @@ async function _saveUnlinkedDonation() {
         r = await API.post(`/api/orgs/${API.orgId}/payments/charge`, {donor_id:_ulSelectedDonorId, payment_method_id:pmId, amount:amt, notes:val('ul-extra-notes')||null});
       }
       if (label && r.donation?.id) await API.put(`/api/orgs/${API.orgId}/donations/${r.donation.id}/label`, {label}).catch(()=>{});
-      toast(`Charged ${fmt$(amt)} · ${r.transaction_id} ✓`);
+      toastRes(`Charged ${fmt$(amt)} · ${r.transaction_id} ✓`, r);
       Modal.close(); renderDonations($('page-donations'));
     } catch(e) {
       if (btn) { btn.textContent='Record'; btn.disabled=false; }

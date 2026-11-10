@@ -11,6 +11,11 @@ const tzUtil = require('../utils/tz');
 
 router.use(requireAuth, requireOrg);
 
+// A Matbia SANDBOX charge moves no real money, so never email the donor a receipt for it.
+function skipSandboxReceipt(donId) {
+  run('UPDATE donations SET receipt_skip_reason=? WHERE id=?', ['Matbia sandbox test — no real charge, receipt not sent', donId]);
+}
+
 // ── Save CC card → get xToken ─────────────────────────────────────────────────
 router.post('/save-card', async (req, res) => {
   try {
@@ -140,14 +145,16 @@ router.post('/charge-daf', async (req, res) => {
           note: notes || `DAF Grant – ${pm.daf_name || 'DAF'}`
         });
 
+    const sandbox = !!result.sandbox;
     run(`INSERT INTO donations (id,org_id,donor_id,amount,method,payment_method_id,transaction_id,donation_date,status,notes,is_manual,created_by,gateway)
          VALUES (?,?,?,?,'daf',?,?,CURRENT_TIMESTAMP,'completed',?,1,?,?)`,
       [donId, req.orgId, donor_id, amount, pm.id, result.refNum,
-       `${pm.daf_name||'DAF'} grant${notes?' — '+notes:''}`, req.user.id, viaMatbia ? 'matbia' : null]);
+       (sandbox ? matbia.SANDBOX_NOTE : '') + `${pm.daf_name||'DAF'} grant${notes?' — '+notes:''}`, req.user.id, viaMatbia ? 'matbia' : null]);
 
     const donation = get('SELECT * FROM donations WHERE id=?', [donId]);
-    await sendReceiptEmail(donor, donation, org).catch(e => console.error('[receipt] Failed:', e.message));
-    res.json({ success: true, donation: get('SELECT * FROM donations WHERE id=?', [donId]), transaction_id: result.refNum });
+    if (sandbox) skipSandboxReceipt(donId);
+    else await sendReceiptEmail(donor, donation, org).catch(e => console.error('[receipt] Failed:', e.message));
+    res.json({ success: true, sandbox, donation: get('SELECT * FROM donations WHERE id=?', [donId]), transaction_id: result.refNum });
   } catch(e) {
     console.error('charge-daf:', e.message);
     res.status(500).json({ error: e.message });
@@ -177,14 +184,16 @@ router.post('/daf-grant', async (req, res) => {
           note: notes || `DAF Grant – ${daf_provider || 'DAF'}`
         });
 
+    const sandbox = !!result.sandbox;
     run(`INSERT INTO donations (id,org_id,donor_id,amount,method,transaction_id,donation_date,status,notes,is_manual,created_by,gateway)
          VALUES (?,?,?,?,'daf',?,CURRENT_TIMESTAMP,'completed',?,1,?,?)`,
       [donId, req.orgId, donor_id, amount, result.refNum,
-       `${daf_provider||'DAF'} grant${notes?' — '+notes:''}`, req.user.id, viaMatbia ? 'matbia' : null]);
+       (sandbox ? matbia.SANDBOX_NOTE : '') + `${daf_provider||'DAF'} grant${notes?' — '+notes:''}`, req.user.id, viaMatbia ? 'matbia' : null]);
 
     const donation = get('SELECT * FROM donations WHERE id=?', [donId]);
-    await sendReceiptEmail(donor, donation, org).catch(e => console.error('[receipt] Failed:', e.message));
-    res.json({ success: true, donation, transaction_id: result.refNum });
+    if (sandbox) skipSandboxReceipt(donId);
+    else await sendReceiptEmail(donor, donation, org).catch(e => console.error('[receipt] Failed:', e.message));
+    res.json({ success: true, sandbox, donation, transaction_id: result.refNum });
   } catch(e) {
     console.error('daf-grant:', e.message);
     res.status(500).json({ error: e.message });
@@ -210,6 +219,7 @@ router.post('/refund', async (req, res) => {
 
     let solaRefNum = null;
     let method = 'manual';
+    let sandbox = false;
 
     const isMatbiaTx = don.gateway === 'matbia' && !!don.transaction_id;
     const isRealSolaTx = !isMatbiaTx && (don.method === 'credit_card' || don.method === 'daf')
@@ -224,6 +234,7 @@ router.post('/refund', async (req, res) => {
       const rv = await matbia.reverse(req.orgId, don.transaction_id);
       solaRefNum = rv.refNum;
       method = rv.method;
+      sandbox = !!rv.sandbox;
     } else if (isRealSolaTx) {
       try {
         console.log(`[refund] Attempting void txId=${don.transaction_id}`);
@@ -277,7 +288,7 @@ router.post('/refund', async (req, res) => {
       [newRefunded, refNote, newStatus, donation_id]);
     console.log(`[refund] DB write done for donation ${donation_id}`);
 
-    res.json({ success: true, newStatus, solaRefNum, method, refunded: newRefunded });
+    res.json({ success: true, newStatus, solaRefNum, method, refunded: newRefunded, sandbox });
   } catch(e) {
     console.error('refund:', e.message);
     res.status(500).json({ error: e.message });
