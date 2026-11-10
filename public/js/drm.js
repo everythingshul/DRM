@@ -91,6 +91,9 @@ const API = {
 const $ = (id) => document.getElementById(id);
 const val = (id) => $(id)?.value || '';
 
+// Matbia sandbox results move no real money — say so loudly instead of a plain success toast.
+const _sbxNote = ' — ⚠ SANDBOX TEST: no real money moved (Settings → Matbia → Environment)';
+function toastRes(msg, r) { toast(msg + (r?.sandbox ? _sbxNote : ''), r?.sandbox ? 'warn' : 'ok'); }
 function toast(msg, type='ok') {
   // Fully JS-driven — no CSS animation to conflict with
   const c = $('toast-wrap');
@@ -1276,7 +1279,7 @@ const DonorDetail = {
         <div class="bg" style="align-items:center"><select id="pm-brand" style="flex:1"><option value="">— Auto —</option><option>Visa</option><option>Mastercard</option><option>Amex</option><option>Discover</option></select><span id="pm-brand-icon" style="font-size:12px;font-weight:700;padding:0 8px;color:var(--blue);min-width:36px"></span></div>
       </div>
       <div id="daf-f" style="display:none">
-        <div class="alert alert-info" style="font-size:12px;margin-top:8px">Matbia cards are charged directly through Matbia and verified when saved. Other DAF providers (OJC, Pledger, DonorsFund, iMasser) are processed via Sola.</div>
+        <div class="alert alert-info" style="font-size:12px;margin-top:8px">Matbia and Pledger cards are charged directly through their own systems and checked when saved. Other DAF providers (OJC, DonorsFund, iMasser) are processed via Sola.</div>
         <label>DAF Provider</label>
         <select id="pm-dafprov" onchange="DonorDetail._dafProvChange()"><option value="Matbia">Matbia</option><option value="OJC">OJC</option><option value="Pledger">Pledger</option><option value="DonorsFund">DonorsFund</option><option value="iMasser">iMasser</option><option value="Other">Other</option></select>
         <label>DAF Card Number *</label>
@@ -1293,10 +1296,10 @@ const DonorDetail = {
       </div>`, { sm: true });
   },
   _dafProvChange() {
-    const matbia = val('pm-dafprov') === 'Matbia';
+    const direct = ['Matbia', 'Pledger'].includes(val('pm-dafprov'));   // charged directly → needs the real expiry
     const exp = $('pm-dafexp'), lbl = $('pm-dafexp-lbl');
-    if (lbl) lbl.textContent = matbia ? 'Expiry (MMYY) — the date printed on the card *' : 'Expiry (MMYY, or leave 1299 for no expiry)';
-    if (exp && (exp.value === '' || exp.value === '1299')) exp.value = matbia ? '' : '1299';
+    if (lbl) lbl.textContent = direct ? 'Expiry (MMYY) — the date printed on the card *' : 'Expiry (MMYY, or leave 1299 for no expiry)';
+    if (exp && (exp.value === '' || exp.value === '1299')) exp.value = direct ? '' : '1299';
   },
   _pmTypeChange() {
     const t = val('pm-type');
@@ -1321,7 +1324,7 @@ const DonorDetail = {
         if (!dafCard) { toast('DAF card number required','err'); return; }
         if (!dafExp || dafExp.length < 4) { toast('DAF card expiry required (MMYY)','err'); return; }
         // Store DAF: other_description = "cardNum|exp" (pipe-separated)
-        await API.post(`/api/orgs/${API.orgId}/donors/${did}/payment-methods`, {
+        const saved = await API.post(`/api/orgs/${API.orgId}/donors/${did}/payment-methods`, {
           type:'daf',
           label: lbl || val('pm-dafprov') || 'DAF',
           daf_name: val('pm-dafprov') || 'DAF',
@@ -1329,6 +1332,7 @@ const DonorDetail = {
           is_default: def
         });
         toast('DAF method added');
+        if (saved?.warning) setTimeout(() => toast(saved.warning, 'warn'), 500);
       } else {
         await API.post(`/api/orgs/${API.orgId}/donors/${did}/payment-methods`, {type, label:lbl||null, other_description:val('pm-oth')||null, is_default:def});
         toast('Added');
@@ -1345,12 +1349,13 @@ const DonorDetail = {
     Modal.open('Process DAF Grant', `
       <div class="alert alert-info" style="font-size:13px;margin-bottom:12px">
         <strong>${pm.daf_name||'DAF'}</strong> ••${cardNum.slice(-4)}<br>
-        ${/matbia/i.test(pm.daf_name||'') || cardNum.startsWith('862824') ? 'Charged directly through Matbia.' : 'Processed via Sola, which routes to the correct DAF provider.'}
+        ${/matbia/i.test(pm.daf_name||'') || (!/pledger/i.test(pm.daf_name||'') && cardNum.startsWith('862824')) ? 'Charged directly through Matbia.' : (/pledger/i.test(pm.daf_name||'') || cardNum.startsWith('659997') ? 'Charged directly through Pledger.' : 'Processed via Sola, which routes to the correct DAF provider.')}
       </div>
       <label>Amount ($) *</label>
       <input type="number" id="daf-amt" step="0.01" min="0.01" placeholder="0.00">
       <label>Notes (optional)</label>
       <input id="daf-notes" autocomplete="off">
+      ${/pledger/i.test(pm.daf_name||'') || cardNum.startsWith('659997') ? '<label>CVV <span style="font-size:11px;color:var(--gray-5)">(only if Pledger asks for it — never saved)</span></label><input id="daf-cvv" maxlength="4" autocomplete="off" inputmode="numeric">' : ''}
       <div class="bg mt">
         <button class="btn btn-primary" id="daf-charge-btn" onclick="DonorDetail._doChargeDaf('${did}','${pmId}')">Process Grant</button>
         <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
@@ -1366,9 +1371,9 @@ const DonorDetail = {
     try {
       const r = await API.post(`/api/orgs/${API.orgId}/payments/charge-daf`, {
         donor_id: did, payment_method_id: pmId,
-        amount: amt, notes: val('daf-notes')||null
+        amount: amt, notes: val('daf-notes')||null, cvv: val('daf-cvv')||undefined
       });
-      toast(`DAF grant processed · ${r.transaction_id}`);
+      toastRes(`DAF grant processed · ${r.transaction_id}`, r);
       Modal.close(); DonorDetail.open(did);
     } catch(e) {
       if (btn) { btn.textContent='Process Grant'; btn.disabled=false; }
@@ -1417,7 +1422,7 @@ const DonorDetail = {
         r = await API.post(`/api/orgs/${API.orgId}/payments/charge`,
           {donor_id:did, payment_method_id:pmId, amount:amt, notes});
       }
-      toast(`Charged ${fmt$(amt)} · ${r.transaction_id}`);
+      toastRes(`Charged ${fmt$(amt)} · ${r.transaction_id}`, r);
       Modal.close(); DonorDetail.open(did);
     } catch(e) {
       if (btn) { btn.textContent='Charge Now'; btn.disabled=false; }
@@ -1457,10 +1462,12 @@ const DonorDetail = {
       <div id="daf-row" style="display:none">
         <label>DAF Provider</label>
         <select id="md-dafprov"><option value="Matbia">Matbia</option><option value="OJC">OJC</option><option value="Pledger">Pledger</option><option value="DonorsFund">DonorsFund</option><option value="iMasser">iMasser</option><option value="Other">Other</option></select>
-        <label>DAF Card Number (optional — charges the card now: Matbia directly, other providers via Sola)</label>
+        <label>DAF Card Number (optional — charges the card now: Matbia and Pledger directly, other providers via Sola)</label>
         <input id="md-dafcard" placeholder="Enter card number to charge it, or leave blank to record manually" autocomplete="off">
-        <label>Card Expiry (MMYY — required for Matbia; the date printed on the card)</label>
+        <label>Card Expiry (MMYY — required for Matbia and Pledger; the date printed on the card)</label>
         <input id="md-dafexp" placeholder="MMYY" maxlength="4">
+        <label>CVV <span style="font-size:11px;color:var(--gray-5)">(Pledger only, if asked — never saved)</span></label>
+        <input id="md-dafcvv" maxlength="4" autocomplete="off" inputmode="numeric">
       </div>
       <div class="r2">
         <div><label>Date *</label><input type="datetime-local" id="md-date" value="${now}"></div>
@@ -1502,11 +1509,11 @@ const DonorDetail = {
     if (method === 'daf' && val('md-dafcard').trim()) {
       try {
         const r = await API.post(`/api/orgs/${API.orgId}/payments/daf-grant`, {
-          donor_id: did, daf_card_num: val('md-dafcard'), daf_exp: val('md-dafexp'), daf_provider: val('md-dafprov'),
+          donor_id: did, daf_card_num: val('md-dafcard'), daf_exp: val('md-dafexp'), daf_cvv: val('md-dafcvv') || undefined, daf_provider: val('md-dafprov'),
           amount: amt, notes: val('md-notes')
         });
         if (label && r.donation?.id) await API.put(`/api/orgs/${API.orgId}/donations/${r.donation.id}/label`, {label}).catch(()=>{});
-        toast(`DAF grant submitted · Trans: ${r.transaction_id}`); Modal.close(); this.open(did);
+        toastRes(`DAF grant submitted · Trans: ${r.transaction_id}`, r); Modal.close(); this.open(did);
       } catch(e) { toast(e.message, 'err'); }
       return;
     }
@@ -1544,7 +1551,7 @@ const DonorDetail = {
       <input type="number" id="rf-amt" step="0.01" min="0.01" max="${parseFloat(amt).toFixed(2)}" value="${parseFloat(amt).toFixed(2)}">
       <label>Reason (optional)</label>
       <input id="rf-rsn" autocomplete="off" placeholder="Reason for refund">
-      ${txId && !txId.startsWith('ES') ? `<div class="alert alert-info" style="margin-top:10px;font-size:12px">Gateway Trans ID: <strong>${txId}</strong> — will attempt gateway refund/void. (Matbia donations can only be reversed in full.)</div>` : '<div class="alert alert-warn" style="margin-top:10px;font-size:12px">Manual payment — will mark as refunded in system only.</div>'}
+      ${txId && !txId.startsWith('ES') ? `<div class="alert alert-info" style="margin-top:10px;font-size:12px">Gateway Trans ID: <strong>${txId}</strong> — will attempt gateway refund/void. (Matbia and Pledger donations can only be reversed in full.)</div>` : '<div class="alert alert-warn" style="margin-top:10px;font-size:12px">Manual payment — will mark as refunded in system only.</div>'}
       <div id="rf-err" style="display:none" class="alert alert-err mt"></div>
       <div class="bg mt">
         <button class="btn btn-red" id="rf-btn" onclick="DonorDetail._doRefund('${did}','${donId}','${txId||''}')">Process Refund</button>
@@ -1573,7 +1580,7 @@ const DonorDetail = {
         notes: notes || null
       });
       const label = r.method === 'void' ? 'Voided' : 'Refunded';
-      toast(`${label} ${fmt$(amt)} ✓`);
+      toastRes(`${label} ${fmt$(amt)} ✓`, r);
       Modal.close();
       DonorDetail.open(did);
       // Also refresh donations page if it's currently visible
@@ -3385,7 +3392,7 @@ async function renderSettings(el) {
     
     el.innerHTML = `
       <div class="ph"><div class="ph-title">Settings</div></div>
-      <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-labels">Labels</div><div class="tab" data-tc="st-tz">Timezone</div><div class="tab" data-tc="st-hebrew">Hebrew Calendar</div><div class="tab" data-tc="st-matbia">Matbia</div><div class="tab" data-tc="st-log">Login Log</div><div class="tab" data-tc="st-backup">Backup</div><div class="tab" data-tc="st-imports">Import History</div>${DRM.user?.is_super_admin?'<div class="tab" data-tc="st-all-orgs">All Orgs</div>':''}</div>
+      <div class="tabs"><div class="tab on" data-tc="st-users">Users</div><div class="tab" data-tc="st-nh">Neighborhoods</div><div class="tab" data-tc="st-labels">Labels</div><div class="tab" data-tc="st-tz">Timezone</div><div class="tab" data-tc="st-hebrew">Hebrew Calendar</div><div class="tab" data-tc="st-matbia">Matbia</div><div class="tab" data-tc="st-pledger">Pledger</div><div class="tab" data-tc="st-log">Login Log</div><div class="tab" data-tc="st-backup">Backup</div><div class="tab" data-tc="st-imports">Import History</div>${DRM.user?.is_super_admin?'<div class="tab" data-tc="st-all-orgs">All Orgs</div>':''}</div>
       <div id="st-users" class="tc on">
         <div class="card" style="margin-bottom:12px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -3452,6 +3459,9 @@ async function renderSettings(el) {
       <div id="st-matbia" class="tc">
         <div class="card" id="st-matbia-card"><div class="spinner"></div></div>
       </div>
+      <div id="st-pledger" class="tc">
+        <div class="card" id="st-pledger-card"><div class="spinner"></div></div>
+      </div>
       <div id="st-backup" class="tc">
         <div class="card" id="st-backup-card"><div class="spinner"></div></div>
       </div>
@@ -3470,6 +3480,7 @@ async function renderSettings(el) {
     tabsInit('#page-settings');
     document.querySelector('#page-settings .tab[data-tc="st-hebrew"]')?.addEventListener('click', _loadRoshChodesh);
     document.querySelector('#page-settings .tab[data-tc="st-matbia"]')?.addEventListener('click', _loadMatbiaSettings);
+    document.querySelector('#page-settings .tab[data-tc="st-pledger"]')?.addEventListener('click', _loadPledgerSettings);
     document.querySelector('#page-settings .tab[data-tc="st-backup"]')?.addEventListener('click', _loadBackupStatus);
     document.querySelector('#page-settings .tab[data-tc="st-imports"]')?.addEventListener('click', _loadImportHistory);
     document.querySelector('#page-settings .tab[data-tc="st-all-orgs"]')?.addEventListener('click', _loadAllOrgs);
@@ -3680,11 +3691,13 @@ async function _loadMatbiaSettings() {
         Get your API token from Matbia (email the contact listed at developers.matbia.org); your organization handle is the API key on your Matbia organization profile page.
       </p>
       ${s.configured
-        ? `<div class="alert alert-ok" style="font-size:12px">✓ Connected — ${s.environment === 'sandbox' ? '<strong>SANDBOX</strong> (test mode, no real money)' : 'production'}${s.source === 'env' ? ' · using the server environment variables' : ''}</div>`
+        ? (s.environment === 'sandbox'
+            ? `<div class="alert alert-warn" style="font-size:13px"><strong>⚠ SANDBOX / TEST MODE.</strong> Charges and voids here report success but <strong>no real money moves</strong> and donors get no receipts. Set Environment to <strong>Production</strong> (with your production token) to charge for real.${s.source === 'env' ? ' (Set by the MATBIA_ENV server variable.)' : ''}</div>`
+            : `<div class="alert alert-ok" style="font-size:12px">✓ Connected — production (real charges)${s.source === 'env' ? ' · using the server environment variables' : ''}</div>`)
         : `<div class="alert alert-warn" style="font-size:12px">Not configured — Matbia cards can't be charged yet.</div>`}
       <label>API Token ${s.token_hint ? `<span style="font-size:11px;color:var(--gray-5)">(saved: ${s.token_hint} — leave blank to keep)</span>` : ''}</label>
       <input id="mb-token" type="password" autocomplete="new-password" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
-      <label>Organization Handle</label>
+      <label>Organization Handle <span style="font-size:11px;color:var(--gray-5)">(Matbia does not verify this — a wrong value still reports "Success" but never reaches your organization)</span></label>
       <input id="mb-handle" autocomplete="off" value="${(s.org_user_handle||'').replace(/"/g,'&quot;')}" placeholder="API key from your Matbia organization profile">
       <label>Environment</label>
       <select id="mb-env">
@@ -3696,9 +3709,46 @@ async function _loadMatbiaSettings() {
 }
 async function _saveMatbiaSettings() {
   try {
-    await API.put(`/api/orgs/${API.orgId}/matbia`, { api_token: val('mb-token'), org_user_handle: val('mb-handle'), environment: val('mb-env') });
+    const r = await API.put(`/api/orgs/${API.orgId}/matbia`, { api_token: val('mb-token'), org_user_handle: val('mb-handle'), environment: val('mb-env') });
     toast('Matbia settings saved ✓');
+    if (r?.warning) setTimeout(() => toast(r.warning, 'warn'), 400);
     _loadMatbiaSettings();
+  } catch(e) { toast(e.message||'Could not save','err'); }
+}
+
+async function _loadPledgerSettings() {
+  const c = $('st-pledger-card'); if (!c) return;
+  c.innerHTML = '<div class="spinner"></div>';
+  const q = v => String(v || '').replace(/"/g, '&quot;');
+  try {
+    const s = await API.get(`/api/orgs/${API.orgId}/pledger`);
+    c.innerHTML = `
+      <div class="card-title">Pledger (DAF cards, charged directly)</div>
+      <p style="font-size:12px;color:var(--gray-5);margin-bottom:12px">
+        Donors' Pledger cards are charged straight through Pledger — not through Sola. Enter the details Pledger gave your organization (token, Tax ID, charity name and charity ID).
+      </p>
+      ${s.configured
+        ? `<div class="alert alert-ok" style="font-size:12px">✓ Configured${s.source === 'env' ? ' · using the server environment variables' : ''}</div>`
+        : `<div class="alert alert-warn" style="font-size:12px">Not configured — Pledger cards can't be charged yet.</div>`}
+      <label>API Token ${s.token_hint ? `<span style="font-size:11px;color:var(--gray-5)">(saved: ${s.token_hint} — leave blank to keep)</span>` : ''}</label>
+      <input id="pl-token" type="password" autocomplete="new-password" placeholder="Bearer token from Pledger">
+      <div class="r2">
+        <div><label>Tax ID</label><input id="pl-tax" autocomplete="off" value="${q(s.tax_id)}" placeholder="11-3456789"></div>
+        <div><label>Charity Name</label><input id="pl-name" autocomplete="off" value="${q(s.charity_name)}" placeholder="As registered with Pledger"></div>
+      </div>
+      <label>Charity ID</label>
+      <input id="pl-cid" autocomplete="off" value="${q(s.charity_id)}" placeholder="CE21841F-962C-46EA-BF37-D9F0FB21CA35">
+      <label>Campaign reference <span style="font-size:11px;color:var(--gray-5)">(optional — sent with every charge, e.g. "2026 Campaign")</span></label>
+      <input id="pl-camp" autocomplete="off" value="${q(s.campaign_ref)}">
+      <div class="bg mt"><button class="btn btn-primary" onclick="_savePledgerSettings()">Save</button></div>`;
+  } catch(e) { c.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+async function _savePledgerSettings() {
+  try {
+    const r = await API.put(`/api/orgs/${API.orgId}/pledger`, { api_token: val('pl-token'), tax_id: val('pl-tax'), charity_name: val('pl-name'), charity_id: val('pl-cid'), campaign_ref: val('pl-camp') });
+    toast('Pledger settings saved ✓');
+    if (r?.warning) setTimeout(() => toast(r.warning, 'warn'), 400);
+    _loadPledgerSettings();
   } catch(e) { toast(e.message||'Could not save','err'); }
 }
 
@@ -4146,7 +4196,7 @@ async function _saveUnlinkedDonation() {
         r = await API.post(`/api/orgs/${API.orgId}/payments/charge`, {donor_id:_ulSelectedDonorId, payment_method_id:pmId, amount:amt, notes:val('ul-extra-notes')||null});
       }
       if (label && r.donation?.id) await API.put(`/api/orgs/${API.orgId}/donations/${r.donation.id}/label`, {label}).catch(()=>{});
-      toast(`Charged ${fmt$(amt)} · ${r.transaction_id} ✓`);
+      toastRes(`Charged ${fmt$(amt)} · ${r.transaction_id} ✓`, r);
       Modal.close(); renderDonations($('page-donations'));
     } catch(e) {
       if (btn) { btn.textContent='Record'; btn.disabled=false; }

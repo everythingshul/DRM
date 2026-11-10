@@ -7,6 +7,8 @@ const { get } = require('../db/schema');
 
 const HOSTS = { production: 'api.matbia.org', sandbox: 'sandbox.api.matbia.org' };
 const MATBIA_BIN = '862824';
+// Matbia's own example handle is 32 hex characters; anything else is probably a typo or the wrong field.
+const HANDLE_RE = /^([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function fail(code, message) { const e = new Error(message); e.code = code; return e; }
@@ -41,6 +43,13 @@ function post(cfg, path, payload) {
       res.on('end', () => {
         let parsed;
         try { parsed = JSON.parse(data); } catch { parsed = null; }
+        // One log line per Matbia call (no token, no full card number) so Render's logs show
+        // exactly what Matbia said — the reference id is what Matbia support needs.
+        const safe = { ...payload };
+        if (safe.cardNum) safe.cardNum = '…' + String(safe.cardNum).slice(-4);
+        if (safe.orgUserHandle) safe.orgUserHandle = String(safe.orgUserHandle).slice(0, 4) + '…' + String(safe.orgUserHandle).slice(-4);
+        const o = parsed && typeof parsed === 'object' ? parsed : {};
+        console.log(`[matbia] ${cfg.env} ${path} http=${res.statusCode} status=${o.status || '-'} ref=${o.referenceId || '-'} error=${o.error || (typeof parsed === 'string' ? parsed : '-')} req=${JSON.stringify(safe)}`);
         // Declines and card errors arrive as HTTP 406 *with* a JSON body, and some failures
         // (e.g. a malformed token) arrive as a bare JSON string — so always read the body.
         if (parsed && typeof parsed === 'object') return resolve({ http: res.statusCode, ...parsed });
@@ -117,7 +126,7 @@ async function charge(orgId, { cardNum, exp, amount, externalId, note }) {
     allowDuplicates: false
   }));
   if (!r.referenceId) throw fail('MATBIA', 'Matbia did not return a transaction reference — check the Matbia dashboard before retrying');
-  return { refNum: r.referenceId, cardHolderName: r.cardHolderName || null };
+  return { refNum: r.referenceId, cardHolderName: r.cardHolderName || null, sandbox: cfg.env === 'sandbox' };
 }
 
 // Charges a stored DAF payment method (shared by the donor page, scheduled and recurring charges).
@@ -130,30 +139,32 @@ async function chargePaymentMethod(orgId, pm, { amount, externalId, note }) {
 async function voidPayment(orgId, referenceId) {
   const cfg = requireToken(orgId);
   assertSuccess(await post(cfg, '/v1/Matbia/VoidPayment', { referenceId }));
-  return { refNum: referenceId };
+  return { refNum: referenceId, sandbox: cfg.env === 'sandbox' };
 }
 
 async function refundPayment(orgId, referenceId) {
   const cfg = requireToken(orgId);
   assertSuccess(await post(cfg, '/v1/Matbia/RefundPayment', { referenceId }));
-  return { refNum: referenceId };
+  return { refNum: referenceId, sandbox: cfg.env === 'sandbox' };
 }
 
 // Void while the transaction is still pending (~24h), refund once it has batched.
 async function reverse(orgId, referenceId) {
   try {
-    await voidPayment(orgId, referenceId);
-    return { method: 'void', refNum: referenceId };
+    const v = await voidPayment(orgId, referenceId);
+    return { method: 'void', refNum: referenceId, sandbox: v.sandbox };
   } catch (err) {
     if (err.code === 'MATBIA' && /batched/i.test(err.message) && /refund/i.test(err.message)) {
-      await refundPayment(orgId, referenceId);
-      return { method: 'refund', refNum: referenceId };
+      const r = await refundPayment(orgId, referenceId);
+      return { method: 'refund', refNum: referenceId, sandbox: r.sandbox };
     }
     throw err;
   }
 }
 
+const SANDBOX_NOTE = '[SANDBOX TEST — no real money moved] ';
+
 module.exports = {
-  GUID_RE, MATBIA_BIN, getConfig, normalizeExp, parseDafCard, isMatbiaProvider, isMatbiaCard,
+  SANDBOX_NOTE, HANDLE_RE, GUID_RE, MATBIA_BIN, getConfig, normalizeExp, parseDafCard, isMatbiaProvider, isMatbiaCard,
   preauthorize, charge, chargePaymentMethod, voidPayment, refundPayment, reverse
 };

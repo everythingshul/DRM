@@ -520,7 +520,40 @@ router.put('/matbia', requireOrgAdmin, (req, res) => {
   } else {
     run('INSERT INTO matbia_settings (id, org_id, api_token, org_user_handle, environment, is_active) VALUES (?, ?, ?, ?, ?, 1)', [uuidv4(), req.orgId, token, handle, env]);
   }
-  res.json({ success: true });
+  // Matbia accepts ANY handle and still answers "Success", so a typo here looks like a working
+  // charge that never lands. Warn (don't block — a handle may legitimately be another format).
+  const warning = require('../utils/matbia').HANDLE_RE.test(handle) ? null
+    : 'That handle does not look like the 32-character API key on your Matbia organization profile page. Matbia reports "Success" even for a wrong handle, so double-check it — charges to a wrong handle will not reach your organization.';
+  res.json({ success: true, warning });
+});
+
+// --- PLEDGER (direct DAF charging) ---
+router.get('/pledger', requireOrgAdmin, (req, res) => {
+  const c = require('../utils/pledger').getConfig(req.orgId);
+  res.json({
+    configured: !!(c.token && c.taxId && c.charityName && c.charityId),
+    source: c.source,
+    tax_id: c.taxId, charity_name: c.charityName, charity_id: c.charityId, campaign_ref: c.campaignRef,
+    token_hint: c.token ? '••••' + c.token.slice(-4) : ''     // never return the token itself
+  });
+});
+
+router.put('/pledger', requireOrgAdmin, (req, res) => {
+  const { GUID_RE } = require('../utils/pledger');
+  const { api_token, tax_id, charity_name, charity_id, campaign_ref } = req.body;
+  const existing = get('SELECT id, api_token FROM pledger_settings WHERE org_id = ?', [req.orgId]);
+  const token = (api_token || '').trim() || existing?.api_token || '';   // blank = keep the saved token
+  if (!token) return res.status(400).json({ error: 'Pledger API token is required' });
+  const taxId = (tax_id || '').trim(), name = (charity_name || '').trim(), cid = (charity_id || '').trim();
+  if (!taxId || !name || !cid) return res.status(400).json({ error: 'Tax ID, charity name and charity ID are all required' });
+  const campaign = (campaign_ref || '').trim();
+  if (existing) {
+    run('UPDATE pledger_settings SET api_token=?, tax_id=?, charity_name=?, charity_id=?, campaign_ref=?, is_active=1, updated_at=CURRENT_TIMESTAMP WHERE org_id=?', [token, taxId, name, cid, campaign, req.orgId]);
+  } else {
+    run('INSERT INTO pledger_settings (id, org_id, api_token, tax_id, charity_name, charity_id, campaign_ref, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, 1)', [uuidv4(), req.orgId, token, taxId, name, cid, campaign]);
+  }
+  const warning = GUID_RE.test(cid) ? null : 'That charity ID does not look like the GUID Pledger gave you (e.g. CE21841F-962C-46EA-BF37-D9F0FB21CA35). Double-check it.';
+  res.json({ success: true, warning });
 });
 
 // --- DAF ACCOUNTS ---
