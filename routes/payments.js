@@ -1,4 +1,4 @@
-// routes/payments.js — Sola CC processing; Matbia DAF direct; other DAF providers via Sola
+// routes/payments.js — Sola CC processing; Matbia and Pledger DAF direct; other DAF providers via Sola
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const { v4: uuidv4 } = require('uuid');
@@ -6,6 +6,7 @@ const { get, run, all } = require('../db/schema');
 const { requireAuth, requireOrg, requireOrgAdmin } = require('../middleware/auth');
 const { ccSave, ccSale, ccRefund, ccVoid, dafGrant } = require('../utils/sola');
 const matbia = require('../utils/matbia');
+const daf = require('../utils/daf');
 const { sendReceiptEmail } = require('../utils/scheduler');
 const tzUtil = require('../utils/tz');
 
@@ -134,9 +135,9 @@ router.post('/charge-daf', async (req, res) => {
 
     const org = get('SELECT * FROM organizations WHERE id=?', [req.orgId]);
     const donId = uuidv4();
-    const viaMatbia = matbia.isMatbiaCard(pm);
-    const result = viaMatbia
-      ? await matbia.chargePaymentMethod(req.orgId, pm, { amount, externalId: donId, note: notes || 'DRM Donation' })
+    const gw = daf.gatewayForCard(pm);          // 'matbia' | 'pledger' | null (= Sola)
+    const result = gw
+      ? await daf.chargePaymentMethod(gw, req.orgId, pm, { amount, externalId: donId, note: notes || 'DRM Donation', cvv: req.body.cvv })
       : await dafGrant(req.orgId, {
           cardNum: storedCardNum,
           exp: storedExp || '1299',
@@ -146,10 +147,10 @@ router.post('/charge-daf', async (req, res) => {
         });
 
     const sandbox = !!result.sandbox;
-    run(`INSERT INTO donations (id,org_id,donor_id,amount,method,payment_method_id,transaction_id,donation_date,status,notes,is_manual,created_by,gateway)
-         VALUES (?,?,?,?,'daf',?,?,CURRENT_TIMESTAMP,'completed',?,1,?,?)`,
+    run(`INSERT INTO donations (id,org_id,donor_id,amount,method,payment_method_id,transaction_id,donation_date,status,notes,is_manual,created_by,gateway,gateway_token)
+         VALUES (?,?,?,?,'daf',?,?,CURRENT_TIMESTAMP,'completed',?,1,?,?,?)`,
       [donId, req.orgId, donor_id, amount, pm.id, result.refNum,
-       (sandbox ? matbia.SANDBOX_NOTE : '') + `${pm.daf_name||'DAF'} grant${notes?' — '+notes:''}`, req.user.id, viaMatbia ? 'matbia' : null]);
+       (sandbox ? matbia.SANDBOX_NOTE : '') + `${pm.daf_name||'DAF'} grant${notes?' — '+notes:''}`, req.user.id, gw, result.token || null]);
 
     const donation = get('SELECT * FROM donations WHERE id=?', [donId]);
     if (sandbox) skipSandboxReceipt(donId);
@@ -173,11 +174,11 @@ router.post('/daf-grant', async (req, res) => {
     if (_dup) return res.status(400).json({ error: 'Unresolved duplicate flag on this donor. Resolve in Info Check before processing donations.' });
 
     const cardNum = String(daf_card_num).replace(/\D/g, '');
-    const viaMatbia = matbia.isMatbiaProvider(daf_provider, cardNum);
+    const gw = daf.gatewayFor(daf_provider, cardNum);   // 'matbia' | 'pledger' | null (= Sola)
     const org = get('SELECT * FROM organizations WHERE id=?', [req.orgId]);
     const donId = uuidv4();
-    const result = viaMatbia
-      ? await matbia.charge(req.orgId, { cardNum, exp: daf_exp, amount, externalId: donId, note: notes || 'DRM Donation' })
+    const result = gw
+      ? await daf.charge(gw, req.orgId, { cardNum, exp: daf_exp, cvv: req.body.daf_cvv, amount, externalId: donId, note: notes || 'DRM Donation' })
       : await dafGrant(req.orgId, {
           cardNum, exp: daf_exp || '1299', amount,
           name: `${donor.first_name} ${donor.last_name}`,
@@ -185,10 +186,10 @@ router.post('/daf-grant', async (req, res) => {
         });
 
     const sandbox = !!result.sandbox;
-    run(`INSERT INTO donations (id,org_id,donor_id,amount,method,transaction_id,donation_date,status,notes,is_manual,created_by,gateway)
-         VALUES (?,?,?,?,'daf',?,CURRENT_TIMESTAMP,'completed',?,1,?,?)`,
+    run(`INSERT INTO donations (id,org_id,donor_id,amount,method,transaction_id,donation_date,status,notes,is_manual,created_by,gateway,gateway_token)
+         VALUES (?,?,?,?,'daf',?,CURRENT_TIMESTAMP,'completed',?,1,?,?,?)`,
       [donId, req.orgId, donor_id, amount, result.refNum,
-       (sandbox ? matbia.SANDBOX_NOTE : '') + `${daf_provider||'DAF'} grant${notes?' — '+notes:''}`, req.user.id, viaMatbia ? 'matbia' : null]);
+       (sandbox ? matbia.SANDBOX_NOTE : '') + `${daf_provider||'DAF'} grant${notes?' — '+notes:''}`, req.user.id, gw, result.token || null]);
 
     const donation = get('SELECT * FROM donations WHERE id=?', [donId]);
     if (sandbox) skipSandboxReceipt(donId);
@@ -221,17 +222,18 @@ router.post('/refund', async (req, res) => {
     let method = 'manual';
     let sandbox = false;
 
-    const isMatbiaTx = don.gateway === 'matbia' && !!don.transaction_id;
-    const isRealSolaTx = !isMatbiaTx && (don.method === 'credit_card' || don.method === 'daf')
+    const directGw = (don.gateway === 'matbia' || don.gateway === 'pledger') && !!don.transaction_id ? don.gateway : null;
+    const isRealSolaTx = !directGw && (don.method === 'credit_card' || don.method === 'daf')
       && don.transaction_id
       && !don.transaction_id.startsWith('ES');
 
-    if (isMatbiaTx) {
-      // Matbia's void/refund calls reverse the whole transaction — no partial amounts.
+    if (directGw) {
+      // Matbia and Pledger can only reverse the whole transaction — no partial amounts.
+      const gwName = daf.label(directGw);
       if (prevRefunded > 0.001 || Math.abs(refAmt - parseFloat(don.amount)) > 0.001) {
-        return res.status(400).json({ error: `Matbia can only reverse the full $${parseFloat(don.amount).toFixed(2)}. For a partial refund, return the difference to the donor outside DRM and record it as a note.` });
+        return res.status(400).json({ error: `${gwName} can only reverse the full $${parseFloat(don.amount).toFixed(2)}. For a partial refund, return the difference to the donor outside DRM and record it as a note.` });
       }
-      const rv = await matbia.reverse(req.orgId, don.transaction_id);
+      const rv = await daf.reverse(directGw, req.orgId, don);
       solaRefNum = rv.refNum;
       method = rv.method;
       sandbox = !!rv.sandbox;

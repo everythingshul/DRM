@@ -5,6 +5,8 @@ const { v4: uuidv4 } = require('uuid');
 const { all, get, run } = require('../db/schema');
 const { requireAuth, requireOrg, requireOrgAdmin } = require('../middleware/auth');
 const matbia = require('../utils/matbia');
+const pledger = require('../utils/pledger');
+const daf = require('../utils/daf');
 
 // Apply auth + org middleware
 router.use(requireAuth, requireOrg);
@@ -429,20 +431,29 @@ router.post('/:id/payment-methods', async (req, res) => {
     const donor = get('SELECT * FROM donors WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!donor) return res.status(404).json({ error: 'Donor not found' });
 
-    // Matbia cards are charged directly, so verify the number + expiry with Matbia now rather
-    // than at the first charge. Only a real Matbia rejection blocks saving; if Matbia isn't
-    // configured yet (or is unreachable) the card is still saved and checked when charged.
+    // Matbia and Pledger cards are charged directly, so check the card with them now rather
+    // than at the first charge. Matbia: a real rejection blocks saving. Pledger: warn only (we
+    // don't know how its validator treats a missing CVV, so it must not lock cards out).
+    // If the processor isn't configured yet or is unreachable, the card is still saved.
+    let warning = null;
     if (type === 'daf') {
       const stub = { type, daf_name, other_description };
-      if (matbia.isMatbiaCard(stub)) {
+      const gw = daf.gatewayForCard(stub);
+      if (gw) {
         const { cardNum, exp } = matbia.parseDafCard(stub);
+        const name = daf.label(gw);
         if (!matbia.normalizeExp(exp)) {
-          return res.status(400).json({ error: 'Matbia cards need the real expiry shown on the card (MMYY).' });
+          return res.status(400).json({ error: `${name} cards need the real expiry shown on the card (MMYY).` });
         }
-        try { await matbia.preauthorize(req.orgId, { cardNum, exp }); }
-        catch (err) {
+        try {
+          if (gw === 'matbia') await matbia.preauthorize(req.orgId, { cardNum, exp });
+          else {
+            const v = await pledger.validate(req.orgId, { cardNum, exp });
+            if (!v.ok) warning = `Pledger could not validate this card${v.message ? ' (' + v.message + ')' : ''}. It was saved — check the number and expiry.`;
+          }
+        } catch (err) {
           if (err.code === 'MATBIA') return res.status(400).json({ error: err.message.replace(/^Matbia: /, 'Matbia rejected this card: ') });
-          console.warn('[matbia] card saved without verification:', err.message);
+          console.warn(`[${gw}] card saved without verification:`, err.message);
         }
       }
     }
@@ -456,7 +467,7 @@ router.post('/:id/payment-methods', async (req, res) => {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [pmId, req.params.id, req.orgId, type, label || null, last_four || null, card_brand || null, daf_name || null, other_description || null, is_default ? 1 : 0]);
 
-    res.json({ success: true, paymentMethod: get('SELECT * FROM payment_methods WHERE id = ?', [pmId]) });
+    res.json({ success: true, warning, paymentMethod: get('SELECT * FROM payment_methods WHERE id = ?', [pmId]) });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Server error' });

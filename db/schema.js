@@ -605,6 +605,12 @@ function runMigrations() {
   // Which processor moved the money ('matbia' for direct Matbia DAF charges), so a
   // later refund/void goes back to the same processor.
   safe("ALTER TABLE donations ADD COLUMN gateway TEXT");
+  safe("ALTER TABLE donations ADD COLUMN gateway_token TEXT");   // e.g. Pledger's TransToken, needed to void
+  safe(`CREATE TABLE IF NOT EXISTS pledger_settings (
+    id TEXT PRIMARY KEY, org_id TEXT UNIQUE NOT NULL,
+    api_token TEXT, tax_id TEXT, charity_name TEXT, charity_id TEXT, campaign_ref TEXT,
+    is_active INTEGER DEFAULT 1, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
   safe(`CREATE TABLE IF NOT EXISTS matbia_settings (
     id TEXT PRIMARY KEY, org_id TEXT UNIQUE NOT NULL,
     api_token TEXT, org_user_handle TEXT, environment TEXT DEFAULT 'production',
