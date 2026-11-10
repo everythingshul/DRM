@@ -506,13 +506,11 @@ router.get('/matbia', requireOrgAdmin, (req, res) => {
 });
 
 router.put('/matbia', requireOrgAdmin, (req, res) => {
-  const { GUID_RE } = require('../utils/matbia');
   const { api_token, org_user_handle, environment } = req.body;
   const env = environment === 'sandbox' ? 'sandbox' : 'production';
   const existing = get('SELECT id, api_token FROM matbia_settings WHERE org_id = ?', [req.orgId]);
   const token = (api_token || '').trim() || existing?.api_token || '';   // blank = keep the saved token
   if (!token) return res.status(400).json({ error: 'Matbia API token is required' });
-  if (!GUID_RE.test(token)) return res.status(400).json({ error: 'That does not look like a Matbia API token (expected a GUID like 8a1f…-…-…).' });
   const handle = (org_user_handle || '').trim();
   if (!handle) return res.status(400).json({ error: 'Organization handle (the API key on your Matbia organization profile page) is required' });
   if (existing) {
@@ -520,10 +518,8 @@ router.put('/matbia', requireOrgAdmin, (req, res) => {
   } else {
     run('INSERT INTO matbia_settings (id, org_id, api_token, org_user_handle, environment, is_active) VALUES (?, ?, ?, ?, ?, 1)', [uuidv4(), req.orgId, token, handle, env]);
   }
-  // Matbia accepts ANY handle and still answers "Success", so a typo here looks like a working
-  // charge that never lands. Warn (don't block — a handle may legitimately be another format).
-  const warning = require('../utils/matbia').HANDLE_RE.test(handle) ? null
-    : 'That handle does not look like the 32-character API key on your Matbia organization profile page. Matbia reports "Success" even for a wrong handle, so double-check it — charges to a wrong handle will not reach your organization.';
+  // Any format is accepted — paste exactly what Matbia gave you.
+  const warning = null;
   res.json({ success: true, warning });
 });
 
