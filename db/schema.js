@@ -3,6 +3,7 @@
 const initSqlJs = require('sql.js');
 const path      = require('path');
 const fs        = require('fs');
+const { als, current: currentCtx } = require('./ctx');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
 const DB_PATH  = path.join(DATA_DIR, 'drm.db');
@@ -50,15 +51,60 @@ async function initDb() {
 
   createTables();
   runMigrations();
+  installAuditTriggers();
+  try { purgeAudit(); } catch (e) { console.error('[audit] purge error:', e.message); }
   saveDb(); // initial save
   return db;
 }
 
+// ── Change log plumbing ───────────────────────────────────────────────────────
+// Triggers (installAuditTriggers) copy every row change on the tables an admin cares about
+// into change_log, tagged with the id in _ctx. run() points _ctx at the current request's
+// action before each write; writes from background jobs (no request) leave _ctx empty and
+// aren't logged.
+let ctxId = null, batchDepth = 0;
+function syncAuditCtx() {
+  const st = currentCtx();
+  const id = st ? st.id : null;
+  if (st && !st.rowCreated) {
+    st.rowCreated = true;
+    try {
+      db.run(`INSERT OR IGNORE INTO audit_actions (id, org_id, user_id, user_name, method, path, ip) VALUES (?,?,?,?,?,?,?)`,
+        [st.id, st.orgId || null, st.userId || null, st.userName || null, st.method || null, st.path || null, st.ip || null]);
+    } catch (e) { console.error('[audit] action row error:', e.message); }
+  }
+  if (st && st.orgId) { try { db.run('UPDATE audit_actions SET org_id=? WHERE id=? AND org_id IS NULL', [st.orgId, st.id]); } catch {} }
+  if (id !== ctxId) { db.run('UPDATE _ctx SET action_id=?', [id]); ctxId = id; }
+}
+
+// Runs fn with a single disk write at the end (and rolls everything back if fn throws).
+// Foreign keys are switched off for the duration so rows can be put back in any order.
+function transaction(fn, { foreignKeysOff = false } = {}) {
+  if (batchDepth) return fn();
+  if (foreignKeysOff) db.run('PRAGMA foreign_keys=OFF');
+  db.run('BEGIN');
+  batchDepth++;
+  try {
+    const out = fn();
+    db.run('COMMIT');
+    return out;
+  } catch (e) {
+    try { db.run('ROLLBACK'); } catch {}
+    throw e;
+  } finally {
+    batchDepth--;
+    if (foreignKeysOff) db.run('PRAGMA foreign_keys=ON');
+    saveDb();
+  }
+}
+
 function run(sql, params = []) {
   try {
+    syncAuditCtx();
     db.run(sql, params);
-    saveDb(); // write to disk immediately after every change
-    return { changes: db.getRowsModified() };
+    const changes = db.getRowsModified();
+    if (!batchDepth) saveDb(); // write to disk immediately after every change
+    return { changes };
   } catch(e) {
     console.error('DB run error:', e.message, '| SQL:', sql.slice(0,80));
     throw e;
@@ -617,6 +663,31 @@ function runMigrations() {
     is_active INTEGER DEFAULT 1, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 
+  // ── Activity log / undo (30 days) ──────────────────────────────────────────
+  // audit_actions: one row per admin click (a request that changed data).
+  // change_log:    every row that click inserted/updated/deleted, as JSON snapshots (filled by triggers).
+  // api_call_log:  every call to a payment processor, for diagnosing "it said success but...".
+  safe(`CREATE TABLE IF NOT EXISTS audit_actions (
+    id TEXT PRIMARY KEY, org_id TEXT, user_id TEXT, user_name TEXT,
+    method TEXT, path TEXT, ip TEXT,
+    irreversible_note TEXT, undone_at DATETIME, undone_by TEXT, undo_of TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+  safe("CREATE INDEX IF NOT EXISTS idx_audit_actions_org ON audit_actions(org_id, created_at)");
+  safe(`CREATE TABLE IF NOT EXISTS change_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, action_id TEXT NOT NULL,
+    tbl TEXT NOT NULL, row_id TEXT, op TEXT NOT NULL, old_json TEXT, new_json TEXT
+  )`);
+  safe("CREATE INDEX IF NOT EXISTS idx_change_log_action ON change_log(action_id)");
+  safe("CREATE INDEX IF NOT EXISTS idx_change_log_row ON change_log(tbl, row_id)");
+  safe(`CREATE TABLE IF NOT EXISTS api_call_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, org_id TEXT, provider TEXT, endpoint TEXT,
+    http_status INTEGER, status TEXT, reference TEXT, error TEXT, detail TEXT, user_id TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+  safe("CREATE INDEX IF NOT EXISTS idx_api_call_log_org ON api_call_log(org_id, created_at)");
+  safe("CREATE TABLE IF NOT EXISTS _ctx (action_id TEXT)");
+
   // Soft-delete donors and leads (30-day restore window, same pattern as org_users)
   safe("ALTER TABLE donors ADD COLUMN removed_at DATETIME");
   safe("ALTER TABLE leads ADD COLUMN removed_at DATETIME");
@@ -661,4 +732,73 @@ function runMigrations() {
   } catch(e) { console.error('[db] donor_number backfill error:', e.message); }
 }
 
-module.exports = { initDb, all, get, run, saveDb };
+// Tables whose changes are recorded and can be undone. ops: I=insert, U=update, D=delete.
+// Settings/credential tables, users, logs and message history are deliberately NOT here.
+const AUDITED_TABLES = {
+  donors: 'IUD', donations: 'IUD', payment_methods: 'IUD', recurring_schedules: 'IUD', scheduled_charges: 'IUD',
+  donor_duplicates: 'IUD', charge_failures: 'IUD', expenses: 'IUD', neighborhoods: 'IUD',
+  leads: 'IUD', lead_followups: 'IUD', lead_categories: 'IUD', org_label_lists: 'IUD',
+  email_templates: 'ID',            // template bodies are large — record add/delete, not every autosave
+  whatsapp_groups: 'IUD', whatsapp_contacts: 'IUD', whatsapp_broadcasts: 'IUD',
+  import_history: 'IUD', import_items: 'ID'
+};
+
+function installAuditTriggers() {
+  db.run('UPDATE _ctx SET action_id=NULL');
+  if (!db.exec('SELECT 1 FROM _ctx LIMIT 1').length) db.run('INSERT INTO _ctx (action_id) VALUES (NULL)');
+  ctxId = null;
+  const q = n => `"${n}"`;
+  for (const [t, ops] of Object.entries(AUDITED_TABLES)) {
+    const cols = all(`PRAGMA table_info(${q(t)})`).map(c => c.name);
+    if (!cols.length) continue;
+    const obj = ref => `json_object(${cols.map(c => `'${c}', ${ref}.${q(c)}`).join(', ')})`;
+    const on = '(SELECT action_id FROM _ctx) IS NOT NULL';
+    for (const op of ['i', 'u', 'd']) db.run(`DROP TRIGGER IF EXISTS _audit_${t}_${op}`);
+    if (ops.includes('I')) db.run(`CREATE TRIGGER _audit_${t}_i AFTER INSERT ON ${q(t)} WHEN ${on} BEGIN
+      INSERT INTO change_log (action_id, tbl, row_id, op, old_json, new_json)
+      VALUES ((SELECT action_id FROM _ctx), '${t}', NEW.id, 'I', NULL, ${obj('NEW')}); END`);
+    if (ops.includes('U')) db.run(`CREATE TRIGGER _audit_${t}_u AFTER UPDATE ON ${q(t)} WHEN ${on} AND ${obj('OLD')} IS NOT ${obj('NEW')} BEGIN
+      INSERT INTO change_log (action_id, tbl, row_id, op, old_json, new_json)
+      VALUES ((SELECT action_id FROM _ctx), '${t}', NEW.id, 'U', ${obj('OLD')}, ${obj('NEW')}); END`);
+    if (ops.includes('D')) db.run(`CREATE TRIGGER _audit_${t}_d AFTER DELETE ON ${q(t)} WHEN ${on} BEGIN
+      INSERT INTO change_log (action_id, tbl, row_id, op, old_json, new_json)
+      VALUES ((SELECT action_id FROM _ctx), '${t}', OLD.id, 'D', ${obj('OLD')}, NULL); END`);
+  }
+}
+
+// Activity log and processor-call log keep 30 days.
+const AUDIT_RETENTION_DAYS = 30;
+function purgeAudit(days = AUDIT_RETENTION_DAYS) {
+  const cut = `-${Math.max(1, +days || AUDIT_RETENTION_DAYS)} days`;
+  db.run(`DELETE FROM change_log WHERE action_id IN (SELECT id FROM audit_actions WHERE created_at < datetime('now', ?))`, [cut]);
+  db.run(`DELETE FROM change_log WHERE action_id NOT IN (SELECT id FROM audit_actions)`);
+  db.run(`DELETE FROM audit_actions WHERE created_at < datetime('now', ?)`, [cut]);
+  db.run(`DELETE FROM api_call_log WHERE created_at < datetime('now', ?)`, [cut]);
+  saveDb();
+}
+
+// Called when a request finishes: drop its action row if nothing audited actually changed,
+// and note if it moved money.
+function finishAuditAction(st) {
+  if (!st || !st.rowCreated || !db) return;
+  try {
+    db.run(`DELETE FROM audit_actions WHERE id=? AND NOT EXISTS (SELECT 1 FROM change_log WHERE action_id=?)`, [st.id, st.id]);
+    if (st.moneyNote) db.run('UPDATE audit_actions SET irreversible_note=? WHERE id=?', [st.moneyNote, st.id]);
+  } catch (e) { console.error('[audit] finish error:', e.message); }
+}
+
+// One line per payment-processor call (never card numbers or tokens).
+function logApiCall({ orgId, provider, endpoint, httpStatus, status, reference, error, detail }) {
+  try {
+    const st = currentCtx();
+    db.run(`INSERT INTO api_call_log (org_id, provider, endpoint, http_status, status, reference, error, detail, user_id)
+            VALUES (?,?,?,?,?,?,?,?,?)`,
+      [orgId || st?.orgId || null, provider, endpoint || null, httpStatus ?? null, status || null,
+       reference || null, error ? String(error).slice(0, 500) : null, detail ? String(detail).slice(0, 500) : null, st?.userId || null]);
+    if (!batchDepth) saveDb();
+  } catch (e) { console.error('[audit] api log error:', e.message); }
+}
+
+function getDb() { return db; }
+
+module.exports = { initDb, all, get, run, saveDb, transaction, purgeAudit, finishAuditAction, logApiCall, getDb, AUDITED_TABLES };

@@ -30,6 +30,13 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 // Trust Render's proxy so req.secure works and cookies set correctly
 app.set('trust proxy', 1);
 
+// Remember which request is writing so the activity log can group (and undo) everything one click changed.
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/') || !['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next();
+  const st = { id: uuidv4(), method: req.method, path: req.originalUrl.split('?')[0], ip: req.ip, rowCreated: false };
+  res.on('close', () => require('./db/schema').finishAuditAction(st));
+  require('./db/ctx').als.run(st, next);
+});
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '10mb' }));
@@ -273,6 +280,7 @@ app.use('/api/orgs/:orgId/whatsapp', whatsappRouter);
 app.use('/api/recovery', recoveryRouter);
 app.use('/api/orgs/:orgId/leads', leadsRouter);
 app.use('/api/orgs/:orgId/imports', importsRouter);
+app.use('/api/orgs/:orgId/activity', require('./routes/activity'));
 app.use('/api/orgs/:orgId/notifications', notificationsRouter);
 
 app.get('/api/setup-status', (req, res) => {

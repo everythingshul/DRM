@@ -5,7 +5,8 @@
 
 const http = require('http');
 const https = require('https');
-const { get } = require('../db/schema');
+const { get, logApiCall } = require('../db/schema');
+const { flagMoney } = require('../db/ctx');
 const { normalizeExp } = require('./matbia');
 
 const BASE = process.env.PLEDGER_API_BASE || 'https://api.pledgercharitable.org';
@@ -20,6 +21,7 @@ function getConfig(orgId) {
   const s = get('SELECT * FROM pledger_settings WHERE org_id=? AND is_active=1', [orgId]) || {};
   const pick = (a, b) => (a || b || '').trim();
   return {
+    orgId,
     token: pick(s.api_token, process.env.PLEDGER_API_TOKEN),
     taxId: pick(s.tax_id, process.env.PLEDGER_TAX_ID),
     charityName: pick(s.charity_name, process.env.PLEDGER_CHARITY_NAME),
@@ -70,6 +72,10 @@ function post(cfg, payload) {
         delete safe.CVV;
         if (safe.CharityId) safe.CharityId = String(safe.CharityId).slice(0, 4) + '…' + String(safe.CharityId).slice(-4);
         console.log(`[pledger] ${payload.Command} http=${res.statusCode} status=${r.status || '-'} ref=${r.refnum || '-'} error=${r.errormessage || '-'} req=${JSON.stringify(safe)}`);
+        logApiCall({ orgId: cfg.orgId, provider: 'pledger', endpoint: payload.Command, httpStatus: res.statusCode,
+          status: r.status || 'Error', reference: r.refnum, error: r.errormessage,
+          detail: (payload.Amount != null ? `$${payload.Amount}` : '') + (safe.Cardnumber ? ` card ${safe.Cardnumber}` : '') });
+        if (payload.Command !== 'card:validate' && /approved/i.test(r.status || '')) flagMoney('Moved money through Pledger');
         resolve({ http: res.statusCode, status: r.status, refnum: r.refnum, error: r.errormessage, token: r.transtoken || null });
       });
     });

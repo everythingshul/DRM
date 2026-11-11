@@ -704,7 +704,8 @@ async function processScheduledOneTimeCharges() {
   for (const charge of due) await processScheduledCharge(charge);
 }
 
-async function runDailyBackup() {
+async function runDailyBackup({ force = true } = {}) {
+  try { require('../db/schema').purgeAudit(); } catch (e) { console.error('[audit] purge error:', e.message); }
   const fs   = require('fs');
   const path = require('path');
   const DATA_DIR   = process.env.DATA_DIR || path.join(__dirname, '../data');
@@ -720,6 +721,8 @@ async function runDailyBackup() {
 
   const date  = new Date().toISOString().slice(0, 10);
   const dest  = path.join(BACKUP_DIR, `drm-${date}.db`);
+  // A restart's backup must not overwrite the night's copy — that copy is the one that still has anything deleted since.
+  if (!force && fs.existsSync(dest)) { console.log(`[backup] Today's backup already exists (${date}), keeping it`); return; }
 
   // Copy the file
   fs.copyFileSync(DB_PATH, dest);
@@ -884,7 +887,7 @@ function startScheduler() {
   });
 
   // Run one backup on startup so there's always a fresh copy
-  setTimeout(() => runDailyBackup().catch(e => console.error('Startup backup error:', e.message)), 10000);
+  setTimeout(() => runDailyBackup({ force: false }).catch(e => console.error('Startup backup error:', e.message)), 10000);
 
   console.log('✅ Scheduler started');
 }
