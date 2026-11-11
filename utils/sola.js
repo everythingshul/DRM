@@ -3,7 +3,8 @@
 // All requests are server-side POST (CORS disallows browser calls)
 
 const https = require('https');
-const { get } = require('../db/schema');
+const { get, logApiCall } = require('../db/schema');
+const { flagMoney } = require('../db/ctx');
 
 const ENDPOINT = 'https://x1.cardknox.com/gatewayjson';
 const VERSION  = '5.0.0';
@@ -18,7 +19,10 @@ function getSolaKey(orgId) {
   return s.api_key;
 }
 
+// Which org the next solaPost() belongs to (base() is always called right before it) — for the call log.
+let lastBaseOrg = null;
 function base(orgId, command) {
+  lastBaseOrg = orgId || null;
   return {
     xKey:             getSolaKey(orgId),
     xVersion:         VERSION,
@@ -29,6 +33,7 @@ function base(orgId, command) {
 }
 
 function solaPost(payload) {
+  const logOrg = lastBaseOrg;
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(payload);
     const u = new URL(ENDPOINT);
@@ -41,8 +46,16 @@ function solaPost(payload) {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch(e) { reject(new Error('Invalid Sola response: ' + data.slice(0,100))); }
+        let out;
+        try { out = JSON.parse(data); }
+        catch(e) { reject(new Error('Invalid Sola response: ' + data.slice(0,100))); return; }
+        // One row per Sola call for Activity → Logs (command, result, reference — never card data or keys).
+        const cmd = payload.xCommand;
+        logApiCall({ orgId: logOrg, provider: 'sola', endpoint: cmd, httpStatus: res.statusCode, status: out.xResult === 'A' ? 'Approved' : (out.xResult === 'V' ? 'Voided' : (out.xStatus || out.xResult || 'Error')),
+          reference: out.xRefNum, error: out.xResult === 'A' || out.xResult === 'V' ? null : (out.xError || out.xErrorCode),
+          detail: payload.xAmount != null ? `$${payload.xAmount}` : null });
+        if (cmd !== 'cc:save' && (out.xResult === 'A' || out.xResult === 'V')) flagMoney('Moved money through Sola');
+        resolve(out);
       });
     });
     req.on('error', reject);

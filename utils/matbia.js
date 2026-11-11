@@ -3,7 +3,8 @@
 // Auth: the raw token in an `Authorization` header (no "Bearer").
 
 const https = require('https');
-const { get } = require('../db/schema');
+const { get, logApiCall } = require('../db/schema');
+const { flagMoney } = require('../db/ctx');
 
 const HOSTS = { production: 'api.matbia.org', sandbox: 'sandbox.api.matbia.org' };
 const MATBIA_BIN = '862824';
@@ -19,7 +20,7 @@ function getConfig(orgId) {
   const token = (s?.api_token || process.env.MATBIA_API_TOKEN || '').trim();
   const handle = (s?.org_user_handle || process.env.MATBIA_ORG_HANDLE || '').trim();
   const env = (s?.environment || process.env.MATBIA_ENV || 'production') === 'sandbox' ? 'sandbox' : 'production';
-  return { token, handle, env, host: HOSTS[env], source: s?.api_token ? 'org' : (token ? 'env' : 'none') };
+  return { orgId, token, handle, env, host: HOSTS[env], source: s?.api_token ? 'org' : (token ? 'env' : 'none') };
 }
 
 function requireToken(orgId) {
@@ -49,6 +50,11 @@ function post(cfg, path, payload) {
         if (safe.cardNum) safe.cardNum = '…' + String(safe.cardNum).slice(-4);
         if (safe.orgUserHandle) safe.orgUserHandle = String(safe.orgUserHandle).slice(0, 4) + '…' + String(safe.orgUserHandle).slice(-4);
         const o = parsed && typeof parsed === 'object' ? parsed : {};
+        logApiCall({ orgId: cfg.orgId, provider: 'matbia', endpoint: path.replace('/v1/Matbia/', '') + (cfg.env === 'sandbox' ? ' (sandbox)' : ''),
+          httpStatus: res.statusCode, status: o.status || (typeof parsed === 'string' ? 'Error' : null), reference: o.referenceId,
+          error: o.error || (typeof parsed === 'string' ? parsed : null),
+          detail: payload.amount != null ? `$${payload.amount}${safe.cardNum ? ' card ' + safe.cardNum : ''}` : (safe.cardNum ? 'card ' + safe.cardNum : '') });
+        if (/Charge|VoidPayment|RefundPayment/.test(path) && o.status === 'Success') flagMoney('Moved money through Matbia');
         console.log(`[matbia] ${cfg.env} ${path} http=${res.statusCode} status=${o.status || '-'} ref=${o.referenceId || '-'} error=${o.error || (typeof parsed === 'string' ? parsed : '-')} req=${JSON.stringify(safe)}`);
         // Declines and card errors arrive as HTTP 406 *with* a JSON body, and some failures
         // (e.g. a malformed token) arrive as a bare JSON string — so always read the body.

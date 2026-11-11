@@ -1,6 +1,7 @@
 // middleware/auth.js
 const jwt = require('jsonwebtoken');
 const { get } = require('../db/schema');
+const { current: auditCtx } = require('../db/ctx');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'drm-secret-change-in-production';
 const SESSION_HOURS = 24;
@@ -19,6 +20,7 @@ function requireAuth(req, res, next) {
     if (!user) return res.status(401).json({ error: 'User not found' });
     req.user = user;
     req.token = decoded;
+    const st = auditCtx(); if (st) { st.userId = user.id; st.userName = user.full_name || user.email; }
     next();
   } catch (e) {
     res.status(401).json({ error: 'Session expired' });
@@ -43,6 +45,7 @@ function requireOrg(req, res, next) {
 
   req.org = org;
   req.orgId = orgId;
+  const st = auditCtx(); if (st) st.orgId = orgId;
   next();
 }
 

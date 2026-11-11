@@ -45,7 +45,11 @@ const API = {
       throw new Error(clean.slice(0, 300) || `Server error (${res.status})`);
     }
     const json = await res.json();
-    if (!res.ok) throw new Error(json.error || json.message || (typeof json==='string'?json:JSON.stringify(json)) || `Request failed (${res.status})`);
+    if (!res.ok) {
+      const err = new Error(json.error || json.message || (typeof json==='string'?json:JSON.stringify(json)) || `Request failed (${res.status})`);
+      err.status = res.status; err.data = json;
+      throw err;
+    }
     return json;
   },
 
@@ -327,7 +331,8 @@ function layoutNavOverflow() {
   if (!nav) return;
   const all = Array.from(nav.querySelectorAll('.nav-item'));
   const isSuperAdmin = !!DRM.user?.is_super_admin;
-  const hidden = all.filter(item => item.classList.contains('nav-super-admin') && !isSuperAdmin);
+  const adminOk = isOrgAdmin();
+  const hidden = all.filter(item => (item.classList.contains('nav-super-admin') && !isSuperAdmin) || (item.classList.contains('nav-org-admin') && !adminOk));
   const items = all.filter(item => !hidden.includes(item));
   hidden.forEach(item => { item.style.display = 'none'; nav.insertBefore(item, more); });
   items.forEach(item => { item.style.display = ''; nav.insertBefore(item, more); });
@@ -343,7 +348,7 @@ function layoutNavOverflow() {
   const avail = nav.clientWidth - moreWidth - 8;
   // Super-admin pages (Accounts, WhatsApp, Recovery) always live under "More" so the
   // everyday pages get the bar; everything else keeps its place until it stops fitting.
-  const pinned = items.filter(item => item.classList.contains('nav-super-admin'));
+  const pinned = items.filter(item => item.classList.contains('nav-super-admin') || item.classList.contains('nav-org-admin'));
   let used = 0, overflow = [];
   for (const item of items) {
     if (pinned.includes(item)) continue;
@@ -484,6 +489,7 @@ async function setOrg(org) {
     const found = _allOrgs.find(x => x.id === sel.value);
     if (found) { await setOrg(found); navigateTo(_currentPage); }
   };
+  layoutNavOverflow();   // admin-only items (Activity) depend on the role in THIS org
 }
 
 function showApp() {
@@ -515,7 +521,7 @@ function showApp() {
   }
   // Navigate to hash if present, else dashboard
   const initPage = location.hash.replace('#','') || 'dashboard';
-  const validPages = ['dashboard','donors','leads','followups','accounts','notifications','donations','verification','failures','recurbatch','bank','emails','kvitel','reports','settings'];
+  const validPages = ['dashboard','donors','leads','followups','accounts','notifications','donations','verification','failures','recurbatch','bank','emails','kvitel','reports','settings','activity'];
   navigateTo(validPages.includes(initPage) ? initPage : 'dashboard');
   loadBadges();
   setInterval(loadBadges, 60000);
@@ -553,7 +559,7 @@ function navigateTo(page) {
 function reloadPage() { const el = $('page-' + _currentPage); if(el) renderPage(_currentPage, el); }
 window.addEventListener('popstate', () => {
   const page = location.hash.replace('#','') || 'dashboard';
-  const valid = ['dashboard','donors','leads','followups','accounts','notifications','donations','verification','failures','recurbatch','bank','emails','kvitel','reports','settings','whatsapp','recovery'];
+  const valid = ['dashboard','donors','leads','followups','accounts','notifications','donations','verification','failures','recurbatch','bank','emails','kvitel','reports','settings','whatsapp','recovery','activity'];
   if (valid.includes(page)) { const el=$('page-'+page); if(el) el.innerHTML=''; navigateTo(page); }
 });
 
@@ -574,6 +580,7 @@ function renderPage(page, el) {
     kvitel:       renderKvitel,
     whatsapp:     renderWhatsApp,
     recovery:     renderRecovery,
+    activity:     renderActivity,
     reports:      renderReports,
     settings:     renderSettings,
   };
@@ -6780,4 +6787,202 @@ function _applyEmbeddedOverlayChrome() {
     const app = $('app');
     if (app) app.insertBefore(banner, app.firstChild);
   } catch {}
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ACTIVITY — admin-only: recent actions (30 days) with Undo/Redo, recovery of
+// records deleted earlier (from the nightly backups), and payment processor logs.
+// ══════════════════════════════════════════════════════════════════════════════
+function isOrgAdmin() {
+  return !!(DRM.user?.is_super_admin || (DRM.org?.user_role || _allOrgs.find(o => o.id === API.orgId)?.user_role) === 'admin');
+}
+const _aE = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const _aWhen = s => s ? fmtDT(String(s).replace(' ', 'T') + 'Z') : '—';
+const _act = { tab: 'recent', q: '', days: 30, kind: '', offset: 0, rows: [], total: 0, calls: { provider: '', q: '' }, sel: new Set(), scan: null };
+
+function renderActivity(el) {
+  el.innerHTML = `
+    <div class="ph"><div><div class="ph-title">Activity</div>
+      <div class="ph-sub">Everything changed in the last 30 days — undo it, or bring back what was deleted</div></div></div>
+    <div class="tabs" id="act-tabs">
+      <div class="tab ${_act.tab==='recent'?'on':''}" onclick="_actTab('recent')">Recent Actions</div>
+      <div class="tab ${_act.tab==='recover'?'on':''}" onclick="_actTab('recover')">Recover Deleted</div>
+      <div class="tab ${_act.tab==='logs'?'on':''}" onclick="_actTab('logs')">Processor Logs</div>
+    </div>
+    <div id="act-body"><div class="spinner"></div></div>`;
+  _actTab(_act.tab);
+}
+function _actTab(t) {
+  _act.tab = t;
+  document.querySelectorAll('#act-tabs .tab').forEach((x, i) => x.classList.toggle('on', ['recent', 'recover', 'logs'][i] === t));
+  if (t === 'recent') _actLoadRecent(true); else if (t === 'recover') _actLoadScan(false); else _actLoadLogs();
+}
+
+// ── Recent actions ────────────────────────────────────────────────────────────
+const _ACT_KINDS = [['', 'Everything'], ['donors', 'Donors'], ['donations', 'Donations'], ['payment_methods', 'Payment methods'],
+  ['recurring_schedules', 'Recurring'], ['leads', 'Leads'], ['expenses', 'Expenses'], ['neighborhoods', 'Neighborhoods'], ['email_templates', 'Email templates']];
+async function _actLoadRecent(reset) {
+  const body = $('act-body'); if (!body) return;
+  if (reset) {
+    _act.offset = 0; _act.rows = [];
+    body.innerHTML = `
+      <div class="card" style="padding:0;overflow:hidden">
+        <div style="padding:12px 14px;border-bottom:1px solid var(--gray-1)">
+          <div class="search-bar">
+            <div class="sw" style="flex:1"><input id="act-q" placeholder="Search people, amounts, who did it…" value="${_aE(_act.q)}" oninput="clearTimeout(window._actT);window._actT=setTimeout(()=>{_act.q=this.value;_actLoadRecent(true)},300)" autocomplete="off"></div>
+            <select id="act-kind" onchange="_act.kind=this.value;_actLoadRecent(true)">${_ACT_KINDS.map(([v, l]) => `<option value="${v}" ${_act.kind===v?'selected':''}>${l}</option>`).join('')}</select>
+            <select id="act-days" onchange="_act.days=+this.value;_actLoadRecent(true)">
+              ${[[1, 'Last 24 hours'], [7, 'Last 7 days'], [30, 'Last 30 days']].map(([v, l]) => `<option value="${v}" ${_act.days===v?'selected':''}>${l}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="tw"><table>
+          <thead><tr><th style="width:150px">When</th><th style="width:130px">Who</th><th>What happened</th><th style="width:170px"></th></tr></thead>
+          <tbody id="act-tb"><tr><td colspan="4"><div class="spinner"></div></td></tr></tbody>
+        </table></div>
+        <div id="act-more" style="padding:10px;text-align:center"></div>
+      </div>`;
+  }
+  try {
+    const r = await API.get(`/api/orgs/${API.orgId}/activity?days=${_act.days}&kind=${encodeURIComponent(_act.kind)}&q=${encodeURIComponent(_act.q)}&limit=100&offset=${_act.offset}`);
+    _act.total = r.total; _act.rows = _act.rows.concat(r.actions);
+    _act.offset = _act.rows.length;
+    $('act-tb').innerHTML = _act.rows.length ? _act.rows.map(_actRow).join('')
+      : '<tr><td colspan="4"><div class="empty"><h3>Nothing here yet</h3><p>Changes you make from now on show up here for 30 days.</p></div></td></tr>';
+    $('act-more').innerHTML = _act.rows.length < _act.total
+      ? `<button class="btn btn-ghost btn-sm" onclick="_actLoadRecent(false)">Show more (${_act.total - _act.rows.length} left)</button>` : '';
+  } catch (e) { const tb = $('act-tb'); if (tb) tb.innerHTML = `<tr><td colspan="4"><div class="alert alert-err">${_aE(e.message)}</div></td></tr>`; }
+}
+function _actRow(a) {
+  const btn = (a.redo_id && !a.is_undo) ? `<button class="btn btn-ghost btn-sm" onclick="_actUndo('${a.redo_id}','redo')">Redo</button>`
+    : (a.undoable && !a.redo_id) ? `<button class="btn btn-blue btn-sm" onclick="_actUndo('${a.id}','${a.is_undo ? 'redo' : 'undo'}')">${a.is_undo ? 'Redo' : 'Undo'}</button>`
+    : a.irreversible_note ? `<span class="pill pill-amber" title="Money moved through a payment processor. Use Refund on the donation to reverse it.">Money moved — use Refund</span>` : '';
+  return `<tr style="${a.undone_at ? 'opacity:.55' : ''}">
+    <td style="font-size:12px;white-space:nowrap">${_aWhen(a.created_at)}</td>
+    <td style="font-size:12px">${_aE(a.user)}</td>
+    <td><strong>${_aE(a.title)}</strong>${a.undone_at ? ' <span class="pill pill-gray">Undone</span>' : ''}${a.is_undo ? ' <span class="pill pill-blue">Reversal</span>' : ''}
+      ${a.detail ? `<div style="font-size:11px;color:var(--gray-5)">${_aE(a.detail)}</div>` : ''}</td>
+    <td><div class="actions"><button class="btn btn-ghost btn-sm" onclick="_actDetails('${a.id}')">Details</button>${btn}</div></td>
+  </tr>`;
+}
+async function _actDetails(id) {
+  try {
+    const r = await API.get(`/api/orgs/${API.orgId}/activity/${id}`);
+    const sym = { I: ['Added', 'pill-green'], U: ['Edited', 'pill-blue'], D: ['Deleted', 'pill-red'] };
+    const fv = v => v === null || v === undefined || v === '' ? '<em style="color:var(--gray-4)">empty</em>' : _aE(String(v).slice(0, 80));
+    Modal.open(_aE(r.action.title), `
+      <div style="font-size:12px;color:var(--gray-5);margin-bottom:10px">${_aWhen(r.action.created_at)} · ${_aE(r.action.user)}${r.path ? ' · <code>' + _aE(r.path) + '</code>' : ''}</div>
+      <div style="max-height:55vh;overflow:auto">${r.changes.map(c => `
+        <div style="padding:7px 0;border-bottom:1px solid var(--gray-1);font-size:13px">
+          <span class="pill ${sym[c.op][1]}">${sym[c.op][0]}</span> ${_aE(c.type)}${c.label ? ': <strong>' + _aE(c.label) + '</strong>' : ''}
+          ${c.fields.map(f => `<div style="font-size:12px;color:var(--gray-6);margin:2px 0 0 12px">${_aE(f.k.replace(/_/g, ' '))}: ${fv(f.from)} → ${fv(f.to)}</div>`).join('')}
+        </div>`).join('')}
+        ${r.total > r.shown ? `<div style="padding:8px 0;font-size:12px;color:var(--gray-5)">…and ${r.total - r.shown} more records</div>` : ''}
+      </div>`, {});
+  } catch (e) { toast(e.message, 'err'); }
+}
+function _actUndo(id, kind) {
+  const a = _act.rows.find(x => x.id === id || x.redo_id === id);
+  const title = kind === 'redo' ? (a?.title || 'this action') : (a?.title || 'this action');
+  confirmDlg(`${kind === 'redo' ? 'Redo' : 'Undo'}: <strong>${_aE(title)}</strong>?<br><span style="font-size:12px;color:var(--gray-5)">This puts the records back the way they were. Emails already sent can't be unsent.</span>`, () => _actDoUndo(id, kind, false));
+}
+async function _actDoUndo(id, kind, force) {
+  try {
+    const r = await API.post(`/api/orgs/${API.orgId}/activity/${id}/undo`, { force: !!force });
+    const bits = [r.restored && `${r.restored} restored`, r.removed && `${r.removed} removed`, r.reverted && `${r.reverted} reverted`].filter(Boolean).join(', ');
+    toast(`${kind === 'redo' ? 'Redone' : 'Undone'}${bits ? ' — ' + bits : ''}${r.skipped ? ` (${r.skipped} skipped)` : ''}`, r.skipped ? 'warn' : 'ok');
+    _actLoadRecent(true);
+  } catch (e) {
+    if (e.status === 409 && e.data?.conflicts) {
+      const list = e.data.conflicts.map(c => `<li>${_aE(c.title)} <span style="color:var(--gray-5)">— ${_aE(c.user)}, ${_aWhen(c.created_at)}</span></li>`).join('');
+      confirmDlg(`These records were changed again after this action:<ul style="margin:8px 0 8px 18px;font-size:12px">${list}</ul>Undoing it will overwrite those newer changes. Undo anyway?`, () => _actDoUndo(id, kind, true));
+    } else toast(e.message, 'err');
+  }
+}
+
+// ── Recover deleted (from nightly backups) ───────────────────────────────────
+async function _actLoadScan(fresh) {
+  const body = $('act-body'); if (!body) return;
+  body.innerHTML = '<div class="spinner"></div><div style="text-align:center;font-size:12px;color:var(--gray-5)">Reading the nightly backups…</div>';
+  try {
+    const r = await API.get(`/api/orgs/${API.orgId}/activity/recover/scan${fresh ? '?fresh=1' : ''}`);
+    _act.scan = r; _act.sel = new Set();
+    _actRenderScan();
+  } catch (e) { body.innerHTML = `<div class="alert alert-err">${_aE(e.message)}</div>`; }
+}
+function _actRenderScan() {
+  const r = _act.scan, body = $('act-body'); if (!r || !body) return;
+  const bk = r.backups || [];
+  const q = (val('act-rq') || '').toLowerCase();
+  const donors = r.donors.filter(d => !q || d.label.toLowerCase().includes(q));
+  const other = r.other.filter(o => !q || (o.label + ' ' + o.type).toLowerCase().includes(q));
+  const kidText = c => Object.entries(c).map(([t, n]) => `${n} ${t.replace(/_/g, ' ')}`).join(', ');
+  body.innerHTML = `
+    <div class="alert alert-info" style="font-size:13px">
+      The server saves a copy of your data every night and keeps 30. Anything below was in one of those copies but is missing now.
+      ${bk.length ? `<strong>${bk.length} backup${bk.length > 1 ? 's' : ''}</strong> found (${_aE(bk[bk.length - 1].date)} → ${_aE(bk[0].date)}).` : '<strong>No backups found on the server yet.</strong>'}
+      Anything deleted before the oldest backup, or created and deleted between two nights, can't be recovered from here.
+    </div>
+    ${bk.length ? `
+    <div class="card" style="padding:0;overflow:hidden">
+      <div style="padding:12px 14px;border-bottom:1px solid var(--gray-1)"><div class="search-bar">
+        <div class="sw" style="flex:1"><input id="act-rq" placeholder="Search deleted records…" value="${_aE(q)}" oninput="_actRenderScan();document.getElementById('act-rq').focus()" autocomplete="off"></div>
+        <button class="btn btn-ghost btn-sm" onclick="_actLoadScan(true)">Rescan</button>
+        <button class="btn btn-primary btn-sm" id="act-restore-btn" onclick="_actRestore()" ${_act.sel.size ? '' : 'disabled'}>Restore selected (${_act.sel.size})</button>
+      </div></div>
+      ${donors.length ? `<div style="padding:10px 14px 4px;font-weight:700;font-size:12px;color:var(--gray-6)">DELETED DONORS <span style="font-weight:400">— restoring a donor also brings back their payment methods, schedules and donations</span></div>
+        <div class="tw"><table><tbody>${donors.map(d => `<tr>
+          <td style="width:30px"><input type="checkbox" ${_act.sel.has(d.key) ? 'checked' : ''} onchange="_actSel('${d.key}',this.checked)"></td>
+          <td><strong>${_aE(d.label)}</strong>${d.email ? ` <span style="font-size:11px;color:var(--gray-5)">${_aE(d.email)}</span>` : ''}
+            <div style="font-size:11px;color:var(--gray-5)">${kidText(d.children) ? 'with ' + _aE(kidText(d.children)) + ' · ' : ''}last seen in backup ${_aE(d.backup)}</div></td></tr>`).join('')}</tbody></table></div>` : ''}
+      ${other.length ? `<div style="padding:10px 14px 4px;font-weight:700;font-size:12px;color:var(--gray-6)">OTHER DELETED RECORDS</div>
+        <div class="tw"><table><thead><tr><th></th><th>Type</th><th>Record</th><th>Date</th><th>Last in backup</th></tr></thead><tbody>${other.map(o => `<tr style="${o.orphan ? 'opacity:.6' : ''}">
+          <td style="width:30px"><input type="checkbox" ${o.orphan ? 'disabled' : ''} ${_act.sel.has(o.key) ? 'checked' : ''} onchange="_actSel('${o.key}',this.checked)"></td>
+          <td><span class="pill pill-gray">${_aE(o.type)}</span></td>
+          <td><strong>${_aE(o.label)}</strong>${o.orphan ? '<div style="font-size:11px;color:var(--red)">its donor no longer exists — restore the donor first</div>' : ''}</td>
+          <td style="font-size:12px">${o.date ? _aE(String(o.date).slice(0, 10)) : '—'}</td>
+          <td style="font-size:12px">${_aE(o.backup)}</td></tr>`).join('')}</tbody></table></div>` : ''}
+      ${!donors.length && !other.length ? '<div class="empty"><h3>Nothing missing</h3><p>Every record in the backups is still in your data.</p></div>' : ''}
+    </div>` : ''}`;
+}
+function _actSel(k, on) {
+  if (on) _act.sel.add(k); else _act.sel.delete(k);
+  const b = $('act-restore-btn'); if (b) { b.disabled = !_act.sel.size; b.textContent = `Restore selected (${_act.sel.size})`; }
+}
+function _actRestore() {
+  const n = _act.sel.size; if (!n) return;
+  confirmDlg(`Restore ${n} selected record${n > 1 ? 's' : ''} from the backups? You can undo this afterwards from Recent Actions.`, async () => {
+    try {
+      const r = await API.post(`/api/orgs/${API.orgId}/activity/recover/restore`, { keys: [..._act.sel] });
+      const done = Object.entries(r.restored).map(([t, c]) => `${c} ${t.replace(/_/g, ' ')}`).join(', ');
+      toast(`Restored ${done || 'nothing'}${r.failed.length ? ` — ${r.failed.length} failed` : ''}`, r.failed.length ? 'warn' : 'ok');
+      _actLoadScan(true);
+    } catch (e) { toast(e.message, 'err'); }
+  });
+}
+
+// ── Processor logs ────────────────────────────────────────────────────────────
+async function _actLoadLogs() {
+  const body = $('act-body'); if (!body) return;
+  body.innerHTML = `<div class="card" style="padding:0;overflow:hidden">
+    <div style="padding:12px 14px;border-bottom:1px solid var(--gray-1)"><div class="search-bar">
+      <div class="sw" style="flex:1"><input id="act-lq" placeholder="Search reference, error, amount…" value="${_aE(_act.calls.q)}" oninput="clearTimeout(window._actT);window._actT=setTimeout(()=>{_act.calls.q=this.value;_actLoadLogs()},300)" autocomplete="off"></div>
+      <select onchange="_act.calls.provider=this.value;_actLoadLogs()">${[['', 'All processors'], ['matbia', 'Matbia'], ['pledger', 'Pledger'], ['sola', 'Sola']].map(([v, l]) => `<option value="${v}" ${_act.calls.provider===v?'selected':''}>${l}</option>`).join('')}</select>
+    </div></div>
+    <div class="tw"><table><thead><tr><th>When</th><th>Processor</th><th>Call</th><th>Result</th><th>Reference</th><th>Details</th><th>By</th></tr></thead>
+    <tbody id="act-ltb"><tr><td colspan="7"><div class="spinner"></div></td></tr></tbody></table></div></div>`;
+  try {
+    const r = await API.get(`/api/orgs/${API.orgId}/activity/logs/calls?provider=${_act.calls.provider}&q=${encodeURIComponent(_act.calls.q)}`);
+    const ok = s => /^(success|approved|voided)$/i.test(s || '');
+    $('act-ltb').innerHTML = r.calls.length ? r.calls.map(c => `<tr>
+      <td style="font-size:12px;white-space:nowrap">${_aWhen(c.created_at)}</td>
+      <td><span class="pill pill-gray">${_aE(c.provider)}</span></td>
+      <td style="font-size:12px">${_aE(c.endpoint)}</td>
+      <td><span class="pill ${ok(c.status) ? 'pill-green' : 'pill-red'}">${_aE(c.status || '—')}</span>${c.http_status ? ` <span style="font-size:11px;color:var(--gray-5)">HTTP ${c.http_status}</span>` : ''}</td>
+      <td style="font-size:12px;font-family:monospace">${_aE(c.reference || '—')}</td>
+      <td style="font-size:12px">${_aE(c.detail || '')}${c.error ? `<div style="color:var(--red)">${_aE(c.error)}</div>` : ''}</td>
+      <td style="font-size:12px">${_aE(c.user_name || '')}</td></tr>`).join('')
+      : '<tr><td colspan="7"><div class="empty"><h3>No calls logged yet</h3><p>Every charge, void and refund sent to Matbia, Pledger or Sola from now on is listed here for 30 days.</p></div></td></tr>';
+  } catch (e) { $('act-ltb').innerHTML = `<tr><td colspan="7"><div class="alert alert-err">${_aE(e.message)}</div></td></tr>`; }
 }
