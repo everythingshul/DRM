@@ -6861,7 +6861,7 @@ function _actRow(a) {
   return `<tr style="${a.undone_at ? 'opacity:.55' : ''}">
     <td style="font-size:12px;white-space:nowrap">${_aWhen(a.created_at)}</td>
     <td style="font-size:12px">${_aE(a.user)}</td>
-    <td><strong>${_aE(a.title)}</strong>${a.undone_at ? ' <span class="pill pill-gray">Undone</span>' : ''}${a.is_undo ? ' <span class="pill pill-blue">Reversal</span>' : ''}
+    <td><strong>${_aE(a.title)}</strong>${a.undone_at ? ' <span class="pill pill-gray">Undone</span>' : ''}${a.is_undo ? ' <span class="pill pill-blue">Reversal</span>' : ''}${a.auto ? ` <span class="pill pill-gray">Automatic · ${_aE(a.source)}</span>` : ''}
       ${a.detail ? `<div style="font-size:11px;color:var(--gray-5)">${_aE(a.detail)}</div>` : ''}</td>
     <td><div class="actions"><button class="btn btn-ghost btn-sm" onclick="_actDetails('${a.id}')">Details</button>${btn}</div></td>
   </tr>`;

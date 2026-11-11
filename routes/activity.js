@@ -135,6 +135,7 @@ function actionView(a) {
     id: a.id, created_at: a.created_at, user: a.user_name || 'System', ip: a.ip,
     title: d.title, detail: d.detail, total: d.total, main: d.main || null,
     is_undo: !!a.undo_of, undone_at: a.undone_at, undone_by: a.undone_by || null,
+    auto: a.method === 'AUTO', source: a.method === 'AUTO' ? a.path : null,
     irreversible_note: a.irreversible_note || null,
     undoable: !reversed && !a.irreversible_note && d.total > 0,
     redo_id: reversed ? a.undone_by : null
