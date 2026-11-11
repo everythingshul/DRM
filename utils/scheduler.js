@@ -190,7 +190,11 @@ async function sendChargeNotificationToOwner(org, donor, donation, success, fail
   }
 }
 
-async function processScheduledCharge(charge) {
+// Background charges are logged in Activity as "Automatic" actions.
+function processScheduledCharge(charge) {
+  return require('../db/schema').runAsSystem({ orgId: charge.org_id, label: String(charge.id || '').startsWith('autopay-') ? 'AutoPay charge' : 'Scheduled charge' }, () => _processScheduledCharge(charge));
+}
+async function _processScheduledCharge(charge) {
   const donor = get('SELECT * FROM donors WHERE id = ?', [charge.donor_id]);
   const pm = get('SELECT * FROM payment_methods WHERE id = ?', [charge.payment_method_id]);
   const org = get('SELECT * FROM organizations WHERE id = ?', [charge.org_id]);
@@ -501,7 +505,10 @@ async function processRecurringSchedules() {
 // Charges a single due recurring schedule — shared by the automatic cron above and
 // the manual "Recurring Charges" batch-approval page. templateId optionally forces
 // a specific email template for the receipt instead of the org's default.
-async function chargeRecurringSchedule(sched, templateId) {
+function chargeRecurringSchedule(sched, templateId) {
+  return require('../db/schema').runAsSystem({ orgId: sched.org_id, label: 'Recurring charge' }, () => _chargeRecurringSchedule(sched, templateId));
+}
+async function _chargeRecurringSchedule(sched, templateId) {
   const pm = get('SELECT * FROM payment_methods WHERE id = ?', [sched.payment_method_id]);
   const org = get('SELECT * FROM organizations WHERE id = ?', [sched.org_id]);
   const donor = get('SELECT * FROM donors WHERE id = ?', [sched.donor_id]);
@@ -591,7 +598,10 @@ async function chargeRecurringSchedule(sched, templateId) {
 // charge_failures entry, and no failure notification — this isn't an error, just a
 // deliberate no-charge-this-time. occurrences_count is NOT incremented, since no
 // charge happened.
-async function skipRecurringSchedule(sched) {
+function skipRecurringSchedule(sched) {
+  return require('../db/schema').runAsSystem({ orgId: sched.org_id, label: 'Recurring charge skipped' }, () => _skipRecurringSchedule(sched));
+}
+async function _skipRecurringSchedule(sched) {
   try {
     const nextRun = await calcNextRun(sched.next_run, sched.frequency, sched.hebrew_day);
     const limitHit = sched.occurrences_limit && (sched.occurrences_count || 0) >= sched.occurrences_limit;

@@ -799,6 +799,17 @@ function logApiCall({ orgId, provider, endpoint, httpStatus, status, reference, 
   } catch (e) { console.error('[audit] api log error:', e.message); }
 }
 
+// Wraps a background job (scheduled / recurring charge, autopay...) so what it changes is logged as an
+// action by "Automatic" instead of being invisible. Inside a request it just runs fn — the request's
+// own action already covers it.
+function runAsSystem({ orgId, label }, fn) {
+  if (currentCtx()) return fn();
+  const st = { id: require('uuid').v4(), orgId: orgId || null, userId: null, userName: 'Automatic', method: 'AUTO', path: label || 'Scheduled job', ip: null, rowCreated: false };
+  let out;
+  try { out = als.run(st, fn); } catch (e) { finishAuditAction(st); throw e; }
+  return Promise.resolve(out).finally(() => finishAuditAction(st));
+}
+
 function getDb() { return db; }
 
-module.exports = { initDb, all, get, run, saveDb, transaction, purgeAudit, finishAuditAction, logApiCall, getDb, AUDITED_TABLES };
+module.exports = { initDb, all, get, run, saveDb, transaction, purgeAudit, finishAuditAction, runAsSystem, logApiCall, getDb, AUDITED_TABLES };
