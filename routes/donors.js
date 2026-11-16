@@ -6,6 +6,7 @@ const { all, get, run } = require('../db/schema');
 const { requireAuth, requireOrg, requireOrgAdmin } = require('../middleware/auth');
 const matbia = require('../utils/matbia');
 const pledger = require('../utils/pledger');
+const ojc = require('../utils/ojc');
 const daf = require('../utils/daf');
 
 // Apply auth + org middleware
@@ -431,14 +432,14 @@ router.post('/:id/payment-methods', async (req, res) => {
     const donor = get('SELECT * FROM donors WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!donor) return res.status(404).json({ error: 'Donor not found' });
 
-    // Matbia and Pledger cards are charged directly, so check the card with them now rather
+    // Matbia, Pledger and OJC cards are charged directly, so check the card with them now rather
     // than at the first charge. Matbia: a real rejection blocks saving. Pledger: warn only (we
     // don't know how its validator treats a missing CVV, so it must not lock cards out).
     // If the processor isn't configured yet or is unreachable, the card is still saved.
     let warning = null;
     if (type === 'daf') {
       const stub = { type, daf_name, other_description };
-      const gw = daf.gatewayForCard(stub);
+      const gw = daf.gatewayForCard(stub, req.orgId);
       if (gw) {
         const { cardNum, exp } = matbia.parseDafCard(stub);
         const name = daf.label(gw);
@@ -447,7 +448,13 @@ router.post('/:id/payment-methods', async (req, res) => {
         }
         try {
           if (gw === 'matbia') await matbia.preauthorize(req.orgId, { cardNum, exp });
-          else {
+          else if (gw === 'ojc') {
+            // OJC says outright (406 / 462) when a card is invalid or not activated — that blocks saving.
+            // An auth / network problem only warns, so a bad login can't lock cards out.
+            const v = await ojc.validate(req.orgId, { cardNum, exp });
+            if (!v.ok && v.definite) return res.status(400).json({ error: `OJC rejected this card: ${v.message}` });
+            if (!v.ok) warning = `OJC could not verify this card (${v.message}). It was saved — check the number and expiry.`;
+          } else {
             const v = await pledger.validate(req.orgId, { cardNum, exp });
             if (!v.ok) warning = `Pledger could not validate this card${v.message ? ' (' + v.message + ')' : ''}. It was saved — check the number and expiry.`;
           }

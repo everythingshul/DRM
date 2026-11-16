@@ -14,7 +14,7 @@ router.use(requireAuth, requireOrg);
 
 // A Matbia SANDBOX charge moves no real money, so never email the donor a receipt for it.
 function skipSandboxReceipt(donId) {
-  run('UPDATE donations SET receipt_skip_reason=? WHERE id=?', ['Matbia sandbox test — no real charge, receipt not sent', donId]);
+  run('UPDATE donations SET receipt_skip_reason=? WHERE id=?', ['Sandbox test — no real charge, receipt not sent', donId]);
 }
 
 // ── Save CC card → get xToken ─────────────────────────────────────────────────
@@ -114,7 +114,7 @@ router.post('/charge', async (req, res) => {
 });
 
 // ── Charge a DAF card ─────────────────────────────────────────────────────────
-// Matbia cards are charged directly through Matbia's API; every other DAF provider
+// Matbia, Pledger and OJC cards are charged directly through their own APIs; every other DAF provider
 // still goes through Sola's grant:Recommendation.
 router.post('/charge-daf', async (req, res) => {
   try {
@@ -174,7 +174,7 @@ router.post('/daf-grant', async (req, res) => {
     if (_dup) return res.status(400).json({ error: 'Unresolved duplicate flag on this donor. Resolve in Info Check before processing donations.' });
 
     const cardNum = String(daf_card_num).replace(/\D/g, '');
-    const gw = daf.gatewayFor(daf_provider, cardNum);   // 'matbia' | 'pledger' | null (= Sola)
+    const gw = daf.gatewayFor(daf_provider, cardNum, req.orgId);   // 'matbia' | 'pledger' | null (= Sola)
     const org = get('SELECT * FROM organizations WHERE id=?', [req.orgId]);
     const donId = uuidv4();
     const result = gw
@@ -222,13 +222,13 @@ router.post('/refund', async (req, res) => {
     let method = 'manual';
     let sandbox = false;
 
-    const directGw = (don.gateway === 'matbia' || don.gateway === 'pledger') && !!don.transaction_id ? don.gateway : null;
+    const directGw = daf.isDirect(don.gateway) && !!don.transaction_id ? don.gateway : null;
     const isRealSolaTx = !directGw && (don.method === 'credit_card' || don.method === 'daf')
       && don.transaction_id
       && !don.transaction_id.startsWith('ES');
 
     if (directGw) {
-      // Matbia and Pledger can only reverse the whole transaction — no partial amounts.
+      // Direct gateways (Matbia, Pledger, OJC) can only reverse the whole transaction — no partial amounts.
       const gwName = daf.label(directGw);
       if (prevRefunded > 0.001 || Math.abs(refAmt - parseFloat(don.amount)) > 0.001) {
         return res.status(400).json({ error: `${gwName} can only reverse the full $${parseFloat(don.amount).toFixed(2)}. For a partial refund, return the difference to the donor outside DRM and record it as a note.` });
