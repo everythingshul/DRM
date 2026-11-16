@@ -657,6 +657,11 @@ function runMigrations() {
     api_token TEXT, tax_id TEXT, charity_name TEXT, charity_id TEXT, campaign_ref TEXT,
     is_active INTEGER DEFAULT 1, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
+  safe(`CREATE TABLE IF NOT EXISTS ojc_settings (
+    id TEXT PRIMARY KEY, org_id TEXT UNIQUE NOT NULL,
+    username TEXT, password TEXT, org_api_key TEXT, org_name TEXT,
+    is_active INTEGER DEFAULT 1, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
   safe(`CREATE TABLE IF NOT EXISTS matbia_settings (
     id TEXT PRIMARY KEY, org_id TEXT UNIQUE NOT NULL,
     api_token TEXT, org_user_handle TEXT, environment TEXT DEFAULT 'production',

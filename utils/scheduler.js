@@ -228,7 +228,7 @@ async function _processScheduledCharge(charge) {
       await sendChargeNotificationToOwner(org, donor, donation, true, null);
 
     } else if (daf.gatewayForCard(pm)) {
-      // Matbia / Pledger DAF — charged directly through the provider's API
+      // Matbia / Pledger / OJC DAF — charged directly through the provider's API
       const gw = daf.gatewayForCard(pm);
       const donId = uuidv4();
       txResult = await daf.chargePaymentMethod(gw, org.id, pm, {
@@ -243,7 +243,7 @@ async function _processScheduledCharge(charge) {
 
       const donation = get('SELECT * FROM donations WHERE id = ?', [donId]);
       // Sandbox charges move no real money — never email the donor a receipt for one.
-      if (txResult.sandbox) run('UPDATE donations SET receipt_skip_reason=? WHERE id=?', ['Matbia sandbox test — no real charge, receipt not sent', donId]);
+      if (txResult.sandbox) run('UPDATE donations SET receipt_skip_reason=? WHERE id=?', ['Sandbox test — no real charge, receipt not sent', donId]);
       else await sendReceiptEmail(donor, donation, org);
       await sendChargeNotificationToOwner(org, donor, donation, true, null);
 
@@ -533,7 +533,7 @@ async function _chargeRecurringSchedule(sched, templateId) {
       });
       txId = result.refNum;
     } else if (gw) {
-      // Matbia / Pledger DAF — charged directly (donation id doubles as the duplicate guard / invoice)
+      // Matbia / Pledger / OJC DAF — charged directly (donation id doubles as the duplicate guard / invoice)
       const result = await daf.chargePaymentMethod(gw, sched.org_id, pm, {
         amount: sched.amount, externalId: donId, note: `Recurring ${sched.frequency} charge`
       });
@@ -566,7 +566,7 @@ async function _chargeRecurringSchedule(sched, templateId) {
       [nextRun, newCount, (limitHit || endHit) ? 'completed' : 'active', sched.id]);
 
     const donation = get('SELECT * FROM donations WHERE id = ?', [donId]);
-    if (sandbox) run('UPDATE donations SET receipt_skip_reason=? WHERE id=?', ['Matbia sandbox test — no real charge, receipt not sent', donId]);
+    if (sandbox) run('UPDATE donations SET receipt_skip_reason=? WHERE id=?', ['Sandbox test — no real charge, receipt not sent', donId]);
     else await sendReceiptEmail(donor, donation, org, templateId);
     await sendChargeNotificationToOwner(org, donor, donation, true, null);
     return { ok: true, donationId: donId };

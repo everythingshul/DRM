@@ -552,6 +552,46 @@ router.put('/pledger', requireOrgAdmin, (req, res) => {
   res.json({ success: true, warning });
 });
 
+// --- OJC (direct DAF charging) ---
+router.get('/ojc', requireOrgAdmin, (req, res) => {
+  const c = require('../utils/ojc').getConfig(req.orgId);
+  res.json({
+    configured: !!(c.user && c.pass && c.orgKey),
+    source: c.source, sandbox: c.sandbox,
+    username: c.user, org_api_key: c.orgKey, org_name: c.orgName,
+    password_set: !!c.pass                                  // never return the password itself
+  });
+});
+
+router.put('/ojc', requireOrgAdmin, (req, res) => {
+  const { username, password, org_api_key, org_name } = req.body;
+  const existing = get('SELECT id, password FROM ojc_settings WHERE org_id = ?', [req.orgId]);
+  const user = (username || '').trim();
+  const pass = (password || '').trim() || existing?.password || '';   // blank = keep the saved password
+  const key = (org_api_key || '').trim(), name = (org_name || '').trim();
+  if (!user || !pass) return res.status(400).json({ error: 'OJC username and password are required' });
+  if (!key) return res.status(400).json({ error: 'Organization API key is required — use "Find by Tax ID" to look it up' });
+  if (existing) {
+    run('UPDATE ojc_settings SET username=?, password=?, org_api_key=?, org_name=?, is_active=1, updated_at=CURRENT_TIMESTAMP WHERE org_id=?', [user, pass, key, name, req.orgId]);
+  } else {
+    run('INSERT INTO ojc_settings (id, org_id, username, password, org_api_key, org_name, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)', [uuidv4(), req.orgId, user, pass, key, name]);
+  }
+  const test = user.toLowerCase() === require('../utils/ojc').TEST_USER;
+  res.json({ success: true, warning: test ? 'This is OJC\'s TEST login — charges made with it are marked as tests and no receipts are sent. Switch to your production login before going live.' : null });
+});
+
+// Finds an org's OJC API key + name by Tax ID (also proves the login works).
+router.post('/ojc/lookup', requireOrgAdmin, async (req, res) => {
+  try {
+    const { tax_id, username, password } = req.body || {};
+    const ojc = require('../utils/ojc');
+    const existing = get('SELECT password FROM ojc_settings WHERE org_id = ?', [req.orgId]);
+    const creds = username ? { user: username, pass: (password || '').trim() || existing?.password || '' } : null;
+    const orgs = await ojc.lookupByTaxId(req.orgId, tax_id, creds);
+    res.json({ success: true, organizations: orgs.map(o => ({ name: o.name, apiKey: o.apiKey })), raw_count: orgs.length });
+  } catch (e) { res.status(e.code === 'NOT_CONFIGURED' ? 400 : 502).json({ error: e.message }); }
+});
+
 // --- DAF ACCOUNTS ---
 router.get('/daf', (req, res) => {
   res.json(all('SELECT * FROM daf_accounts WHERE org_id = ? AND is_active = 1 ORDER BY name', [req.orgId]));
