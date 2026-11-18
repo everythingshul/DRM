@@ -580,6 +580,28 @@ router.put('/ojc', requireOrgAdmin, (req, res) => {
   res.json({ success: true, warning: test ? 'This is OJC\'s TEST login — charges made with it are marked as tests and no receipts are sent. Switch to your production login before going live.' : null });
 });
 
+// Which processor each saved DAF card will be charged through, and why — for "it still goes to Sola".
+router.get('/ojc/status', requireOrgAdmin, (req, res) => {
+  const ojc = require('../utils/ojc'), daf = require('../utils/daf'), matbia = require('../utils/matbia');
+  const c = ojc.getConfig(req.orgId);
+  const row = get('SELECT is_active FROM ojc_settings WHERE org_id=?', [req.orgId]);
+  const cards = all(`SELECT pm.*, d.first_name, d.last_name FROM payment_methods pm JOIN donors d ON d.id = pm.donor_id
+                     WHERE pm.org_id=? AND pm.type='daf' ORDER BY pm.created_at DESC LIMIT 60`, [req.orgId]).map(pm => {
+    const { cardNum } = matbia.parseDafCard(pm);
+    const gw = daf.gatewayForCard(pm, req.orgId);
+    const looksOjc = /ojc/i.test(pm.daf_name || '') || cardNum.startsWith(ojc.OJC_BIN);
+    return {
+      donor: `${pm.first_name || ''} ${pm.last_name || ''}`.trim(), provider: pm.daf_name || '', last4: cardNum.slice(-4), bin: cardNum.slice(0, 6),
+      routes_to: gw ? daf.label(gw) : 'Sola',
+      why: gw === 'ojc' ? 'OJC direct' : looksOjc ? 'looks like OJC but OJC is not fully set up' : gw ? '' : `provider "${pm.daf_name || '—'}" is not OJC and the number doesn't start with ${ojc.OJC_BIN}`
+    };
+  });
+  res.json({
+    config: { has_username: !!c.user, has_password: !!c.pass, has_api_key: !!c.orgKey, active: row ? !!row.is_active : null, source: c.source, test_login: c.sandbox },
+    ojc_direct: ojc.isConfigured(req.orgId), cards
+  });
+});
+
 // Finds an org's OJC API key + name by Tax ID (also proves the login works).
 router.post('/ojc/lookup', requireOrgAdmin, async (req, res) => {
   try {

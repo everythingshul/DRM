@@ -1380,7 +1380,7 @@ const DonorDetail = {
         donor_id: did, payment_method_id: pmId,
         amount: amt, notes: val('daf-notes')||null, cvv: val('daf-cvv')||undefined
       });
-      toastRes(`DAF grant processed · ${r.transaction_id}`, r);
+      toastRes(`DAF grant processed${r.processor ? ' via ' + r.processor : ''} · ${r.transaction_id}`, r);
       Modal.close(); DonorDetail.open(did);
     } catch(e) {
       if (btn) { btn.textContent='Process Grant'; btn.disabled=false; }
@@ -1520,7 +1520,7 @@ const DonorDetail = {
           amount: amt, notes: val('md-notes')
         });
         if (label && r.donation?.id) await API.put(`/api/orgs/${API.orgId}/donations/${r.donation.id}/label`, {label}).catch(()=>{});
-        toastRes(`DAF grant submitted · Trans: ${r.transaction_id}`, r); Modal.close(); this.open(did);
+        toastRes(`DAF grant submitted${r.processor ? ' via ' + r.processor : ''} · Trans: ${r.transaction_id}`, r); Modal.close(); this.open(did);
       } catch(e) { toast(e.message, 'err'); }
       return;
     }
@@ -3791,8 +3791,25 @@ async function _loadOjcSettings() {
         <div><label>Organization API Key</label><input id="ojc-key" autocomplete="off" value="${q(s.org_api_key)}" placeholder="e.g. SRjLgmeL…=="></div>
         <div><label>Organization name <span style="font-size:11px;color:var(--gray-5)">(for reference)</span></label><input id="ojc-name" autocomplete="off" value="${q(s.org_name)}"></div>
       </div>
-      <div class="bg mt"><button class="btn btn-primary" onclick="_saveOjcSettings()">Save</button></div>`;
+      <div class="bg mt"><button class="btn btn-primary" onclick="_saveOjcSettings()">Save</button><button class="btn btn-ghost" onclick="_ojcStatus()">Check routing</button></div>
+      <div id="ojc-status" style="margin-top:12px"></div>`;
   } catch(e) { c.innerHTML = `<div class="alert alert-err">${e.message}</div>`; }
+}
+async function _ojcStatus() {
+  const box = $('ojc-status'); if (!box) return;
+  box.innerHTML = '<div class="spinner"></div>';
+  try {
+    const r = await API.get(`/api/orgs/${API.orgId}/ojc/status`);
+    const c = r.config, yn = v => v ? '✓' : '✗';
+    box.innerHTML = `
+      <div class="alert ${r.ojc_direct ? 'alert-ok' : 'alert-warn'}" style="font-size:12px">
+        OJC direct is <strong>${r.ojc_direct ? 'ON' : 'OFF'}</strong> — username ${yn(c.has_username)} · password ${yn(c.has_password)} · organization API key ${yn(c.has_api_key)}${c.active === false ? ' · <strong>inactive</strong>' : ''}${c.test_login ? ' · TEST login' : ''}
+      </div>
+      ${r.cards.length ? `<div class="tw"><table><thead><tr><th>Donor</th><th>Provider</th><th>Card</th><th>Charged through</th><th></th></tr></thead><tbody>${r.cards.map(k => `<tr>
+        <td>${_aE(k.donor)}</td><td>${_aE(k.provider || '—')}</td><td>${_aE(k.bin)}…${_aE(k.last4)}</td>
+        <td><span class="pill ${k.routes_to === 'Sola' ? 'pill-amber' : 'pill-green'}">${_aE(k.routes_to)}</span></td>
+        <td style="font-size:11px;color:var(--gray-5)">${_aE(k.why)}</td></tr>`).join('')}</tbody></table></div>` : '<div style="font-size:12px;color:var(--gray-5)">No DAF cards saved yet.</div>'}`;
+  } catch (e) { box.innerHTML = `<div class="alert alert-err" style="font-size:12px">${_aE(e.message)}</div>`; }
 }
 async function _ojcLookup() {
   const box = $('ojc-found'); if (box) box.innerHTML = '<span style="font-size:12px;color:var(--gray-5)">Looking up…</span>';
