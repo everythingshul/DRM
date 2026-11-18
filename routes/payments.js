@@ -135,7 +135,7 @@ router.post('/charge-daf', async (req, res) => {
 
     const org = get('SELECT * FROM organizations WHERE id=?', [req.orgId]);
     const donId = uuidv4();
-    const gw = daf.gatewayForCard(pm);          // 'matbia' | 'pledger' | null (= Sola)
+    const gw = daf.gatewayForCard(pm, req.orgId);          // 'matbia' | 'pledger' | 'ojc' | null (= Sola)
     const result = gw
       ? await daf.chargePaymentMethod(gw, req.orgId, pm, { amount, externalId: donId, note: notes || 'DRM Donation', cvv: req.body.cvv })
       : await dafGrant(req.orgId, {
@@ -155,7 +155,7 @@ router.post('/charge-daf', async (req, res) => {
     const donation = get('SELECT * FROM donations WHERE id=?', [donId]);
     if (sandbox) skipSandboxReceipt(donId);
     else await sendReceiptEmail(donor, donation, org).catch(e => console.error('[receipt] Failed:', e.message));
-    res.json({ success: true, sandbox, donation: get('SELECT * FROM donations WHERE id=?', [donId]), transaction_id: result.refNum });
+    res.json({ success: true, sandbox, processor: gw ? daf.label(gw) : 'Sola', donation: get('SELECT * FROM donations WHERE id=?', [donId]), transaction_id: result.refNum });
   } catch(e) {
     console.error('charge-daf:', e.message);
     res.status(500).json({ error: e.message });
@@ -194,7 +194,7 @@ router.post('/daf-grant', async (req, res) => {
     const donation = get('SELECT * FROM donations WHERE id=?', [donId]);
     if (sandbox) skipSandboxReceipt(donId);
     else await sendReceiptEmail(donor, donation, org).catch(e => console.error('[receipt] Failed:', e.message));
-    res.json({ success: true, sandbox, donation, transaction_id: result.refNum });
+    res.json({ success: true, sandbox, processor: gw ? daf.label(gw) : 'Sola', donation, transaction_id: result.refNum });
   } catch(e) {
     console.error('daf-grant:', e.message);
     res.status(500).json({ error: e.message });
